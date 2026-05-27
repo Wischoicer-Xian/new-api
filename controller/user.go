@@ -311,32 +311,58 @@ func GenerateAccessToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	// get rand int 28-32
-	randI := common.GetRandomInt(4)
-	key, err := common.GenerateRandomKey(29 + randI)
+	key, err := generateAndSetAccessToken(user)
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgGenerateFailed)
 		common.SysLog("failed to generate key: " + err.Error())
 		return
 	}
-	user.SetAccessToken(key)
-
-	if model.DB.Where("access_token = ?", user.AccessToken).First(user).RowsAffected != 0 {
-		common.ApiErrorI18n(c, i18n.MsgUuidDuplicate)
-		return
-	}
-
-	if err := user.Update(false); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    user.AccessToken,
+		"data":    key,
 	})
-	return
+}
+
+// AdminGenerateAccessToken allows admin to generate access_token for any user.
+func AdminGenerateAccessToken(c *gin.Context) {
+	userId, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, fmt.Errorf("invalid user id"))
+		return
+	}
+	user, err := model.GetUserById(userId, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	key, err := generateAndSetAccessToken(user)
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgGenerateFailed)
+		common.SysLog(fmt.Sprintf("failed to generate admin key for user %d: %s", userId, err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    key,
+	})
+}
+
+func generateAndSetAccessToken(user *model.User) (string, error) {
+	randI := common.GetRandomInt(4)
+	key, err := common.GenerateRandomKey(29 + randI)
+	if err != nil {
+		return "", err
+	}
+	user.SetAccessToken(key)
+	if model.DB.Where("access_token = ?", user.AccessToken).First(&model.User{}).RowsAffected != 0 {
+		return "", fmt.Errorf("duplicate access token")
+	}
+	if err := user.Update(false); err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 type TransferAffQuotaRequest struct {
