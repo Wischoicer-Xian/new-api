@@ -27,7 +27,14 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 		return nil
 	}
 
+	// Patch top-level model to caller model for raw passthrough path
 	if !forceFormat && !thinkToContent {
+		callerModel := relaycommon.GetCallerModelName(c, info)
+		patched, changed, err := relaycommon.PatchTopLevelModelRaw(common.StringToByteSlice(data), callerModel)
+		if err == nil && changed {
+			relaycommon.MarkResponseBodyRewritten(c)
+			return helper.StringData(c, string(patched))
+		}
 		return helper.StringData(c, data)
 	}
 
@@ -111,7 +118,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	defer service.CloseResponseBodyGracefully(resp)
 
-	model := info.UpstreamModelName
+	model := relaycommon.GetCallerModelName(c, info)
 	var responseId string
 	var createAt int64 = 0
 	var systemFingerprint string
@@ -119,12 +126,13 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var responseTextBuilder strings.Builder
 	var toolCount int
 	var usage = &dto.Usage{}
-	var streamItems []string // store stream items
 	var lastStreamData string
 	var secondLastStreamData string // 存储倒数第二个stream data，用于音频模型
 
-	// 检查是否为音频模型
-	isAudioModel := strings.Contains(strings.ToLower(model), "audio")
+	// Audio model detection uses upstream model name, not caller model.
+	// When model mapping is active the caller name may not contain "audio"
+	// even though the upstream model is an audio model.
+	isAudioModel := strings.Contains(strings.ToLower(info.UpstreamModelName), "audio")
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
@@ -140,7 +148,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 
 			lastStreamData = data
-			streamItems = append(streamItems, data)
+			if err := processTokenData(info.RelayMode, data, &responseTextBuilder, &toolCount); err != nil {
+				logger.LogError(c, "error processing stream token data: "+err.Error())
+				sr.Error(err)
+			}
 		}
 	})
 
@@ -155,9 +166,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			containStreamUsage = true
 
 			if common.DebugEnabled {
-				logger.LogDebug(c, fmt.Sprintf("Audio model usage extracted from second last SSE: PromptTokens=%d, CompletionTokens=%d, TotalTokens=%d, InputTokens=%d, OutputTokens=%d",
+				logger.LogDebug(c, "Audio model usage extracted from second last SSE: PromptTokens=%d, CompletionTokens=%d, TotalTokens=%d, InputTokens=%d, OutputTokens=%d",
 					usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
-					usage.InputTokens, usage.OutputTokens))
+					usage.InputTokens, usage.OutputTokens)
 			}
 		}
 	}
@@ -173,11 +184,6 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		if shouldSendLastResp {
 			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
 		}
-	}
-
-	// 处理token计算
-	if err := processTokens(info.RelayMode, streamItems, &responseTextBuilder, &toolCount); err != nil {
-		logger.LogError(c, "error processing tokens: "+err.Error())
 	}
 
 	if !containStreamUsage {
@@ -200,9 +206,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	if common.DebugEnabled {
-		println("upstream response body:", string(responseBody))
-	}
+	logger.LogDebug(c, "upstream response body: %s", responseBody)
 	// Unmarshal to simpleResponse
 	if info.ChannelType == constant.ChannelTypeOpenRouter && info.ChannelOtherSettings.IsOpenRouterEnterprise() {
 		// 尝试解析为 openrouter enterprise
@@ -292,6 +296,15 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 		}
 		responseBody = geminiRespStr
+	}
+
+	callerModel := relaycommon.GetCallerModelName(c, info)
+	if callerModel != "" {
+		patched, changed, err := relaycommon.PatchTopLevelModelRaw(responseBody, callerModel)
+		if err == nil && changed {
+			relaycommon.MarkResponseBodyRewritten(c)
+			responseBody = patched
+		}
 	}
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)

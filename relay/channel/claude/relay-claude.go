@@ -434,24 +434,23 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 	return &claudeRequest, nil
 }
 
-func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCompletionsStreamResponse {
+func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse, callerModel string) *dto.ChatCompletionsStreamResponse {
 	var response dto.ChatCompletionsStreamResponse
 	response.Object = "chat.completion.chunk"
-	response.Model = claudeResponse.Model
+	response.Model = callerModel
+	if response.Model == "" {
+		response.Model = claudeResponse.Model
+	}
 	response.Choices = make([]dto.ChatCompletionsStreamResponseChoice, 0)
 	tools := make([]dto.ToolCallResponse, 0)
 	fcIdx := 0
 	if claudeResponse.Index != nil {
-		fcIdx = *claudeResponse.Index - 1
-		if fcIdx < 0 {
-			fcIdx = 0
-		}
+		fcIdx = *claudeResponse.Index
 	}
 	var choice dto.ChatCompletionsStreamResponseChoice
 	if claudeResponse.Type == "message_start" {
 		if claudeResponse.Message != nil {
 			response.Id = claudeResponse.Message.Id
-			response.Model = claudeResponse.Message.Model
 		}
 		//claudeUsage = &claudeResponse.Message.Usage
 		choice.Delta.SetContentString("")
@@ -518,7 +517,7 @@ func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCo
 	return &response
 }
 
-func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextResponse {
+func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse, callerModel string) *dto.OpenAITextResponse {
 	choices := make([]dto.OpenAITextResponseChoice, 0)
 	fullTextResponse := dto.OpenAITextResponse{
 		Id:      fmt.Sprintf("chatcmpl-%s", common.GetUUID()),
@@ -575,7 +574,11 @@ func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextRe
 	if thinkingContent != "" {
 		choice.Message.ReasoningContent = &thinkingContent
 	}
-	fullTextResponse.Model = claudeResponse.Model
+	model := callerModel
+	if model == "" {
+		model = claudeResponse.Model
+	}
+	fullTextResponse.Model = model
 	choices = append(choices, choice)
 	fullTextResponse.Choices = choices
 	return &fullTextResponse
@@ -778,7 +781,10 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	if oaiResponse != nil {
 		oaiResponse.Id = claudeInfo.ResponseId
 		oaiResponse.Created = claudeInfo.Created
-		oaiResponse.Model = claudeInfo.Model
+		// Preserve caller model: only set model from claudeInfo if oaiResponse doesn't have one
+		if oaiResponse.Model == "" {
+			oaiResponse.Model = claudeInfo.Model
+		}
 	}
 	return true
 }
@@ -816,7 +822,8 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		}
 		helper.ClaudeChunkData(c, claudeResponse, data)
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
-		response := StreamResponseClaude2OpenAI(&claudeResponse)
+		callerModel := relaycommon.GetCallerModelName(c, info)
+		response := StreamResponseClaude2OpenAI(&claudeResponse, callerModel)
 
 		if !FormatClaudeResponseInfo(&claudeResponse, response, claudeInfo) {
 			return nil
@@ -858,7 +865,8 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
 		if info.ShouldIncludeUsage {
 			openAIUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
-			response := helper.GenerateFinalUsageResponse(claudeInfo.ResponseId, claudeInfo.Created, info.UpstreamModelName, openAIUsage)
+			callerModel := relaycommon.GetCallerModelName(c, info)
+			response := helper.GenerateFinalUsageResponse(claudeInfo.ResponseId, claudeInfo.Created, callerModel, openAIUsage)
 			err := helper.ObjectData(c, response)
 			if err != nil {
 				common.SysLog("send final response failed: " + err.Error())
@@ -917,7 +925,8 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	var responseData []byte
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
-		openaiResponse := ResponseClaude2OpenAI(&claudeResponse)
+		callerModel := relaycommon.GetCallerModelName(c, info)
+		openaiResponse := ResponseClaude2OpenAI(&claudeResponse, callerModel)
 		openaiResponse.Usage = buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
 		responseData, err = json.Marshal(openaiResponse)
 		if err != nil {
@@ -949,9 +958,7 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	if common.DebugEnabled {
-		println("responseBody: ", string(responseBody))
-	}
+	logger.LogDebug(c, "responseBody: %s", responseBody)
 	handleErr := HandleClaudeResponseData(c, info, claudeInfo, resp, responseBody)
 	if handleErr != nil {
 		return nil, handleErr

@@ -62,7 +62,7 @@ export function UpdateCheckerSection({
     setChecking(true)
     try {
       const response = await fetch(
-        'https://api.github.com/repos/Calcium-Ion/new-api/releases/latest',
+        'https://api.github.com/repos/QuantumNous/new-api/releases/latest',
         {
           headers: {
             Accept: 'application/vnd.github+json',
@@ -72,7 +72,13 @@ export function UpdateCheckerSection({
       )
 
       if (!response.ok) {
-        throw new Error(t('Failed to contact GitHub releases API'))
+        throw new Error(
+          response.status === 404
+            ? t('No release found for this repository yet.')
+            : t('Failed to contact GitHub releases API ({{status}})', {
+                status: response.status,
+              }),
+        )
       }
 
       const data = (await response.json()) as ReleaseInfo
@@ -110,10 +116,7 @@ export function UpdateCheckerSection({
 
   return (
     <>
-      <SettingsSection
-        title={t('System maintenance')}
-        description={t('Review current version and fetch release notes.')}
-      >
+      <SettingsSection title={t('System maintenance')}>
         <div className='space-y-6'>
           <div className='grid gap-4 md:grid-cols-2'>
             <div className='rounded-lg border p-4'>
