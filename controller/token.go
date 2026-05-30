@@ -351,6 +351,20 @@ func AdminCreateToken(c *gin.Context) {
 		})
 		return
 	}
+	// Check max token limit for target user
+	maxTokens := operation_setting.GetMaxUserTokens()
+	tokenCount, err := model.CountUserTokens(req.UserId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if int(tokenCount) >= maxTokens {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("target user has reached max token limit (%d)", maxTokens),
+		})
+		return
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)

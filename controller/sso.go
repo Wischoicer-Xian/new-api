@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -10,12 +11,17 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// SsoLogin accepts an access_token query parameter, validates it,
-// creates a session for the user, and redirects to the specified URL.
+type SsoLoginRequest struct {
+	AccessToken string `json:"access_token" binding:"required"`
+	Redirect    string `json:"redirect"`
+}
+
+// SsoLogin accepts access_token via POST JSON body (not URL),
+// validates it, creates a session, and redirects to a same-origin path.
 // This enables seamless SSO from Wischoicer workstation to new-api.
 func SsoLogin(c *gin.Context) {
-	accessToken := c.Query("access_token")
-	if accessToken == "" {
+	var req SsoLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
 			"message": "access_token is required",
@@ -23,12 +29,17 @@ func SsoLogin(c *gin.Context) {
 		return
 	}
 
-	redirectURL := c.Query("redirect")
-	if redirectURL == "" {
-		redirectURL = "/"
+	// Validate redirect: only allow relative paths starting with '/'
+	// Block absolute URLs, protocol-relative URLs, and external domains
+	redirectPath := "/"
+	if req.Redirect != "" {
+		cleaned := strings.TrimSpace(req.Redirect)
+		if strings.HasPrefix(cleaned, "/") && !strings.HasPrefix(cleaned, "//") {
+			redirectPath = cleaned
+		}
 	}
 
-	user, err := model.ValidateAccessToken(accessToken)
+	user, err := model.ValidateAccessToken(req.AccessToken)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
@@ -67,5 +78,5 @@ func SsoLogin(c *gin.Context) {
 	}
 
 	model.UpdateUserLastLoginAt(user.Id)
-	c.Redirect(http.StatusFound, redirectURL)
+	c.Redirect(http.StatusFound, redirectPath)
 }

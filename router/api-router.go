@@ -63,7 +63,7 @@ func SetApiRouter(router *gin.Engine) {
 		// Universal secure verification routes
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
 			// SSO endpoint for Wischoicer workstation cross-platform login
-			apiRouter.GET("/sso/login", controller.SsoLogin)
+			apiRouter.POST("/sso/login", middleware.CriticalRateLimit(), controller.SsoLogin)
 
 
 		userRoute := apiRouter.Group("/user")
