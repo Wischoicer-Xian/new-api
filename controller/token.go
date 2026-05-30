@@ -312,6 +312,81 @@ func UpdateToken(c *gin.Context) {
 	})
 }
 
+// AdminCreateToken allows admin to create a token for a specified user.
+// Returns the full key (unmasked) for the caller to store.
+func AdminCreateToken(c *gin.Context) {
+	var req struct {
+		UserId             int     `json:"user_id" binding:"required"`
+		Name               string  `json:"name"`
+		Group              string  `json:"group"`
+		RemainQuota        int     `json:"remain_quota"`
+		UnlimitedQuota     bool    `json:"unlimited_quota"`
+		ExpiredTime        int64   `json:"expired_time"`
+		ModelLimitsEnabled bool    `json:"model_limits_enabled"`
+		ModelLimits        string  `json:"model_limits"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if req.Name == "" {
+		req.Name = "系统令牌"
+	}
+	if len(req.Name) > 50 {
+		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
+		return
+	}
+	// Verify target user exists
+	targetUser, err := model.GetUserById(req.UserId, false)
+	if err != nil {
+		common.ApiError(c, fmt.Errorf("user not found: %w", err))
+		return
+	}
+	// Enforce role hierarchy: admin cannot create tokens for users with equal or higher role
+	myRole := c.GetInt("role")
+	if myRole != common.RoleRootUser && myRole <= targetUser.Role {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "cannot create token for user with equal or higher role",
+		})
+		return
+	}
+	key, err := common.GenerateKey()
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
+		common.SysLog("failed to generate token key: " + err.Error())
+		return
+	}
+	cleanToken := model.Token{
+		UserId:             req.UserId,
+		Name:               req.Name,
+		Key:                key,
+		CreatedTime:        common.GetTimestamp(),
+		AccessedTime:       common.GetTimestamp(),
+		ExpiredTime:        req.ExpiredTime,
+		RemainQuota:        req.RemainQuota,
+		UnlimitedQuota:     req.UnlimitedQuota,
+		ModelLimitsEnabled: req.ModelLimitsEnabled,
+		ModelLimits:        req.ModelLimits,
+		Group:              req.Group,
+	}
+	if err = cleanToken.Insert(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"id":     cleanToken.Id,
+			"key":    cleanToken.GetFullKey(),
+			"name":   cleanToken.Name,
+			"group":  cleanToken.Group,
+			"status": cleanToken.Status,
+		},
+	})
+}
+
 type TokenBatch struct {
 	Ids []int `json:"ids"`
 }

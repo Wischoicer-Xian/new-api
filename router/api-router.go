@@ -62,6 +62,9 @@ func SetApiRouter(router *gin.Engine) {
 
 		// Universal secure verification routes
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
+			// SSO endpoint for Wischoicer workstation cross-platform login
+			apiRouter.GET("/sso/login", controller.SsoLogin)
+
 
 		userRoute := apiRouter.Group("/user")
 		{
@@ -281,6 +284,13 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.POST("/batch", controller.DeleteTokenBatch)
 			tokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
 		}
+
+			// Admin token routes (admin creates tokens for any user)
+			tokenAdminRoute := apiRouter.Group("/token/admin")
+			tokenAdminRoute.Use(middleware.AdminAuth())
+			{
+				tokenAdminRoute.POST("/", controller.AdminCreateToken)
+			}
 
 		usageRoute := apiRouter.Group("/usage")
 		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
