@@ -26,9 +26,9 @@ import ThemeToggle from './ThemeToggle';
 import LanguageSelector from './LanguageSelector';
 import UserArea from './UserArea';
 
-/** Get Wischoicer console URL from env or fallback */
+/** Get Wischoicer workstation console URL */
 function getConsoleUrl() {
-  const base = import.meta.env.VITE_WISCHOICER_OFFICIAL_URL || 'https://wischoicer.com';
+  const base = import.meta.env.VITE_WISCHOICER_WORKSTATION_URL || window.location.origin;
   return `${base.replace(/\/+$/, '')}/console`;
 }
 

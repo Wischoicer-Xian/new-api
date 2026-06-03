@@ -38,8 +38,8 @@ export default defineConfig(({ envMode }) => {
         'import.meta.env.VITE_REACT_APP_SERVER_URL': JSON.stringify(
           clientServerUrl,
         ),
-        'import.meta.env.VITE_WISCHOICER_OFFICIAL_URL': JSON.stringify(
-          process.env.VITE_WISCHOICER_OFFICIAL_URL || 'https://wischoicer.com',
+        'import.meta.env.VITE_WISCHOICER_WORKSTATION_URL': JSON.stringify(
+          process.env.VITE_WISCHOICER_WORKSTATION_URL || 'https://workstation.wischoicer.com',
         ),
       },
     },

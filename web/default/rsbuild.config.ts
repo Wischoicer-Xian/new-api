@@ -55,8 +55,8 @@ export default defineConfig(({ envMode }) => {
         index: './src/main.tsx',
       },
       define: {
-        'import.meta.env.VITE_WISCHOICER_OFFICIAL_URL': JSON.stringify(
-          process.env.VITE_WISCHOICER_OFFICIAL_URL || 'https://wischoicer.com',
+        'import.meta.env.VITE_WISCHOICER_WORKSTATION_URL': JSON.stringify(
+          process.env.VITE_WISCHOICER_WORKSTATION_URL || 'https://workstation.wischoicer.com',
         ),
       },
     },
