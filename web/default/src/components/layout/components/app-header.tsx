@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { LayoutDashboard } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { useNotifications } from '@/hooks/use-notifications'
 import { useTopNavLinks } from '@/hooks/use-top-nav-links'
 import { ConfigDrawer } from '@/components/config-drawer'
@@ -23,11 +25,18 @@ import { LanguageSwitcher } from '@/components/language-switcher'
 import { NotificationPopover } from '@/components/notification-popover'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { Search } from '@/components/search'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { defaultTopNavLinks } from '../config/top-nav.config'
 import { type TopNavLink } from '../types'
 import { Header } from './header'
 import { SystemBrand } from './system-brand'
 import { TopNav } from './top-nav'
+
+/** Get Wischoicer console URL from env or fallback */
+function getConsoleUrl(): string {
+  const base = import.meta.env.VITE_WISCHOICER_OFFICIAL_URL || 'https://wischoicer.com'
+  return `${base.replace(/\/+$/, '')}/console`
+}
 
 /**
  * General application Header component
@@ -120,6 +129,21 @@ export function AppHeader({
 
         {rightContent ?? (
           <div className='ms-auto flex items-center gap-1 sm:gap-2'>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant='ghost'
+                    size='icon'
+                    className='size-7'
+                    onClick={() => window.open(getConsoleUrl(), '_blank', 'noopener,noreferrer')}
+                  >
+                    <LayoutDashboard className='size-4' />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>控制台</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             {showTopNav && (
               <div className='me-1 hidden lg:block'>
                 <TopNav links={links} />
