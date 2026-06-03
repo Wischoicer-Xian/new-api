@@ -129,6 +129,11 @@ export function AppHeader({
 
         {rightContent ?? (
           <div className='ms-auto flex items-center gap-1 sm:gap-2'>
+            {showTopNav && (
+              <div className='me-1 hidden lg:block'>
+                <TopNav links={links} />
+              </div>
+            )}
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -144,11 +149,6 @@ export function AppHeader({
                 <TooltipContent>控制台</TooltipContent>
               </Tooltip>
             </TooltipProvider>
-            {showTopNav && (
-              <div className='me-1 hidden lg:block'>
-                <TopNav links={links} />
-              </div>
-            )}
             {showSearch && <Search />}
             {showNotifications && (
               <NotificationPopover
