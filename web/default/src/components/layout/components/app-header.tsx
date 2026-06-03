@@ -32,9 +32,11 @@ import { Header } from './header'
 import { SystemBrand } from './system-brand'
 import { TopNav } from './top-nav'
 
-/** Get Wischoicer console URL from env or fallback */
+/** Get Wischoicer workstation console URL */
 function getConsoleUrl(): string {
-  const base = import.meta.env.VITE_WISCHOICER_OFFICIAL_URL || 'https://wischoicer.com'
+  // Console lives in the workstation app at /console
+  // Use env var for base URL, fallback to same origin
+  const base = import.meta.env.VITE_WISCHOICER_WORKSTATION_URL || window.location.origin
   return `${base.replace(/\/+$/, '')}/console`
 }
 
