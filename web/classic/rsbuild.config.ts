@@ -60,6 +60,7 @@ export default defineConfig(({ envMode }) => {
     output: {
       minify: isProd,
       target: 'web',
+      assetPrefix: './',
       distPath: {
         root: 'dist',
       },
