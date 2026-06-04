@@ -12,21 +12,36 @@ import (
 )
 
 type SsoLoginRequest struct {
-	AccessToken string `json:"access_token" binding:"required"`
-	Redirect    string `json:"redirect"`
+	AccessToken string `json:"access_token" form:"access_token" binding:"required"`
+	Redirect    string `json:"redirect" form:"redirect"`
 }
 
-// SsoLogin accepts access_token via POST JSON body (not URL),
+// SsoLogin accepts access_token via POST JSON body or form data,
 // validates it, creates a session, and redirects to a same-origin path.
 // This enables seamless SSO from Wischoicer workstation to new-api.
+// Supports both JSON (for fetch/XHR) and form POST (for cross-origin <form> submit).
 func SsoLogin(c *gin.Context) {
 	var req SsoLoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"message": "access_token is required",
-		})
-		return
+	contentType := c.GetHeader("Content-Type")
+	if strings.HasPrefix(contentType, "application/json") {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "access_token is required",
+			})
+			return
+		}
+	} else {
+		// Form POST (application/x-www-form-urlencoded or multipart)
+		req.AccessToken = c.PostForm("access_token")
+		req.Redirect = c.PostForm("redirect")
+		if req.AccessToken == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "access_token is required",
+			})
+			return
+		}
 	}
 
 	// Validate redirect: only allow relative paths starting with '/'
