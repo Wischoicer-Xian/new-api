@@ -28,30 +28,31 @@ export const Route = createFileRoute('/_authenticated')({
   beforeLoad: async ({ location }) => {
     const { auth } = useAuthStore.getState()
 
-    // 如果本地没有用户信息，直接跳转登录页
-    if (!auth.user) {
-      throw redirect({
-        to: '/sign-in',
-        search: { redirect: location.href },
-      })
+    // If local user exists and session already verified, proceed immediately
+    if (auth.user && sessionVerified) {
+      return
     }
 
-    // 本地有用户信息，但需要验证 session 是否有效（每个会话只验证一次）
+    // Try to verify session via API.
+    // This handles both:
+    //   - Existing users who need periodic session re-validation
+    //   - SSO login where server session exists but local auth state is empty
+    //     (e.g., after POST /api/sso/login set the session cookie)
     if (!sessionVerified) {
       const res = await getSelf().catch(() => null)
       if (res?.success && res.data) {
-        // 验证成功，更新用户信息（可能有变化）
         auth.setUser(res.data)
         sessionVerified = true
-      } else {
-        // 验证失败或 API 调用失败，清除本地缓存并跳转登录页
-        auth.reset()
-        throw redirect({
-          to: '/sign-in',
-          search: { redirect: location.href },
-        })
+        return
       }
     }
+
+    // No valid session found, redirect to login
+    auth.reset()
+    throw redirect({
+      to: '/sign-in',
+      search: { redirect: location.href },
+    })
   },
   component: AuthenticatedLayout,
 })

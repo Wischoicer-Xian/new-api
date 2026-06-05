@@ -35,8 +35,17 @@ export type ApiRequestConfig = AxiosRequestConfig
 // Axios Instance Configuration
 // ============================================================================
 
-// Base URL: empty string for same-origin API requests
-const baseURL = ''
+// Base URL: detect proxy path at runtime.
+// When served behind the /token-platform-fe/ nginx proxy, API calls must include
+// the prefix so they route through the proxy chain to new-api.
+// When accessed directly (e.g. http://host:18083), no prefix is needed.
+const getBaseURL = (): string => {
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/token-platform-fe')) {
+    return '/token-platform-fe'
+  }
+  return ''
+}
+const baseURL = getBaseURL()
 
 // Create axios instance with default config
 export const api = axios.create({
