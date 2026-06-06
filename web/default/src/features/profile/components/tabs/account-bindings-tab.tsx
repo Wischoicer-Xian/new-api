@@ -115,9 +115,7 @@ export function AccountBindingsTab({
   }
 
   const handleBindCustomOAuth = (provider: { id: string; name: string }) => {
-    const bp = withBasepath('')
-    const base = bp ? `${window.location.origin}${bp}` : window.location.origin
-    const redirectUrl = `${base}/oauth/${provider.id}?bind=true`
+    const redirectUrl = `${window.location.origin}${withBasepath(`/oauth/${provider.id}?bind=true`)}`
     window.location.href = withBasepath(`/api/oauth/${provider.id}?redirect=${encodeURIComponent(redirectUrl)}`)
   }
 
