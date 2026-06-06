@@ -25,8 +25,9 @@ func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark st
 	listLength, err := rdb.LLen(ctx, key).Result()
 	if err != nil {
 		fmt.Println(err.Error())
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		// Fail open: if Redis is unavailable, allow the request through
+		// rather than returning 500 to every user.
+		c.Next()
 		return
 	}
 	if listLength < int64(maxRequestNum) {
@@ -37,16 +38,14 @@ func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark st
 		oldTime, err := time.Parse(timeFormat, oldTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			c.Next()
 			return
 		}
 		nowTimeStr := time.Now().Format(timeFormat)
 		nowTime, err := time.Parse(timeFormat, nowTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			c.Next()
 			return
 		}
 		// time.Since will return negative number!
@@ -158,8 +157,7 @@ func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key
 	listLength, err := rdb.LLen(ctx, key).Result()
 	if err != nil {
 		fmt.Println(err.Error())
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		c.Next()
 		return
 	}
 	if listLength < int64(maxRequestNum) {
@@ -170,16 +168,14 @@ func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key
 		oldTime, err := time.Parse(timeFormat, oldTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			c.Next()
 			return
 		}
 		nowTimeStr := time.Now().Format(timeFormat)
 		nowTime, err := time.Parse(timeFormat, nowTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			c.Next()
 			return
 		}
 		if int64(nowTime.Sub(oldTime).Seconds()) < duration {

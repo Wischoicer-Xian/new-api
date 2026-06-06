@@ -12,6 +12,16 @@ import (
 )
 
 func SetApiRouter(router *gin.Engine) {
+	// SSO endpoint sits outside the rate-limited group to avoid blocking
+	// cross-platform login. Access is already gated by a server-generated
+	// access_token, so rate-limiting is unnecessary and causes browser blank pages.
+	ssoRouter := router.Group("/api")
+	ssoRouter.Use(middleware.RouteTag("api"))
+	ssoRouter.Use(gzip.Gzip(gzip.DefaultCompression))
+	ssoRouter.Use(middleware.BodyStorageCleanup())
+	ssoRouter.Use(middleware.AnonymousRequestBodyLimit())
+	ssoRouter.POST("/sso/login", controller.SsoLogin)
+
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
 	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))
@@ -63,8 +73,6 @@ func SetApiRouter(router *gin.Engine) {
 
 		// Universal secure verification routes
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
-			// SSO endpoint for Wischoicer workstation cross-platform login
-			apiRouter.POST("/sso/login", middleware.CriticalRateLimit(), controller.SsoLogin)
 
 
 		userRoute := apiRouter.Group("/user")
