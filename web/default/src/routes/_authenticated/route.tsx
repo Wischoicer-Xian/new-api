@@ -20,6 +20,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useAuthStore } from '@/stores/auth-store'
 import { getSelf } from '@/lib/api'
 import { AuthenticatedLayout } from '@/components/layout'
+import { saveUserId } from '@/features/auth/lib/storage'
 
 // 内存中的验证标记，避免同一会话中重复验证
 let sessionVerified = false
@@ -42,6 +43,12 @@ export const Route = createFileRoute('/_authenticated')({
       const res = await getSelf().catch(() => null)
       if (res?.success && res.data) {
         auth.setUser(res.data)
+        // Persist user ID so the API interceptor can send New-Api-User header.
+        // This is needed for both SSO (where localStorage is empty on arrival)
+        // and normal login (where it may have been cleared by a page refresh).
+        if (res.data.id != null) {
+          saveUserId(res.data.id)
+        }
         sessionVerified = true
         return
       }
