@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { withBasepath } from '@/lib/basepath'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import type { SystemStatus } from '../types'
@@ -68,7 +69,7 @@ export function LegalConsent({
           {t('I have read and agree to the')}{' '}
           {hasUserAgreement && (
             <a
-              href='/user-agreement'
+              href={withBasepath('/user-agreement')}
               target='_blank'
               rel='noopener noreferrer'
               className='text-primary hover:underline'
@@ -79,7 +80,7 @@ export function LegalConsent({
           {hasUserAgreement && hasPrivacyPolicy && ' and the '}
           {hasPrivacyPolicy && (
             <a
-              href='/privacy-policy'
+              href={withBasepath('/privacy-policy')}
               target='_blank'
               rel='noopener noreferrer'
               className='text-primary hover:underline'
