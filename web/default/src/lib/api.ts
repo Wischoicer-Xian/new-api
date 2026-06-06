@@ -20,6 +20,7 @@ import axios, { type AxiosRequestConfig } from 'axios'
 import { t } from 'i18next'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/auth-store'
+import { getBasepath } from '@/lib/basepath'
 
 declare module 'axios' {
   export interface AxiosRequestConfig {
@@ -35,17 +36,10 @@ export type ApiRequestConfig = AxiosRequestConfig
 // Axios Instance Configuration
 // ============================================================================
 
-// Base URL: detect proxy path at runtime.
-// When served behind the /token-platform-fe/ nginx proxy, API calls must include
-// the prefix so they route through the proxy chain to new-api.
-// When accessed directly (e.g. http://host:18083), no prefix is needed.
-const getBaseURL = (): string => {
-  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/token-platform-fe')) {
-    return '/token-platform-fe'
-  }
-  return ''
-}
-const baseURL = getBaseURL()
+// Base URL: detect proxy path at runtime via shared basepath utility.
+// Supports /token-platform-fe (workstation proxy), /token-platform (direct
+// nginx proxy), and empty string (direct Go server access).
+const baseURL = getBasepath()
 
 // Create axios instance with default config
 export const api = axios.create({

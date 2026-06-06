@@ -96,15 +96,10 @@ const queryClient = new QueryClient({
   }),
 })
 
-// Detect nginx proxy base path at runtime (same logic as api.ts getBaseURL).
-// When served behind /token-platform-fe/ nginx proxy, TanStack Router needs
-// basepath so that URL /token-platform-fe/keys matches route /keys.
-const getBasepath = (): string => {
-  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/token-platform-fe')) {
-    return '/token-platform-fe'
-  }
-  return ''
-}
+// Detect nginx proxy base path at runtime (shared logic in lib/basepath.ts).
+// Supports /token-platform-fe (workstation proxy), /token-platform (direct
+// nginx proxy), and empty string (direct Go server access).
+import { getBasepath } from '@/lib/basepath'
 
 // Create a new router instance
 const router = createRouter({
@@ -112,7 +107,7 @@ const router = createRouter({
   context: { queryClient },
   defaultPreload: 'intent',
   defaultPreloadStaleTime: 0,
-  basepath: getBasepath(),
+  basepath: getBasepath(), // auto-detects /token-platform-fe, /token-platform, or ''
 })
 
 // Register the router instance for type safety

@@ -28,6 +28,7 @@ import {
   handleDiscordOAuth,
   handleLinuxDOOAuth,
 } from '@/lib/oauth'
+import { withBasepath } from '@/lib/basepath'
 import { useDialogs } from '@/hooks/use-dialog'
 import { useStatus } from '@/hooks/use-status'
 import { Button } from '@/components/ui/button'
@@ -114,8 +115,10 @@ export function AccountBindingsTab({
   }
 
   const handleBindCustomOAuth = (provider: { id: string; name: string }) => {
-    const redirectUrl = `${window.location.origin}/oauth/${provider.id}?bind=true`
-    window.location.href = `/api/oauth/${provider.id}?redirect=${encodeURIComponent(redirectUrl)}`
+    const bp = withBasepath('')
+    const base = bp ? `${window.location.origin}${bp}` : window.location.origin
+    const redirectUrl = `${base}/oauth/${provider.id}?bind=true`
+    window.location.href = withBasepath(`/api/oauth/${provider.id}?redirect=${encodeURIComponent(redirectUrl)}`)
   }
 
   useEffect(() => {

@@ -28,6 +28,7 @@ import i18next from 'i18next'
 import { toast } from 'sonner'
 import { useAuthStore, type AuthUser } from '@/stores/auth-store'
 import { api, getSelf } from '@/lib/api'
+import { withBasepath } from '@/lib/basepath'
 import { OAuthCallbackScreen } from '@/features/auth/components/oauth-callback-screen'
 import { OAUTH_BIND_STORAGE_KEY } from '@/features/auth/constants'
 
@@ -71,7 +72,7 @@ function OAuthCallback() {
               currentPath !== normalizedTarget &&
               currentPath !== `${normalizedTarget}/`
             ) {
-              window.location.replace(target)
+              window.location.replace(withBasepath(target))
             }
           }, 100)
         }
@@ -111,7 +112,7 @@ function OAuthCallback() {
         window.close()
         setTimeout(() => {
           if (!window.closed) {
-            window.location.replace('/_authenticated/profile/')
+            window.location.replace(withBasepath('/_authenticated/profile/'))
           }
         }, 200)
       }
