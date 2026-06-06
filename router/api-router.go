@@ -20,7 +20,7 @@ func SetApiRouter(router *gin.Engine) {
 	ssoRouter.Use(gzip.Gzip(gzip.DefaultCompression))
 	ssoRouter.Use(middleware.BodyStorageCleanup())
 	ssoRouter.Use(middleware.AnonymousRequestBodyLimit())
-	ssoRouter.POST("/sso/login", controller.SsoLogin)
+	ssoRouter.POST("/sso/login", middleware.SsoRateLimit(), controller.SsoLogin)
 
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
