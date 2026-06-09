@@ -37,6 +37,12 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
+	// Zhipu CogView does not accept DALL-E quality values ("standard", "hd").
+	// Clear unsupported values so the omitempty tag omits the field entirely.
+	switch request.Quality {
+	case "standard", "hd":
+		request.Quality = ""
+	}
 	return request, nil
 }
 
