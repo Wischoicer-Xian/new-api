@@ -74,6 +74,13 @@ func GetToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if token.Hidden {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "令牌不存在",
+		})
+		return
+	}
 	common.ApiSuccess(c, buildMaskedTokenResponse(token))
 }
 
@@ -87,6 +94,13 @@ func GetTokenKey(c *gin.Context) {
 	token, err := model.GetTokenByIds(id, userId)
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+	if token.Hidden {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "令牌不存在",
+		})
 		return
 	}
 	common.ApiSuccess(c, gin.H{
@@ -324,6 +338,7 @@ func AdminCreateToken(c *gin.Context) {
 		ExpiredTime        int64   `json:"expired_time"`
 		ModelLimitsEnabled bool    `json:"model_limits_enabled"`
 		ModelLimits        string  `json:"model_limits"`
+		Hidden             bool    `json:"hidden"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
@@ -383,6 +398,7 @@ func AdminCreateToken(c *gin.Context) {
 		ModelLimitsEnabled: req.ModelLimitsEnabled,
 		ModelLimits:        req.ModelLimits,
 		Group:              req.Group,
+		Hidden:             req.Hidden,
 	}
 	if err = cleanToken.Insert(); err != nil {
 		common.ApiError(c, err)
@@ -398,6 +414,95 @@ func AdminCreateToken(c *gin.Context) {
 			"group":  cleanToken.Group,
 			"status": cleanToken.Status,
 		},
+	})
+}
+
+// AdminUpdateToken allows admin to update any token by id.
+// Supports all mutable fields including the hidden flag.
+func AdminUpdateToken(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	// Fetch token without userId constraint (admin can touch any token)
+	token, err := model.GetTokenById(id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	var req struct {
+		Name               *string  `json:"name"`
+		Status             *int     `json:"status"`
+		ExpiredTime        *int64   `json:"expired_time"`
+		RemainQuota        *int     `json:"remain_quota"`
+		UnlimitedQuota     *bool    `json:"unlimited_quota"`
+		ModelLimitsEnabled *bool    `json:"model_limits_enabled"`
+		ModelLimits        *string  `json:"model_limits"`
+		AllowIps           *string  `json:"allow_ips"`
+		Group              *string  `json:"group"`
+		CrossGroupRetry    *bool    `json:"cross_group_retry"`
+		Hidden             *bool    `json:"hidden"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	// Apply non-nil fields
+	if req.Name != nil {
+		if len(*req.Name) > 50 {
+			common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
+			return
+		}
+		token.Name = *req.Name
+	}
+	if req.Status != nil {
+		token.Status = *req.Status
+	}
+	if req.ExpiredTime != nil {
+		token.ExpiredTime = *req.ExpiredTime
+	}
+	if req.RemainQuota != nil {
+		if *req.RemainQuota < 0 {
+			common.ApiErrorI18n(c, i18n.MsgTokenQuotaNegative)
+			return
+		}
+		token.RemainQuota = *req.RemainQuota
+	}
+	if req.UnlimitedQuota != nil {
+		token.UnlimitedQuota = *req.UnlimitedQuota
+	}
+	if req.ModelLimitsEnabled != nil {
+		token.ModelLimitsEnabled = *req.ModelLimitsEnabled
+	}
+	if req.ModelLimits != nil {
+		token.ModelLimits = *req.ModelLimits
+	}
+	if req.AllowIps != nil {
+		token.AllowIps = req.AllowIps
+	}
+	if req.Group != nil {
+		token.Group = *req.Group
+	}
+	if req.CrossGroupRetry != nil {
+		token.CrossGroupRetry = *req.CrossGroupRetry
+	}
+	if req.Hidden != nil {
+		token.Hidden = *req.Hidden
+	}
+
+	if err := token.Update(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    buildMaskedTokenResponse(token),
 	})
 }
 
@@ -442,7 +547,9 @@ func GetTokenKeysBatch(c *gin.Context) {
 	}
 	keysMap := make(map[int]string)
 	for _, t := range tokens {
-		keysMap[t.Id] = t.GetFullKey()
+		if !t.Hidden {
+			keysMap[t.Id] = t.GetFullKey()
+		}
 	}
 	common.ApiSuccess(c, gin.H{"keys": keysMap})
 }
