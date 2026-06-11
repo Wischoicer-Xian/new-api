@@ -294,11 +294,12 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
 		}
 
-			// Admin token routes (admin creates tokens for any user)
+			// Admin token routes (admin creates/updates tokens for any user)
 			tokenAdminRoute := apiRouter.Group("/token/admin")
 			tokenAdminRoute.Use(middleware.AdminAuth())
 			{
 				tokenAdminRoute.POST("/", controller.AdminCreateToken)
+				tokenAdminRoute.PUT("/:id", controller.AdminUpdateToken)
 			}
 
 		usageRoute := apiRouter.Group("/usage")
