@@ -35,13 +35,20 @@ type AliVideoRequest struct {
 
 // AliVideoInput 视频输入参数
 type AliVideoInput struct {
-	Prompt         string `json:"prompt,omitempty"`          // 文本提示词
-	ImgURL         string `json:"img_url,omitempty"`         // 首帧图像URL或Base64（图生视频）
-	FirstFrameURL  string `json:"first_frame_url,omitempty"` // 首帧图片URL（首尾帧生视频）
-	LastFrameURL   string `json:"last_frame_url,omitempty"`  // 尾帧图片URL（首尾帧生视频）
-	AudioURL       string `json:"audio_url,omitempty"`       // 音频URL（wan2.5支持）
-	NegativePrompt string `json:"negative_prompt,omitempty"` // 反向提示词
-	Template       string `json:"template,omitempty"`        // 视频特效模板
+	Prompt         string          `json:"prompt,omitempty"`          // 文本提示词
+	ImgURL         string          `json:"img_url,omitempty"`         // 首帧图像URL（wan2.1-2.6 旧协议）
+	FirstFrameURL  string          `json:"first_frame_url,omitempty"` // 首帧图片URL（首尾帧生视频）
+	LastFrameURL   string          `json:"last_frame_url,omitempty"`  // 尾帧图片URL（首尾帧生视频）
+	AudioURL       string          `json:"audio_url,omitempty"`       // 音频URL（wan2.5支持）
+	NegativePrompt string          `json:"negative_prompt,omitempty"` // 反向提示词
+	Template       string          `json:"template,omitempty"`        // 视频特效模板
+	Media          []AliVideoMedia `json:"media,omitempty"`           // wan2.7 新协议：媒体素材数组
+}
+
+// AliVideoMedia wan2.7 媒体素材（input.media array 元素）
+type AliVideoMedia struct {
+	Type string `json:"type"` // first_frame / last_frame / driving_audio / first_clip
+	URL  string `json:"url"`
 }
 
 // AliVideoParameters 视频参数
@@ -257,12 +264,20 @@ func (a *TaskAdaptor) convertToAliRequest(info *relaycommon.RelayInfo, req relay
 	if info.IsModelMapped {
 		upstreamModel = info.UpstreamModelName
 	}
+	aliInput := AliVideoInput{
+		Prompt: req.Prompt,
+	}
+	// wan2.7 新协议用 input.media array，旧协议用 input.img_url
+	if strings.HasPrefix(req.Model, "wan2.7") && req.InputReference != "" {
+		aliInput.Media = []AliVideoMedia{
+			{Type: "first_frame", URL: req.InputReference},
+		}
+	} else {
+		aliInput.ImgURL = req.InputReference
+	}
 	aliReq := &AliVideoRequest{
 		Model: upstreamModel,
-		Input: AliVideoInput{
-			Prompt: req.Prompt,
-			ImgURL: req.InputReference,
-		},
+		Input: aliInput,
 		Parameters: &AliVideoParameters{
 			PromptExtend: true, // 默认开启智能改写
 			Watermark:    false,
