@@ -14,7 +14,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/service/openaicompat"
+	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -87,7 +87,7 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	}
 	defer service.CloseResponseBodyGracefully(resp)
 
-	accumulator := openaicompat.NewResponsesBufferedAccumulator()
+	accumulator := relayconvert.NewResponsesBufferedAccumulator()
 	var finalResponse *dto.OpenAIResponsesResponse
 	var streamErr *types.NewAPIError
 
@@ -198,7 +198,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	responseId := helper.GetResponseID(c)
 	createAt := time.Now().Unix()
 	callerModel := relaycommon.GetCallerModelName(c, info)
-	state := openaicompat.NewResponsesToChatStreamState(callerModel, false)
+	state := relayconvert.NewResponsesToChatStreamState(info.UpstreamModelName, false)
 	state.ID = responseId
 	state.Created = createAt
 	streamErr := (*types.NewAPIError)(nil)
@@ -257,7 +257,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			return
 		}
 
-		chunks, err := openaicompat.ResponsesStreamEventToChatChunks(&streamResp, state)
+		chunks, err := relayconvert.ResponsesStreamEventToChatChunks(&streamResp, state)
 		if err != nil {
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 			sr.Stop(streamErr)
@@ -287,7 +287,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil {
 		info.ClaudeConvertInfo.Usage = usage
 	}
-	for _, chunk := range openaicompat.FinalizeResponsesToChatStream(state) {
+	for _, chunk := range relayconvert.FinalizeResponsesToChatStream(state) {
 		if callerModel != "" {
 			chunk.Model = callerModel
 		}
