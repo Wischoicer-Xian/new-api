@@ -19,8 +19,9 @@ For commercial licensing, please contact support@quantumnous.com
 import axios, { type AxiosRequestConfig } from 'axios'
 import { t } from 'i18next'
 import { toast } from 'sonner'
-import { useAuthStore } from '@/stores/auth-store'
+
 import { getBasepath } from '@/lib/basepath'
+import { useAuthStore } from '@/stores/auth-store'
 
 declare module 'axios' {
   export interface AxiosRequestConfig {

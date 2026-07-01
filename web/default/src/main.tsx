@@ -18,31 +18,34 @@ For commercial licensing, please contact support@quantumnous.com
 */
 // MUST be first import — sets __webpack_public_path__ for async chunk loading
 import './lib/public-path'
-
-import { StrictMode } from 'react'
-import ReactDOM from 'react-dom/client'
-import { AxiosError } from 'axios'
 import {
   QueryCache,
   QueryClient,
   QueryClientProvider,
 } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
+import { AxiosError } from 'axios'
 import i18next from 'i18next'
+import { StrictMode } from 'react'
+import ReactDOM from 'react-dom/client'
 import { toast } from 'sonner'
-import { useAuthStore } from '@/stores/auth-store'
+
 import { getStatus } from '@/lib/api'
+import { getBasepath } from '@/lib/basepath'
 import { installBuildMetadata } from '@/lib/build-metadata'
 import '@/lib/dayjs'
 import { applyFaviconToDom } from '@/lib/dom-utils'
 import { initializeFrontendCache } from '@/lib/frontend-cache'
 import { handleServerError } from '@/lib/handle-server-error'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { DirectionProvider } from './context/direction-provider'
 import { FontProvider } from './context/font-provider'
 import { ThemeProvider } from './context/theme-provider'
 import './i18n/config'
 // Generated Routes
 import { routeTree } from './routeTree.gen'
+
 // Styles
 import './styles/index.css'
 
@@ -99,11 +102,6 @@ const queryClient = new QueryClient({
     },
   }),
 })
-
-// Detect nginx proxy base path at runtime (shared logic in lib/basepath.ts).
-// Supports /token-platform-fe (workstation proxy), /token-platform (direct
-// nginx proxy), and empty string (direct Go server access).
-import { getBasepath } from '@/lib/basepath'
 
 // Create a new router instance
 const router = createRouter({

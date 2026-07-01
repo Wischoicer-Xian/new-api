@@ -23,6 +23,7 @@ import {
   parseTiersFromExpr,
   type ParsedTier,
 } from '@/features/pricing/lib/billing-expr'
+
 import type { UsageLog } from '../data/schema'
 import type { LogOtherData } from '../types'
 
@@ -152,7 +153,10 @@ export function getResponseTimeColor(
 /**
  * Format model name with mapping indicator
  */
-export function formatModelName(log: UsageLog, isAdmin: boolean = true): {
+export function formatModelName(
+  log: UsageLog,
+  isAdmin: boolean = true
+): {
   name: string
   isMapped: boolean
   actualModel?: string

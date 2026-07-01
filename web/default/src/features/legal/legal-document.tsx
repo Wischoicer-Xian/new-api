@@ -52,6 +52,7 @@ export function LegalDocument({
   const rawContent = data?.data?.trim() ?? ''
   const hasContent = rawContent.length > 0
   const isUrl = hasContent && isHttpUrl(rawContent)
+  const contentIsHtml = hasContent && isLikelyHtml(rawContent)
   const success = data?.success ?? false
 
   if (isLoading) {
@@ -122,18 +123,22 @@ export function LegalDocument({
   }
 
   return (
-    <PublicLayout>
-      <div className='mx-auto max-w-4xl space-y-6 py-12'>
-        <div className='space-y-2'>
-          <h1 className='text-3xl font-semibold tracking-tight'>{title}</h1>
-        </div>
+    <PublicLayout showMainContainer={!contentIsHtml}>
+      {contentIsHtml ? (
+        <RichContent mode='html' htmlVariant='isolated' content={rawContent} />
+      ) : (
+        <div className='mx-auto max-w-4xl space-y-6 py-12'>
+          <div className='space-y-2'>
+            <h1 className='text-3xl font-semibold tracking-tight'>{title}</h1>
+          </div>
 
-        <RichContent
-          mode={isLikelyHtml(rawContent) ? 'html' : 'markdown'}
-          content={rawContent}
-          className='prose-neutral dark:prose-invert max-w-none'
-        />
-      </div>
+          <RichContent
+            mode='markdown'
+            content={rawContent}
+            className='prose-neutral dark:prose-invert max-w-none'
+          />
+        </div>
+      )}
     </PublicLayout>
   )
 }

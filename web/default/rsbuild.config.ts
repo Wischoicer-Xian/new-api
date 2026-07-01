@@ -57,7 +57,8 @@ export default defineConfig(({ envMode }) => {
       },
       define: {
         'import.meta.env.VITE_WISCHOICER_WORKSTATION_URL': JSON.stringify(
-          process.env.VITE_WISCHOICER_WORKSTATION_URL || 'https://workstation.wischoicer.com',
+          process.env.VITE_WISCHOICER_WORKSTATION_URL ||
+            'https://workstation.wischoicer.com'
         ),
       },
     },

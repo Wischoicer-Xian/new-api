@@ -17,10 +17,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
-import { cn } from '@/lib/utils'
-import { withBasepath } from '@/lib/basepath'
+
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
+import { withBasepath } from '@/lib/basepath'
+import { cn } from '@/lib/utils'
+
 import type { SystemStatus } from '../types'
 
 interface LegalConsentProps {

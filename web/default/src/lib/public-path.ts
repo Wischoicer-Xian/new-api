@@ -37,13 +37,16 @@ For commercial licensing, please contact support@quantumnous.com
  * - /token-platform-fe workstation proxy → `/token-platform-fe/`
  */
 
-declare const __webpack_public_path__: string
+declare let __webpack_public_path__: string
 
 if (typeof window !== 'undefined') {
   const pathname = window.location.pathname
   let base = ''
-  if (pathname.startsWith('/token-platform-fe')) base = '/token-platform-fe'
-  else if (pathname.startsWith('/token-platform')) base = '/token-platform'
+  if (pathname.startsWith('/token-platform-fe')) {
+    base = '/token-platform-fe'
+  } else if (pathname.startsWith('/token-platform')) {
+    base = '/token-platform'
+  }
   // rspack chunk URLs already include 'static/js/async/' — only set the basepath root
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(__webpack_public_path__ as any) = base + '/'

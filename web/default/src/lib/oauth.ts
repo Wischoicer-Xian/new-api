@@ -38,10 +38,7 @@ export function buildDiscordOAuthUrl(clientId: string, state: string): string {
   const base = bp ? `${window.location.origin}${bp}` : window.location.origin
   const url = new URL('https://discord.com/oauth2/authorize')
   url.searchParams.set('client_id', clientId)
-  url.searchParams.set(
-    'redirect_uri',
-    `${base}/oauth/discord`
-  )
+  url.searchParams.set('redirect_uri', `${base}/oauth/discord`)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', 'identify+openid')
   url.searchParams.set('state', state)
