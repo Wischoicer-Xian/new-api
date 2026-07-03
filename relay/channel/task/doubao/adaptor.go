@@ -295,6 +295,10 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 
 	if sec, _ := strconv.Atoi(req.Seconds); sec > 0 {
 		r.Duration = lo.ToPtr(dto.IntValue(sec))
+	} else if req.Duration > 0 {
+		// Seconds（string）空时回退 Duration（int）：content-workstation 等只送 duration(int) 的 caller
+		// 也要能透传到上游，避免被默认 5s。镜像 gemini ResolveVeoDuration 同时吃两字段的行为。
+		r.Duration = lo.ToPtr(dto.IntValue(req.Duration))
 	}
 
 	r.Content = lo.Reject(r.Content, func(c ContentItem, _ int) bool { return c.Type == "text" })
