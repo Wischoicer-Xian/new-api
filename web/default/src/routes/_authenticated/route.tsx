@@ -41,7 +41,12 @@ export const Route = createFileRoute('/_authenticated')({
     //   - SSO login where server session exists but local auth state is empty
     //     (e.g., after POST /api/sso/login set the session cookie)
     if (!sessionVerified) {
-      const res = await getSelf().catch(() => null)
+      // 仅 401 视为 session 失效；网络错误/超时/5xx 返回 null 放行，下次导航重验
+      const res = await getSelf().catch((err: unknown) =>
+        (err as { response?: { status?: number } })?.response?.status === 401
+          ? { success: false }
+          : null
+      )
       if (res?.success && res.data) {
         auth.setUser(res.data)
         // Persist user ID so the API interceptor can send New-Api-User header.
@@ -51,6 +56,17 @@ export const Route = createFileRoute('/_authenticated')({
           saveUserId(res.data.id)
         }
         sessionVerified = true
+        return
+      }
+      if (res) {
+        // 验证失败，清除本地缓存并跳转登录页
+        auth.reset()
+        throw redirect({
+          to: '/sign-in',
+          search: { redirect: location.href },
+        })
+      }
+      if (auth.user) {
         return
       }
     }
