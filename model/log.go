@@ -341,6 +341,10 @@ type RecordConsumeLogParams struct {
 	IsStream         bool                   `json:"is_stream"`
 	Group            string                 `json:"group"`
 	Other            map[string]interface{} `json:"other"`
+	// BillingStage 控制 other.wischoicer.billing_stage 的取值（WIS-499 RFC §2.2）。
+	// 留空时若入站请求带 X-Wischoicer-* 归因头则默认置 "request"（同步消费日志）；
+	// 异步任务提交日志由调用方显式传 "submit"。
+	BillingStage string `json:"billing_stage"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -353,6 +357,23 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	otherStr := common.MapToJsonStr(params.Other)
+	// 注入 wischoicer 业务归因（RFC §2.2）。不修改 params.Other；仅当入站请求带
+	// X-Wischoicer-* 归因头、且调用方未在 Other.wischoicer 预置时，合并进新 map 落库。
+	// BillingStage 留空默认 "request"（同步消费日志），submit 由调用方显式传入。
+	if w := ParseWischoicerAttribution(c); w != nil {
+		merged := map[string]interface{}{}
+		for k, v := range params.Other {
+			merged[k] = v
+		}
+		if _, exists := merged["wischoicer"]; !exists {
+			stage := params.BillingStage
+			if stage == "" {
+				stage = BillingStageRequest
+			}
+			merged["wischoicer"] = w.ToMap(stage)
+		}
+		otherStr = common.MapToJsonStr(merged)
+	}
 	// 判断是否需要记录 IP
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {

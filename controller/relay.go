@@ -595,6 +595,14 @@ func RelayTask(c *gin.Context) {
 		task.Quota = result.Quota
 		task.Data = result.TaskData
 		task.Action = relayInfo.Action
+		// 业务归因快照（WIS-499 RFC §2.2 / 回炉收敛 b9996b28）：submit 阶段把 wischoicer
+		// 归因 + 原始提交链路 ID 一并快照到 task.private_data，供 settle/refund 复用。
+		// 仅 content-workstation 内部调用任务非空。
+		if w := model.ParseWischoicerAttribution(c); w != nil {
+			task.PrivateData.Wischoicer = w
+			task.PrivateData.SubmitRequestId = c.GetString(common.RequestIdKey)
+			task.PrivateData.SubmitUpstreamRequestId = c.GetString(common.UpstreamRequestIdKey)
+		}
 		if insertErr := task.Insert(); insertErr != nil {
 			common.SysError("insert task error: " + insertErr.Error())
 		}

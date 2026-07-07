@@ -52,15 +52,20 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 		other["upstream_model_name"] = info.UpstreamModelName
 	}
 	attachQuotaSaturation(c, info, other)
+	// provider_task_id：异步任务日志的 new-api 内部 task_xxxx ID，供 details 接口返回。
+	if info.TaskRelayInfo != nil && info.TaskRelayInfo.PublicTaskID != "" {
+		other["task_id"] = info.TaskRelayInfo.PublicTaskID
+	}
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
-		ChannelId: info.ChannelId,
-		ModelName: info.OriginModelName,
-		TokenName: tokenName,
-		Quota:     info.PriceData.Quota,
-		Content:   logContent,
-		TokenId:   info.TokenId,
-		Group:     info.UsingGroup,
-		Other:     other,
+		ChannelId:   info.ChannelId,
+		ModelName:   info.OriginModelName,
+		TokenName:   tokenName,
+		Quota:       info.PriceData.Quota,
+		Content:     logContent,
+		TokenId:     info.TokenId,
+		Group:       info.UsingGroup,
+		Other:       other,
+		BillingStage: model.BillingStageSubmit,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
 	model.UpdateChannelUsedQuota(info.ChannelId, info.PriceData.Quota)
@@ -160,6 +165,27 @@ func taskModelName(task *model.Task) string {
 	return task.Properties.OriginModelName
 }
 
+// attachTaskBillingWischoicer 把 task.PrivateData 中的归因快照注入 settle/refund 日志的
+// Other.wischoicer（billing_stage 由调用方传入 settle/refund），并复用 submit 阶段链路
+// ID 快照到 Other.request_id / Other.upstream_request_id，供 details 接口对 settle/refund
+// 行返回原始提交链路 ID（回炉收敛 b9996b28：无快照则不写，details 侧返回 null）。
+func attachTaskBillingWischoicer(task *model.Task, other map[string]interface{}, billingStage string) {
+	if task == nil {
+		return
+	}
+	w := task.PrivateData.Wischoicer
+	if w == nil {
+		return
+	}
+	other["wischoicer"] = w.ToMap(billingStage)
+	if rid := task.PrivateData.SubmitRequestId; rid != "" {
+		other["request_id"] = rid
+	}
+	if urid := task.PrivateData.SubmitUpstreamRequestId; urid != "" {
+		other["upstream_request_id"] = urid
+	}
+}
+
 // RefundTaskQuota 统一的任务失败退款逻辑。
 // 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅），并退还令牌额度。
 func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
@@ -181,6 +207,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 	other := taskBillingOther(task)
 	other["task_id"] = task.TaskID
 	other["reason"] = reason
+	attachTaskBillingWischoicer(task, other, model.BillingStageRefund)
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:    task.UserId,
 		LogType:   model.LogTypeRefund,
@@ -235,14 +262,17 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 
 	var logType int
 	var logQuota int
+	var billingStage string
 	if quotaDelta > 0 {
 		logType = model.LogTypeConsume
 		logQuota = quotaDelta
+		billingStage = model.BillingStageSettle
 		model.UpdateUserUsedQuotaAndRequestCount(task.UserId, quotaDelta)
 		model.UpdateChannelUsedQuota(task.ChannelId, quotaDelta)
 	} else {
 		logType = model.LogTypeRefund
 		logQuota = -quotaDelta
+		billingStage = model.BillingStageRefund
 	}
 	other := taskBillingOther(task)
 	other["task_id"] = task.TaskID
@@ -251,6 +281,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	for _, clamp := range clamps {
 		attachQuotaSaturationToOther(other, clamp)
 	}
+	attachTaskBillingWischoicer(task, other, billingStage)
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:    task.UserId,
 		LogType:   logType,

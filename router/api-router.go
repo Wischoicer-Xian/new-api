@@ -295,6 +295,10 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/search", middleware.AdminAuth(), controller.SearchAllLogs)
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
 		logRoute.GET("/self/search", middleware.UserAuth(), middleware.SearchRateLimit(), controller.SearchUserLogs)
+		// Wischoicer 业务归因费用明细（WIS-499 RFC §4）：user-self，沿用 UserAuth。
+		logRoute.GET("/self/feature-usage/summary", middleware.UserAuth(), controller.GetFeatureUsageSummary)
+		logRoute.GET("/self/feature-usage/tasks", middleware.UserAuth(), controller.GetFeatureUsageTasks)
+		logRoute.GET("/self/feature-usage/details", middleware.UserAuth(), controller.GetFeatureUsageDetails)
 
 		systemTaskRoute := apiRouter.Group("/system-task")
 		systemTaskRoute.Use(middleware.RootAuth())
