@@ -78,12 +78,18 @@ func performHeaderNavRequest(t *testing.T, handler gin.HandlerFunc, authenticate
 	return recorder
 }
 
-func TestHeaderNavModuleAuthAllowsDefaultPublicAccess(t *testing.T) {
+// TestHeaderNavModuleAuthRequiresLoginForPricingByDefault locks the R3 decision 3
+// contract change: with an empty HeaderNavModules config, the "pricing" module
+// (which gates /api/perf-metrics/* and can reveal which model a hidden system
+// key calls) defaults to RequireAuth=true, so an anonymous request is rejected.
+// Previously this asserted AllowDefaultPublicAccess(200); it moved to 401 to
+// track the pricing fallback change, not to force a green build.
+func TestHeaderNavModuleAuthRequiresLoginForPricingByDefault(t *testing.T) {
 	withHeaderNavModules(t, "")
 
 	recorder := performHeaderNavRequest(t, HeaderNavModuleAuth("pricing"), false)
 
-	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
 }
 
 func TestHeaderNavModuleAuthRejectsDisabledPricing(t *testing.T) {
@@ -122,12 +128,17 @@ func TestHeaderNavModuleAuthRejectsLegacyDisabledModule(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, recorder.Code)
 }
 
-func TestHeaderNavModulePublicOrUserAuthAllowsDefaultPublicAccess(t *testing.T) {
+// TestHeaderNavModulePublicOrUserAuthRequiresLoginForPricingByDefault mirrors the
+// Auth variant: an empty HeaderNavModules config now leaves "pricing" defaulting
+// to RequireAuth=true (R3 decision 3), so the public-or-user-auth gate rejects an
+// anonymous request. Previously AllowDefaultPublicAccess(200); moved to 401 to
+// track the pricing fallback change, not to force green.
+func TestHeaderNavModulePublicOrUserAuthRequiresLoginForPricingByDefault(t *testing.T) {
 	withHeaderNavModules(t, "")
 
 	recorder := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth("pricing"), false)
 
-	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
 }
 
 func TestHeaderNavModulePublicOrUserAuthRequiresLoginWhenDisabled(t *testing.T) {
