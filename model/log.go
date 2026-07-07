@@ -285,6 +285,18 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other map[string]interface{}) {
 	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
+	// Mask the user-facing model name for hidden tokens (zero DB; token_hidden is
+	// set in TokenAuth / SetupContextForToken). Retain the real name in the
+	// admin-only other.upstream_model_name for debugging.
+	if c.GetBool("token_hidden") && modelName != "" {
+		if other == nil {
+			other = map[string]interface{}{}
+		}
+		if _, ok := other["upstream_model_name"]; !ok {
+			other["upstream_model_name"] = modelName
+		}
+		modelName = common.MaskedSystemModelAlias
+	}
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
@@ -348,6 +360,20 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		return
 	}
 	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
+	// Mask the user-facing model name for hidden tokens (知言云策系统 key).
+	// token_hidden is set in TokenAuth / SetupContextForToken (zero DB). The real
+	// model name is retained in Other.upstream_model_name, which formatUserLogs
+	// strips for non-admin queries, so admins can still debug. Billing is
+	// unaffected: it reads relayInfo.OriginModelName, not this log row.
+	if c.GetBool("token_hidden") && params.ModelName != "" {
+		if _, ok := params.Other["upstream_model_name"]; !ok {
+			if params.Other == nil {
+				params.Other = map[string]interface{}{}
+			}
+			params.Other["upstream_model_name"] = params.ModelName
+		}
+		params.ModelName = common.MaskedSystemModelAlias
+	}
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
@@ -425,10 +451,26 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 	username, _ := GetUsernameById(params.UserId, false)
 	tokenName := ""
+	hidden := false
 	if params.TokenId > 0 {
 		if token, err := GetTokenById(params.TokenId); err == nil {
 			tokenName = token.Name
+			hidden = token.Hidden
 		}
+	}
+	// Mask the user-facing model name for hidden tokens. The token was already
+	// loaded above for tokenName (no extra query). The real name is retained in
+	// the admin-only Other.upstream_model_name (stripped for non-admin queries by
+	// formatUserLogs). Async billing is unaffected: it reads
+	// PrivateData.BillingContext.OriginModelName, not this log row.
+	if hidden && params.ModelName != "" {
+		if params.Other == nil {
+			params.Other = map[string]interface{}{}
+		}
+		if _, ok := params.Other["upstream_model_name"]; !ok {
+			params.Other["upstream_model_name"] = params.ModelName
+		}
+		params.ModelName = common.MaskedSystemModelAlias
 	}
 	createdAt := common.GetTimestamp()
 	log := &Log{

@@ -309,6 +309,9 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		c.Set("id", token.UserId)
 		c.Set("token_id", token.Id)
 		c.Set("token_key", token.Key)
+		// Mirror SetupContextForToken: surface token.Hidden on the read-only path
+		// too, so write paths can mask the model name without a DB lookup.
+		common.SetContextKey(c, constant.ContextKeyTokenHidden, token.Hidden)
 		c.Next()
 	}
 }
@@ -466,6 +469,10 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 	}
 	common.SetContextKey(c, constant.ContextKeyTokenGroup, token.Group)
 	common.SetContextKey(c, constant.ContextKeyTokenCrossGroupRetry, token.CrossGroupRetry)
+	// token.Hidden is already loaded on the same *Token struct above (zero extra
+	// query); mirror token_unlimited_quota so write paths can mask the model name
+	// without any DB lookup. See common.MaskedModelNameIf.
+	common.SetContextKey(c, constant.ContextKeyTokenHidden, token.Hidden)
 	if len(parts) > 1 {
 		if model.IsAdmin(token.UserId) {
 			c.Set("specific_channel_id", parts[1])

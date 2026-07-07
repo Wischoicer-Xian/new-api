@@ -511,6 +511,9 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	if openAIResp.Model == "" && info != nil {
 		openAIResp.Model = info.OriginModelName
 	}
+	if info != nil {
+		openAIResp.Model = common.MaskedModelNameIf(info.TokenHidden, openAIResp.Model)
+	}
 	openAIResp.Status = convertAliStatus(aliResp.Output.TaskStatus)
 	openAIResp.CreatedAt = common.GetTimestamp()
 
