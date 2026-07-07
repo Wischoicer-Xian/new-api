@@ -93,6 +93,7 @@ type RelayInfo struct {
 	UsingGroup        string // 使用的分组，当auto跨分组重试时，会变动
 	UserGroup         string // 用户所在分组
 	TokenUnlimited    bool
+	TokenHidden       bool
 	StartTime         time.Time
 	FirstResponseTime time.Time
 	isFirstResponse   bool
@@ -481,6 +482,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		TokenId:        common.GetContextKeyInt(c, constant.ContextKeyTokenId),
 		TokenKey:       common.GetContextKeyString(c, constant.ContextKeyTokenKey),
 		TokenUnlimited: common.GetContextKeyBool(c, constant.ContextKeyTokenUnlimited),
+		TokenHidden:    common.GetContextKeyBool(c, constant.ContextKeyTokenHidden),
 		TokenGroup:     tokenGroup,
 
 		isFirstResponse: true,
@@ -517,6 +519,17 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 	}
 
 	return info
+}
+
+// MaskedModelName returns the user-facing model name for this relay, applying
+// the hidden-token alias (common.MaskedSystemModelAlias) when TokenHidden is
+// true. It does NOT mutate OriginModelName; billing and admin-audit paths keep
+// reading the real value via info.OriginModelName.
+func (info *RelayInfo) MaskedModelName() string {
+	if info == nil {
+		return ""
+	}
+	return common.MaskedModelNameIf(info.TokenHidden, info.OriginModelName)
 }
 
 func cloneRequestHeaders(c *gin.Context) map[string]string {
