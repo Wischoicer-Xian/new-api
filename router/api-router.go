@@ -74,7 +74,6 @@ func SetApiRouter(router *gin.Engine) {
 		// Universal secure verification routes
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
 
-
 		userRoute := apiRouter.Group("/user")
 		{
 			userRoute.POST("/register", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Register)
@@ -253,13 +252,13 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
 		}
 
-			// Admin token routes (admin creates/updates tokens for any user)
-			tokenAdminRoute := apiRouter.Group("/token/admin")
-			tokenAdminRoute.Use(middleware.AdminAuth())
-			{
-				tokenAdminRoute.POST("/", controller.AdminCreateToken)
-				tokenAdminRoute.PUT("/:id", controller.AdminUpdateToken)
-			}
+		// Admin token routes (admin creates/updates tokens for any user)
+		tokenAdminRoute := apiRouter.Group("/token/admin")
+		tokenAdminRoute.Use(middleware.AdminAuth())
+		{
+			tokenAdminRoute.POST("/", controller.AdminCreateToken)
+			tokenAdminRoute.PUT("/:id", controller.AdminUpdateToken)
+		}
 
 		usageRoute := apiRouter.Group("/usage")
 		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
@@ -293,6 +292,10 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/search", middleware.AdminAuth(), controller.SearchAllLogs)
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
 		logRoute.GET("/self/search", middleware.UserAuth(), middleware.SearchRateLimit(), controller.SearchUserLogs)
+		// WIS-499 §4：业务归因费用明细聚合查询（user-self）。
+		logRoute.GET("/self/feature-usage/summary", middleware.UserAuth(), controller.GetFeatureUsageSummary)
+		logRoute.GET("/self/feature-usage/tasks", middleware.UserAuth(), controller.GetFeatureUsageTasks)
+		logRoute.GET("/self/feature-usage/details", middleware.UserAuth(), controller.GetFeatureUsageDetails)
 
 		systemTaskRoute := apiRouter.Group("/system-task")
 		systemTaskRoute.Use(middleware.RootAuth())

@@ -106,6 +106,14 @@ type TaskPrivateData struct {
 	TokenId        int                 `json:"token_id,omitempty"`        // 令牌 ID，用于令牌额度退款
 	NodeName       string              `json:"node_name,omitempty"`       // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
 	BillingContext *TaskBillingContext `json:"billing_context,omitempty"` // 计费参数快照（用于轮询阶段重新计算）
+	// Wischoicer 业务归因快照（WIS-499）：submit 阶段从请求 header 解析后冻结，
+	// 供 settle/refund 阶段复用同一份归因，避免异步阶段漏账或拆账。
+	Wischoicer *common.WischoicerAttribution `json:"wischoicer,omitempty"`
+	// SubmitRequestId / SubmitUpstreamRequestId 为 submit 阶段请求链路 ID 快照。
+	// settle/refund 日志本身没有独立 request 列位，details 接口按 RFC 回炉 delta
+	// 从这里复用原始提交链路 ID；无快照时回 null。
+	SubmitRequestId         string `json:"submit_request_id,omitempty"`
+	SubmitUpstreamRequestId string `json:"submit_upstream_request_id,omitempty"`
 }
 
 // TaskBillingContext 记录任务提交时的计费参数，以便轮询阶段可以重新计算额度。

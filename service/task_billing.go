@@ -16,7 +16,9 @@ import (
 
 // LogTaskConsumption 记录任务消费日志和统计信息（仅记录，不涉及实际扣费）。
 // 实际扣费已由 BillingSession（PreConsumeBilling + SettleBilling）完成。
-func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
+// task 非 nil 时（异步视频 submit），写入 task_id 与 submit 阶段冻结的归因快照，
+// billing_stage=submit，保证后续 settle/refund 能复用同一份归因。
+func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model.Task) {
 	tokenName := c.GetString("token_name")
 	logContent := fmt.Sprintf("操作 %s", info.Action)
 	// 支持任务仅按次计费
@@ -50,18 +52,41 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = info.UpstreamModelName
 	}
+	// WIS-499 submit 日志：带 task_id（异步任务溯源）+ 冻结归因快照；billing_stage=submit。
+	billingStage := common.WischoicerStageSubmit
+	if task != nil {
+		other["task_id"] = task.TaskID
+		if attr := task.PrivateData.Wischoicer; attr != nil && attr.IsAttributed() {
+			other["wischoicer"] = attr.ToOtherMap(billingStage)
+		}
+	}
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
-		ChannelId: info.ChannelId,
-		ModelName: info.OriginModelName,
-		TokenName: tokenName,
-		Quota:     info.PriceData.Quota,
-		Content:   logContent,
-		TokenId:   info.TokenId,
-		Group:     info.UsingGroup,
-		Other:     other,
+		ChannelId:    info.ChannelId,
+		ModelName:    info.OriginModelName,
+		TokenName:    tokenName,
+		Quota:        info.PriceData.Quota,
+		Content:      logContent,
+		TokenId:      info.TokenId,
+		Group:        info.UsingGroup,
+		Other:        other,
+		BillingStage: billingStage,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
 	model.UpdateChannelUsedQuota(info.ChannelId, info.PriceData.Quota)
+}
+
+// SnapshotTaskAttribution 冻结异步任务 submit 阶段的业务归因与请求链路 ID 到 task.PrivateData。
+// 在 task.Insert 前调用；归因从请求 header 解析，链路 ID 从 gin.Context 取（此时上游
+// upstream_request_id 已写入 ctx）。供 settle/refund 复用。
+func SnapshotTaskAttribution(task *model.Task, c *gin.Context) {
+	if task == nil || c == nil {
+		return
+	}
+	if attr := common.ParseWischoicerAttribution(c.Request.Header); attr != nil {
+		task.PrivateData.Wischoicer = attr
+	}
+	task.PrivateData.SubmitRequestId = c.GetString(common.RequestIdKey)
+	task.PrivateData.SubmitUpstreamRequestId = c.GetString(common.UpstreamRequestIdKey)
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +161,19 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = props.UpstreamModelName
 	}
+	// WIS-499：异步 settle/refund 复用 submit 阶段冻结的归因快照，保证同一 biz_task_id
+	// 全链路归因一致；并把 submit 阶段原始链路 ID 复用到 wischoicer 内，供 details 在
+	// settle/refund 日志上回填（无快照则不写，details 返 null）。
+	if attr := task.PrivateData.Wischoicer; attr != nil && attr.IsAttributed() {
+		w := attr.ToOtherMap("")
+		if task.PrivateData.SubmitRequestId != "" {
+			w["request_id"] = task.PrivateData.SubmitRequestId
+		}
+		if task.PrivateData.SubmitUpstreamRequestId != "" {
+			w["upstream_request_id"] = task.PrivateData.SubmitUpstreamRequestId
+		}
+		other["wischoicer"] = w
+	}
 	return other
 }
 
@@ -169,15 +207,16 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 	other["task_id"] = task.TaskID
 	other["reason"] = reason
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   model.LogTypeRefund,
-		Content:   "",
-		ChannelId: task.ChannelId,
-		ModelName: taskModelName(task),
-		Quota:     quota,
-		TokenId:   task.PrivateData.TokenId,
-		Group:     task.Group,
-		Other:     other,
+		UserId:       task.UserId,
+		LogType:      model.LogTypeRefund,
+		Content:      "",
+		ChannelId:    task.ChannelId,
+		ModelName:    taskModelName(task),
+		Quota:        quota,
+		TokenId:      task.PrivateData.TokenId,
+		Group:        task.Group,
+		Other:        other,
+		BillingStage: common.WischoicerStageRefund,
 	})
 }
 
@@ -221,30 +260,34 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 
 	var logType int
 	var logQuota int
+	var billingStage string
 	if quotaDelta > 0 {
 		logType = model.LogTypeConsume
 		logQuota = quotaDelta
+		billingStage = common.WischoicerStageSettle
 		model.UpdateUserUsedQuotaAndRequestCount(task.UserId, quotaDelta)
 		model.UpdateChannelUsedQuota(task.ChannelId, quotaDelta)
 	} else {
 		logType = model.LogTypeRefund
 		logQuota = -quotaDelta
+		billingStage = common.WischoicerStageRefund
 	}
 	other := taskBillingOther(task)
 	other["task_id"] = task.TaskID
 	other["pre_consumed_quota"] = preConsumedQuota
 	other["actual_quota"] = actualQuota
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   logType,
-		Content:   reason,
-		ChannelId: task.ChannelId,
-		ModelName: taskModelName(task),
-		Quota:     logQuota,
-		TokenId:   task.PrivateData.TokenId,
-		Group:     task.Group,
-		Other:     other,
-		NodeName:  task.PrivateData.NodeName,
+		UserId:       task.UserId,
+		LogType:      logType,
+		Content:      reason,
+		ChannelId:    task.ChannelId,
+		ModelName:    taskModelName(task),
+		Quota:        logQuota,
+		TokenId:      task.PrivateData.TokenId,
+		Group:        task.Group,
+		Other:        other,
+		NodeName:     task.PrivateData.NodeName,
+		BillingStage: billingStage,
 	})
 }
 
