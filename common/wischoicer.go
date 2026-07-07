@@ -94,8 +94,9 @@ func WischoicerIsValidBillingStage(stage string) bool {
 
 // ParseWischoicerAttribution 从请求 header 解析业务归因。
 //
-// 仅当 SourceService=content-workstation 且 InternalFunction=true 时返回非 nil，
-// 否则返回 nil（普通 API Key 调用不进入归因统计）。AccountID 写归一化后的
+// 仅当 SourceService=content-workstation 且 InternalFunction=true，且 RFC §2.1 必填键
+// biz_task_id / app_user_id 均非空时返回非 nil；否则返回 nil（普通 API Key 调用、或
+// partial rollout 缺键的请求都不进入归因统计）。AccountID 写归一化后的
 // effective_account_id（account_id 优先，空则 app_user_id）。
 func ParseWischoicerAttribution(h http.Header) *WischoicerAttribution {
 	if h == nil {
@@ -109,6 +110,12 @@ func ParseWischoicerAttribution(h http.Header) *WischoicerAttribution {
 		return nil
 	}
 	appUserID := strings.TrimSpace(h.Get(HeaderWischoicerAppUserID))
+	bizTaskID := strings.TrimSpace(h.Get(HeaderWischoicerBizTaskID))
+	// 必填键卡死：缺 biz_task_id 会把同 feature 脏日志折成空任务；缺 app_user_id 会让
+	// effective_account_id 归一化失效。二者缺一即不落库、不当有效归因。
+	if bizTaskID == "" || appUserID == "" {
+		return nil
+	}
 	accountID := strings.TrimSpace(h.Get(HeaderWischoicerAccountID))
 	effectiveAccountID := accountID
 	if effectiveAccountID == "" {
@@ -122,7 +129,7 @@ func ParseWischoicerAttribution(h http.Header) *WischoicerAttribution {
 		FeatureName:      strings.TrimSpace(h.Get(HeaderWischoicerFeatureName)),
 		OperationCode:    strings.TrimSpace(h.Get(HeaderWischoicerOperationCode)),
 		OperationName:    strings.TrimSpace(h.Get(HeaderWischoicerOperationName)),
-		BizTaskID:        strings.TrimSpace(h.Get(HeaderWischoicerBizTaskID)),
+		BizTaskID:        bizTaskID,
 		BizTaskTitle:     strings.TrimSpace(h.Get(HeaderWischoicerBizTaskTitle)),
 		SubTaskID:        strings.TrimSpace(h.Get(HeaderWischoicerSubTaskID)),
 		AccountID:        effectiveAccountID,
@@ -142,7 +149,9 @@ func (a *WischoicerAttribution) IsKnownFeature() bool {
 }
 
 // WischoicerAttributionFromMap 从已落库的 other.wischoicer 嵌套对象反解析归因。
-// 供聚合查询层从 logs.other 读回归因用；与 ToOtherMap 互逆。无 source/internal 标记时返回 nil。
+// 供聚合查询层从 logs.other 读回归因用；与 ToOtherMap 互逆。无 source/internal 标记、
+// 或缺 RFC §2.1 必填键 biz_task_id / app_user_id 时返回 nil（剔除 partial rollout 脏数据，
+// 避免空 biz_task_id 把同 feature 折成空任务）。
 func WischoicerAttributionFromMap(m map[string]interface{}) *WischoicerAttribution {
 	if m == nil {
 		return nil
@@ -172,6 +181,10 @@ func WischoicerAttributionFromMap(m map[string]interface{}) *WischoicerAttributi
 		a.InternalFunction = v
 	}
 	if a.SourceService != WischoicerSourceContentWorkstation || !a.InternalFunction {
+		return nil
+	}
+	// 必填键防御性二次校验：与 ParseWischoicerAttribution 对称，剔除历史脏数据。
+	if a.BizTaskID == "" || a.AppUserID == "" {
 		return nil
 	}
 	return a

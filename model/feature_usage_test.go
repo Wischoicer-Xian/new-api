@@ -9,10 +9,11 @@ import (
 )
 
 // 构造一条日志的 other JSON。attributed=true 时带 wischoicer 归因对象。
-func buildOtherJSON(featureCode, opCode, bizTaskID, billingStage, taskID, snapReq, snapUp string) string {
+// providerTaskID 写 other.provider_task_id（上游真实任务 ID，仅异步任务日志有）。
+func buildOtherJSON(featureCode, opCode, bizTaskID, billingStage, providerTaskID, snapReq, snapUp string) string {
 	m := map[string]interface{}{}
-	if taskID != "" {
-		m["task_id"] = taskID
+	if providerTaskID != "" {
+		m["provider_task_id"] = providerTaskID
 	}
 	w := map[string]interface{}{
 		"schema_version":    1,
@@ -50,12 +51,12 @@ func seedFeatureUsageLogs(t *testing.T, userId int, baseTs int64) {
 		// merch_video_clone 同一 biz_task_id 的 submit / settle / refund
 		{UserId: userId, CreatedAt: baseTs + 10, Type: LogTypeConsume, ModelName: "doubao-seedance", TokenId: 1, Quota: 100,
 			RequestId: "req-submit", UpstreamRequestId: "up-submit",
-			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageSubmit, "task-1", "", "")},
+			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageSubmit, "upstream-task-1", "", "")},
 		{UserId: userId, CreatedAt: baseTs + 20, Type: LogTypeConsume, ModelName: "doubao-seedance", TokenId: 1, Quota: 50,
 			RequestId: "req-settle", UpstreamRequestId: "up-settle",
-			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageSettle, "task-1", "req-submit", "up-submit")},
+			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageSettle, "upstream-task-1", "req-submit", "up-submit")},
 		{UserId: userId, CreatedAt: baseTs + 30, Type: LogTypeRefund, ModelName: "doubao-seedance", TokenId: 1, Quota: 30,
-			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageRefund, "task-1", "req-submit", "up-submit")},
+			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageRefund, "upstream-task-1", "req-submit", "up-submit")},
 		// image_creation 同步消费
 		{UserId: userId, CreatedAt: baseTs + 40, Type: LogTypeConsume, ModelName: "gpt-image-2", TokenId: 1, Quota: 200,
 			RequestId: "req-img", UpstreamRequestId: "up-img",
@@ -160,9 +161,9 @@ func TestFeatureUsageDetails_SettleRefundReusesSnapshotRequestID(t *testing.T) {
 	assert.Equal(t, "req-submit", *submit.RequestID)
 	require.NotNil(t, submit.UpstreamRequestID)
 	assert.Equal(t, "up-submit", *submit.UpstreamRequestID)
-	// provider_task_id 来源于异步任务日志的 task_id
+	// provider_task_id = 上游真实任务 ID（非 new-api task_xxx）
 	require.NotNil(t, submit.ProviderTaskID)
-	assert.Equal(t, "task-1", *submit.ProviderTaskID)
+	assert.Equal(t, "upstream-task-1", *submit.ProviderTaskID)
 
 	// settle：request_id 复用 submit 快照（req-submit），而不是顶层 req-settle
 	settle := findDetail(res.Items, common.WischoicerStageSettle)
@@ -170,6 +171,9 @@ func TestFeatureUsageDetails_SettleRefundReusesSnapshotRequestID(t *testing.T) {
 	require.NotNil(t, settle.RequestID)
 	assert.Equal(t, "req-submit", *settle.RequestID, "settle must reuse submit snapshot request_id")
 	assert.Equal(t, "up-submit", *settle.UpstreamRequestID)
+	// settle 的 provider_task_id 复用 submit 冻结的上游 ID
+	require.NotNil(t, settle.ProviderTaskID)
+	assert.Equal(t, "upstream-task-1", *settle.ProviderTaskID)
 	// settle quota 正号
 	assert.Equal(t, 50, settle.Quota)
 	assert.Equal(t, "consume", settle.LogType)
@@ -178,8 +182,21 @@ func TestFeatureUsageDetails_SettleRefundReusesSnapshotRequestID(t *testing.T) {
 	refund := findDetail(res.Items, common.WischoicerStageRefund)
 	require.NotNil(t, refund)
 	assert.Equal(t, "req-submit", *refund.RequestID)
+	require.NotNil(t, refund.ProviderTaskID)
+	assert.Equal(t, "upstream-task-1", *refund.ProviderTaskID)
 	assert.Equal(t, -30, refund.Quota, "refund quota must be negative (net)")
 	assert.Equal(t, "refund", refund.LogType)
+
+	// request 阶段（image 同步消费）无异步任务 → provider_task_id 为 null
+	var reqImg *FeatureUsageDetailItem
+	for i := range res.Items {
+		if res.Items[i].FeatureCode == "image_creation" {
+			reqImg = &res.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, reqImg)
+	assert.Nil(t, reqImg.ProviderTaskID, "request stage has no async task → null")
 }
 
 func TestFeatureUsageDetails_NoSnapshotReturnsNullRequestID(t *testing.T) {
@@ -187,7 +204,7 @@ func TestFeatureUsageDetails_NoSnapshotReturnsNullRequestID(t *testing.T) {
 	baseTs := int64(1_700_000_300)
 	require.NoError(t, LOG_DB.Create(&Log{
 		UserId: 7002, CreatedAt: baseTs + 5, Type: LogTypeRefund, ModelName: "doubao-seedance", Quota: 30,
-		Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-x", common.WischoicerStageRefund, "task-x", "", ""),
+		Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-x", common.WischoicerStageRefund, "upstream-x", "", ""),
 	}).Error)
 	res, err := GetFeatureUsageDetails(7002, baseTs, baseTs+1000, FeatureUsageDetailsFilter{}, 1, 100)
 	require.NoError(t, err)

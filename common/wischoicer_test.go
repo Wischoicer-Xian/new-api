@@ -34,6 +34,7 @@ func TestParseWischoicerAttribution_EffectiveAccountIDFallback(t *testing.T) {
 	h := http.Header{}
 	h.Set(HeaderWischoicerSourceService, "content-workstation")
 	h.Set(HeaderWischoicerInternalFunction, "true")
+	h.Set(HeaderWischoicerBizTaskID, "019f-task")
 	h.Set(HeaderWischoicerAppUserID, "019f-user")
 
 	a := ParseWischoicerAttribution(h)
@@ -77,10 +78,64 @@ func TestParseWischoicerAttribution_RejectsNonAttributed(t *testing.T) {
 	}
 }
 
+func TestParseWischoicerAttribution_RejectsMissingRequiredKeys(t *testing.T) {
+	// RFC §2.1 必填键 biz_task_id / app_user_id：缺任一即不落库、不当有效归因，
+	// 避免空 biz_task_id 把同 feature 脏日志折成空任务、effective_account_id 归一化失效。
+	cases := []struct {
+		name    string
+		setTask bool
+		setUser bool
+	}{
+		{"missing biz_task_id", false, true},
+		{"missing app_user_id", true, false},
+		{"missing both", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			h.Set(HeaderWischoicerSourceService, "content-workstation")
+			h.Set(HeaderWischoicerInternalFunction, "true")
+			h.Set(HeaderWischoicerFeatureCode, "image_creation")
+			if tc.setTask {
+				h.Set(HeaderWischoicerBizTaskID, "task-1")
+			}
+			if tc.setUser {
+				h.Set(HeaderWischoicerAppUserID, "u-1")
+			}
+			assert.Nil(t, ParseWischoicerAttribution(h), "missing required key must not be treated as valid attribution")
+		})
+	}
+}
+
+func TestWischoicerAttributionFromMap_RejectsMissingRequiredKeys(t *testing.T) {
+	// 聚合层防御性二次校验：与 Parse 对称，剔除已落库的 partial rollout 脏数据。
+	base := map[string]interface{}{
+		"schema_version":    1,
+		"source_service":    "content-workstation",
+		"internal_function": true,
+		"feature_code":      "image_creation",
+	}
+	with := func(k, v string) map[string]interface{} {
+		m := map[string]interface{}{}
+		for k, v := range base {
+			m[k] = v
+		}
+		m[k] = v
+		return m
+	}
+	assert.Nil(t, WischoicerAttributionFromMap(with("app_user_id", "u-1")), "missing biz_task_id")
+	assert.Nil(t, WischoicerAttributionFromMap(with("biz_task_id", "t-1")), "missing app_user_id")
+
+	both := with("biz_task_id", "t-1")
+	both["app_user_id"] = "u-1"
+	require.NotNil(t, WischoicerAttributionFromMap(both), "both required keys present → valid")
+}
+
 func TestParseWischoicerAttribution_InternalFunctionCaseInsensitive(t *testing.T) {
 	h := http.Header{}
 	h.Set(HeaderWischoicerSourceService, "content-workstation")
 	h.Set(HeaderWischoicerInternalFunction, "TRUE")
+	h.Set(HeaderWischoicerBizTaskID, "task")
 	h.Set(HeaderWischoicerAppUserID, "u")
 	assert.NotNil(t, ParseWischoicerAttribution(h))
 }
@@ -100,6 +155,7 @@ func TestWischoicerAttribution_IsKnownFeature_UnknownGoesUncategorized(t *testin
 	h := http.Header{}
 	h.Set(HeaderWischoicerSourceService, "content-workstation")
 	h.Set(HeaderWischoicerInternalFunction, "true")
+	h.Set(HeaderWischoicerBizTaskID, "task")
 	h.Set(HeaderWischoicerAppUserID, "u")
 	// 故意不设 feature_code
 	a := ParseWischoicerAttribution(h)

@@ -242,6 +242,10 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 			tokenName := c.GetString("token_name")
 			logContent := fmt.Sprintf("模型固定价格 %.2f，分组倍率 %.2f，操作 %s", priceData.ModelPrice, priceData.GroupRatioInfo.GroupRatio, constant.MjActionSwapFace)
 			other := service.GenerateMjOtherInfo(info, priceData)
+			// WIS-499：MJ provider 侧任务号结构化落库，供 details 取 provider_task_id（不再只拼进文案）。
+			if providerTaskID := mjResp.Response.Result; providerTaskID != "" {
+				other["provider_task_id"] = providerTaskID
+			}
 			model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
 				ChannelId:    info.ChannelId,
 				ModelName:    modelName,
@@ -549,6 +553,10 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			tokenName := c.GetString("token_name")
 			logContent := fmt.Sprintf("模型固定价格 %.2f，分组倍率 %.2f，操作 %s，ID %s", priceData.ModelPrice, priceData.GroupRatioInfo.GroupRatio, midjRequest.Action, midjResponse.Result)
 			other := service.GenerateMjOtherInfo(relayInfo, priceData)
+			// WIS-499：MJ provider 侧任务号结构化落库，供 details 取 provider_task_id（不再只拼进文案）。
+			if providerTaskID := midjResponse.Result; providerTaskID != "" {
+				other["provider_task_id"] = providerTaskID
+			}
 			model.RecordConsumeLog(c, relayInfo.UserId, model.RecordConsumeLogParams{
 				ChannelId:    relayInfo.ChannelId,
 				ModelName:    modelName,

@@ -52,10 +52,15 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = info.UpstreamModelName
 	}
-	// WIS-499 submit 日志：带 task_id（异步任务溯源）+ 冻结归因快照；billing_stage=submit。
+	// WIS-499 submit 日志：带 task_id（new-api 诊断用）+ provider_task_id（上游真实任务 ID，
+	// 非 task_xxx）+ 冻结归因快照；billing_stage=submit。
 	billingStage := common.WischoicerStageSubmit
 	if task != nil {
 		other["task_id"] = task.TaskID
+		// provider_task_id 取上游真实 ID；空则不写，details 返 null（不拿 task_xxx 冒充）。
+		if upstreamID := task.PrivateData.UpstreamTaskID; upstreamID != "" {
+			other["provider_task_id"] = upstreamID
+		}
 		if attr := task.PrivateData.Wischoicer; attr != nil && attr.IsAttributed() {
 			other["wischoicer"] = attr.ToOtherMap(billingStage)
 		}
@@ -173,6 +178,11 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 			w["upstream_request_id"] = task.PrivateData.SubmitUpstreamRequestId
 		}
 		other["wischoicer"] = w
+	}
+	// provider_task_id = 上游真实任务 ID（submit 阶段冻结于 task.PrivateData.UpstreamTaskID），
+	// settle/refund 复用同一份快照；空则不写，details 返 null。不与 new-api 的 task_xxx 混淆。
+	if upstreamID := task.PrivateData.UpstreamTaskID; upstreamID != "" {
+		other["provider_task_id"] = upstreamID
 	}
 	return other
 }

@@ -33,7 +33,8 @@ type featureUsageRow struct {
 	SubTaskID     string
 	AccountID     string
 	BillingStage  string
-	TaskID        string // other.task_id，作为 provider_task_id 来源
+	// ProviderTaskID 取 other.provider_task_id（上游真实任务 ID，仅异步任务日志有；request 阶段为空）。
+	ProviderTaskID string
 	// SnapRequestID / SnapUpstreamID 为 settle/refund 日志从 submit 快照复用的链路 ID。
 	SnapRequestID  string
 	SnapUpstreamID string
@@ -95,7 +96,7 @@ func loadSelfAttributedLogs(userId int, startTimestamp, endTimestamp int64) ([]f
 			SubTaskID:      attr.SubTaskID,
 			AccountID:      attr.AccountID,
 			BillingStage:   common.WischoicerMapString(w, "billing_stage"),
-			TaskID:         common.WischoicerMapString(otherMap, "task_id"),
+			ProviderTaskID: common.WischoicerMapString(otherMap, "provider_task_id"),
 			SnapRequestID:  common.WischoicerMapString(w, "request_id"),
 			SnapUpstreamID: common.WischoicerMapString(w, "upstream_request_id"),
 		})
@@ -458,7 +459,7 @@ func GetFeatureUsageDetails(userId int, startTimestamp, endTimestamp int64, filt
 			CompletionTokens:  r.Log.CompletionTokens,
 			RequestID:         requestID,
 			UpstreamRequestID: upstreamID,
-			ProviderTaskID:    strPtrOrNil(r.TaskID),
+			ProviderTaskID:    strPtrOrNil(r.ProviderTaskID),
 		})
 	}
 	// 按 created_at 倒序，相同则 request_id 倒序，分页稳定。
