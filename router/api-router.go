@@ -296,6 +296,10 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/search", middleware.AdminAuth(), controller.SearchAllLogs)
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
 		logRoute.GET("/self/search", middleware.UserAuth(), middleware.SearchRateLimit(), controller.SearchUserLogs)
+		// WIS-499 §4：业务归因费用明细聚合查询（user-self）。
+		logRoute.GET("/self/feature-usage/summary", middleware.UserAuth(), controller.GetFeatureUsageSummary)
+		logRoute.GET("/self/feature-usage/tasks", middleware.UserAuth(), controller.GetFeatureUsageTasks)
+		logRoute.GET("/self/feature-usage/details", middleware.UserAuth(), controller.GetFeatureUsageDetails)
 
 		systemTaskRoute := apiRouter.Group("/system-task")
 		systemTaskRoute.Use(middleware.RootAuth())

@@ -353,6 +353,10 @@ type RecordConsumeLogParams struct {
 	IsStream         bool                   `json:"is_stream"`
 	Group            string                 `json:"group"`
 	Other            map[string]interface{} `json:"other"`
+	// BillingStage 业务计费阶段（WIS-499）：request=同步 chat/image 消费，
+	// submit=异步视频首次提交。非空时 RecordConsumeLog 会从请求 header 解析归因
+	// 注入 other.wischoicer（若 other 未预置），并写入 billing_stage。
+	BillingStage string `json:"billing_stage"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -378,7 +382,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
-	otherStr := common.MapToJsonStr(params.Other)
+	otherStr := common.MapToJsonStr(injectWischoicerConsumeOther(params.Other, c, params.BillingStage))
 	// 判断是否需要记录 IP
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
@@ -443,6 +447,10 @@ type RecordTaskBillingLogParams struct {
 	Group     string
 	Other     map[string]interface{}
 	NodeName  string // 任务发起节点；为空时回退当前节点
+	// BillingStage 业务计费阶段（WIS-499）：settle=异步差额补扣，refund=异步退款。
+	// 异步日志的归因由调用方（taskBillingOther）从 task.PrivateData 快照预置进 Other.wischoicer，
+	// 这里只负责把 billing_stage 盖到已预置的 wischoicer 上；无 wischoicer 时不写入。
+	BillingStage string
 }
 
 func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
@@ -473,6 +481,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		params.ModelName = common.MaskedSystemModelAlias
 	}
 	createdAt := common.GetTimestamp()
+	other := stampWischoicerBillingStage(params.Other, params.BillingStage)
 	log := &Log{
 		UserId:    params.UserId,
 		Username:  username,
@@ -485,7 +494,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		ChannelId: params.ChannelId,
 		TokenId:   params.TokenId,
 		Group:     params.Group,
-		Other:     common.MapToJsonStr(params.Other),
+		Other:     common.MapToJsonStr(other),
 	}
 	err := createLog(log)
 	if err != nil {
@@ -508,6 +517,42 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 			NodeName:  nodeName,
 		})
 	}
+}
+
+// injectWischoicerConsumeOther 把业务归因注入同步消费日志的 other map。
+// 若 other 已预置 wischoicer（异步 submit 阶段快照，由 LogTaskConsumption 注入），
+// 仅补 billing_stage；否则从请求 header 现解析（同步 request 阶段）。
+// 无归因（普通 API Key 调用、上游未带 header）时不写入，保证历史普通消耗不被误伤。
+func injectWischoicerConsumeOther(other map[string]interface{}, c *gin.Context, billingStage string) map[string]interface{} {
+	if !common.WischoicerIsValidBillingStage(billingStage) {
+		return other
+	}
+	if w, ok := other["wischoicer"].(map[string]interface{}); ok {
+		w["billing_stage"] = billingStage
+		return other
+	}
+	attr := common.ParseWischoicerAttribution(c.Request.Header)
+	if attr == nil {
+		return other
+	}
+	if other == nil {
+		other = make(map[string]interface{})
+	}
+	other["wischoicer"] = attr.ToOtherMap(billingStage)
+	return other
+}
+
+// stampWischoicerBillingStage 把 billing_stage 盖到异步日志 other.wischoicer 上。
+// 异步 settle/refund 的归因由 taskBillingOther 从 task.PrivateData 快照预置；
+// billing_stage 由调用方按差额/退款语义传入。无 wischoicer 时不写入。
+func stampWischoicerBillingStage(other map[string]interface{}, billingStage string) map[string]interface{} {
+	if !common.WischoicerIsValidBillingStage(billingStage) {
+		return other
+	}
+	if w, ok := other["wischoicer"].(map[string]interface{}); ok {
+		w["billing_stage"] = billingStage
+	}
+	return other
 }
 
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
