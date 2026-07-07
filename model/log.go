@@ -288,7 +288,8 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
-	otherStr := common.MapToJsonStr(other)
+	maskedModelName := MaskedModelName(tokenId, modelName)
+	otherStr := common.MapToJsonStr(withRealModelNameAdminInfo(other, modelName, maskedModelName))
 	// 判断是否需要记录 IP
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
@@ -305,7 +306,7 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 		PromptTokens:     0,
 		CompletionTokens: 0,
 		TokenName:        tokenName,
-		ModelName:        modelName,
+		ModelName:        maskedModelName,
 		Quota:            0,
 		ChannelId:        channelId,
 		TokenId:          tokenId,
@@ -352,7 +353,8 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
-	otherStr := common.MapToJsonStr(params.Other)
+	maskedModelName := MaskedModelName(params.TokenId, params.ModelName)
+	otherStr := common.MapToJsonStr(withRealModelNameAdminInfo(params.Other, params.ModelName, maskedModelName))
 	// 判断是否需要记录 IP
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
@@ -369,7 +371,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		PromptTokens:     params.PromptTokens,
 		CompletionTokens: params.CompletionTokens,
 		TokenName:        params.TokenName,
-		ModelName:        params.ModelName,
+		ModelName:        maskedModelName,
 		Quota:            params.Quota,
 		ChannelId:        params.ChannelId,
 		TokenId:          params.TokenId,
@@ -394,7 +396,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		LogQuotaData(QuotaDataLogParams{
 			UserID:    userId,
 			Username:  username,
-			ModelName: params.ModelName,
+			ModelName: maskedModelName,
 			Quota:     params.Quota,
 			CreatedAt: createdAt,
 			TokenUsed: params.PromptTokens + params.CompletionTokens,
@@ -425,11 +427,14 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 	username, _ := GetUsernameById(params.UserId, false)
 	tokenName := ""
+	tokenHidden := false
 	if params.TokenId > 0 {
-		if token, err := GetTokenById(params.TokenId); err == nil {
+		if token, err := GetTokenById(params.TokenId); err == nil && token != nil {
 			tokenName = token.Name
+			tokenHidden = token.Hidden
 		}
 	}
+	maskedModelName := MaskModelNameIfHidden(params.ModelName, tokenHidden)
 	createdAt := common.GetTimestamp()
 	log := &Log{
 		UserId:    params.UserId,
@@ -438,12 +443,12 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		Type:      params.LogType,
 		Content:   params.Content,
 		TokenName: tokenName,
-		ModelName: params.ModelName,
+		ModelName: maskedModelName,
 		Quota:     params.Quota,
 		ChannelId: params.ChannelId,
 		TokenId:   params.TokenId,
 		Group:     params.Group,
-		Other:     common.MapToJsonStr(params.Other),
+		Other:     common.MapToJsonStr(withRealModelNameAdminInfo(params.Other, params.ModelName, maskedModelName)),
 	}
 	err := createLog(log)
 	if err != nil {
@@ -457,7 +462,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		LogQuotaData(QuotaDataLogParams{
 			UserID:    params.UserId,
 			Username:  username,
-			ModelName: params.ModelName,
+			ModelName: maskedModelName,
 			Quota:     params.Quota,
 			CreatedAt: createdAt,
 			UseGroup:  params.Group,

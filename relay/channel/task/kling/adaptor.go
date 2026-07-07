@@ -209,7 +209,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	ov.ID = info.PublicTaskID
 	ov.TaskID = info.PublicTaskID
 	ov.CreatedAt = time.Now().Unix()
-	ov.Model = info.OriginModelName
+	ov.Model = model.MaskedModelName(info.TokenId, info.OriginModelName)
 	c.JSON(http.StatusOK, ov)
 	return kResp.Data.TaskId, responseBody, nil
 }

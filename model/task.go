@@ -179,10 +179,10 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 			privateData.Key = relayInfo.ChannelMeta.ApiKey
 		}
 		if relayInfo.UpstreamModelName != "" {
-			properties.UpstreamModelName = relayInfo.UpstreamModelName
+			properties.UpstreamModelName = MaskedModelName(relayInfo.TokenId, relayInfo.UpstreamModelName)
 		}
 		if relayInfo.OriginModelName != "" {
-			properties.OriginModelName = relayInfo.OriginModelName
+			properties.OriginModelName = MaskedModelName(relayInfo.TokenId, relayInfo.OriginModelName)
 		}
 	}
 

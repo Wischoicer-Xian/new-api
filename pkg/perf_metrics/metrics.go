@@ -43,7 +43,7 @@ func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens i
 		generationMs = latencyMs
 	}
 	Record(Sample{
-		Model:        info.OriginModelName,
+		Model:        model.MaskModelNameIfHidden(info.OriginModelName, info.TokenHidden),
 		Group:        info.UsingGroup,
 		LatencyMs:    latencyMs,
 		TtftMs:       ttftMs,

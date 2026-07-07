@@ -507,7 +507,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	openAIResp.TaskID = info.PublicTaskID
 	openAIResp.Model = c.GetString("model")
 	if openAIResp.Model == "" && info != nil {
-		openAIResp.Model = info.OriginModelName
+		openAIResp.Model = model.MaskedModelName(info.TokenId, info.OriginModelName)
 	}
 	openAIResp.Status = convertAliStatus(aliResp.Output.TaskStatus)
 	openAIResp.CreatedAt = common.GetTimestamp()

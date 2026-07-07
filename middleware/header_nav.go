@@ -19,6 +19,15 @@ func getHeaderNavAccess(module string) headerNavAccess {
 		Enabled:     true,
 		RequireAuth: false,
 	}
+	// The "pricing" module gates /api/pricing and the /api/perf-metrics/* surface.
+	// Default it to require auth so the aggregated usage/perf data — which can
+	// reveal which model a hidden system key calls — is not reachable anonymously.
+	// This is an additional anonymous-access fallback on top of the write-side
+	// model-name masking; admins can still publish it by setting
+	// HeaderNavModules.pricing.requireAuth=false (R3 decision 3).
+	if module == "pricing" {
+		fallback.RequireAuth = true
+	}
 
 	common.OptionMapRWMutex.RLock()
 	raw := common.OptionMap["HeaderNavModules"]
