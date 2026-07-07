@@ -50,6 +50,11 @@ func initCol() {
 	}
 }
 
+// InitCol 初始化 DB 类型相关的列别名（commonGroupCol / commonKeyCol 等）。
+// 正常由 InitDB 调一次；测试场景（直接 gorm.Open SQLite 不走 InitDB）需显式调，
+// 否则 GetUserGroup 等用到保留字列的查询会因列名为空报 SQL syntax error。
+func InitCol() { initCol() }
+
 var DB *gorm.DB
 
 var LOG_DB *gorm.DB

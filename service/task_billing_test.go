@@ -39,6 +39,10 @@ func TestMain(m *testing.M) {
 	common.BatchUpdateEnabled = false
 	common.LogConsumeEnabled = true
 
+	// 列别名（commonGroupCol 等）正常由 model.InitDB 调一次；测试不走 InitDB，需显式初始化，
+	// 否则 GetUserGroup 等 Select(commonGroupCol) 会因列名空报 SQL syntax error（WIS-460 preflight）。
+	model.InitCol()
+
 	if err := db.AutoMigrate(
 		&model.Task{},
 		&model.User{},

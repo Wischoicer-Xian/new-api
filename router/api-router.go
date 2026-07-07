@@ -35,6 +35,8 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.GET("/uptime/status", controller.GetUptimeKumaStatus)
 		apiRouter.GET("/models", middleware.UserAuth(), controller.DashboardListModels)
 		apiRouter.GET("/status/test", middleware.AdminAuth(), controller.TestStatus)
+		// WIS-460 preflight：internal/admin-only 只读额度预检，供 wischoicer-user 门面调用（纯读，不 reserve/decrease）。
+		apiRouter.POST("/preflight-quote", middleware.AdminAuth(), controller.QuotePreConsume)
 		apiRouter.GET("/notice", controller.GetNotice)
 		apiRouter.GET("/user-agreement", controller.GetUserAgreement)
 		apiRouter.GET("/privacy-policy", controller.GetPrivacyPolicy)
@@ -73,7 +75,6 @@ func SetApiRouter(router *gin.Engine) {
 
 		// Universal secure verification routes
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
-
 
 		userRoute := apiRouter.Group("/user")
 		{
@@ -255,13 +256,13 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
 		}
 
-			// Admin token routes (admin creates/updates tokens for any user)
-			tokenAdminRoute := apiRouter.Group("/token/admin")
-			tokenAdminRoute.Use(middleware.AdminAuth())
-			{
-				tokenAdminRoute.POST("/", controller.AdminCreateToken)
-				tokenAdminRoute.PUT("/:id", controller.AdminUpdateToken)
-			}
+		// Admin token routes (admin creates/updates tokens for any user)
+		tokenAdminRoute := apiRouter.Group("/token/admin")
+		tokenAdminRoute.Use(middleware.AdminAuth())
+		{
+			tokenAdminRoute.POST("/", controller.AdminCreateToken)
+			tokenAdminRoute.PUT("/:id", controller.AdminUpdateToken)
+		}
 
 		usageRoute := apiRouter.Group("/usage")
 		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
