@@ -150,14 +150,50 @@ func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (qu
 }
 
 func GetQuotaDataByUserId(userId int, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
-	var quotaDatas []*QuotaData
-	// 从quota_data表中查询数据
+	// WIS-515: collapse every hidden system token's rows into a single
+	// "知言云策系统调用" bucket for the user-facing dashboard. Identification is
+	// token_id + tokens.hidden (NOT a model-name mapping), so a normal API key
+	// calling the same real model keeps its own bucket. This covers both new
+	// writes (already aliased by WIS-505) and historical rows that still carry
+	// the real model name. eff_model_name is a computed alias with no clash
+	// against the real quota_data.model_name column, so GROUP BY resolves it
+	// unambiguously to the CASE expression rather than the raw column.
+	type row struct {
+		UserID    int    `gorm:"column:user_id"`
+		Username  string `gorm:"column:username"`
+		ModelName string `gorm:"column:eff_model_name"`
+		CreatedAt int64  `gorm:"column:created_at"`
+		Count     int    `gorm:"column:count"`
+		Quota     int    `gorm:"column:quota"`
+		TokenUsed int    `gorm:"column:token_used"`
+	}
+	var rows []row
 	err = DB.Table("quota_data").
-		Select("user_id, username, model_name, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("user_id = ? and created_at >= ? and created_at <= ?", userId, startTime, endTime).
-		Group("user_id, username, model_name, created_at").
-		Find(&quotaDatas).Error
-	return quotaDatas, err
+		Joins("LEFT JOIN tokens ON tokens.id = quota_data.token_id AND tokens.user_id = quota_data.user_id").
+		Select("quota_data.user_id AS user_id, quota_data.username AS username, "+
+			"CASE WHEN tokens.hidden = true THEN ? ELSE quota_data.model_name END AS eff_model_name, "+
+			"quota_data.created_at AS created_at, "+
+			"SUM(quota_data.count) AS count, SUM(quota_data.quota) AS quota, SUM(quota_data.token_used) AS token_used",
+			common.MaskedSystemModelAlias).
+		Where("quota_data.user_id = ? AND quota_data.created_at >= ? AND quota_data.created_at <= ?", userId, startTime, endTime).
+		Group("quota_data.user_id, quota_data.username, eff_model_name, quota_data.created_at").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	quotaData = make([]*QuotaData, 0, len(rows))
+	for _, r := range rows {
+		quotaData = append(quotaData, &QuotaData{
+			UserID:    r.UserID,
+			Username:  r.Username,
+			ModelName: r.ModelName,
+			CreatedAt: r.CreatedAt,
+			Count:     r.Count,
+			Quota:     r.Quota,
+			TokenUsed: r.TokenUsed,
+		})
+	}
+	return quotaData, err
 }
 
 func GetQuotaDataGroupByUser(startTime int64, endTime int64) (quotaData []*QuotaData, err error) {

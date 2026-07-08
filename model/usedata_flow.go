@@ -41,17 +41,45 @@ func flowQuotaBaseQuery(startTime int64, endTime int64) *gorm.DB {
 }
 
 func getSelfFlowQuotaData(startTime int64, endTime int64, userID int) ([]*FlowQuotaData, error) {
-	rows := make([]*FlowQuotaData, 0)
+	// WIS-515: mask real model names for the user's hidden system tokens (token_id
+	// + tokens.hidden, never model-name mapping). Collapses a hidden token's many
+	// models into one alias bucket per (token, use_group); normal API keys keep
+	// their real models. eff_model_name avoids clashing with quota_data.model_name
+	// so GROUP BY resolves to the CASE expression.
+	type row struct {
+		TokenID   int    `gorm:"column:token_id"`
+		UseGroup  string `gorm:"column:use_group"`
+		ModelName string `gorm:"column:eff_model_name"`
+		Count     int    `gorm:"column:count"`
+		Quota     int    `gorm:"column:quota"`
+		TokenUsed int    `gorm:"column:token_used"`
+	}
+	var rows []row
 	err := flowQuotaBaseQuery(startTime, endTime).
-		Select("token_id, use_group, model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("user_id = ?", userID).
-		Group("token_id, use_group, model_name").
+		Joins("LEFT JOIN tokens ON tokens.id = quota_data.token_id AND tokens.user_id = quota_data.user_id").
+		Select("quota_data.token_id AS token_id, quota_data.use_group AS use_group, "+
+			"CASE WHEN tokens.hidden = true THEN ? ELSE quota_data.model_name END AS eff_model_name, "+
+			"SUM(quota_data.count) AS count, SUM(quota_data.quota) AS quota, SUM(quota_data.token_used) AS token_used",
+			common.MaskedSystemModelAlias).
+		Where("quota_data.user_id = ?", userID).
+		Group("quota_data.token_id, quota_data.use_group, eff_model_name").
 		Order("quota DESC").
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	return rows, fillFlowTokenNames(rows)
+	out := make([]*FlowQuotaData, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, &FlowQuotaData{
+			TokenID:   r.TokenID,
+			UseGroup:  r.UseGroup,
+			ModelName: r.ModelName,
+			Count:     r.Count,
+			Quota:     r.Quota,
+			TokenUsed: r.TokenUsed,
+		})
+	}
+	return out, fillFlowTokenNames(out)
 }
 
 func getAdminFlowQuotaData(startTime int64, endTime int64, username string) ([]*FlowQuotaData, error) {
