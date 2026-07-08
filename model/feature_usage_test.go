@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -223,6 +224,35 @@ func TestFeatureUsageDetails_UncategorizedFilter(t *testing.T) {
 	// 只剩 uncategorized 那一条（feature_code 缺失）
 	assert.Equal(t, 1, res.Total)
 	assert.Equal(t, "", res.Items[0].FeatureCode)
+}
+
+// TestFeatureUsageDetails_ResponseOmitsModelAndRequestIDs WIS-514：客户侧 self details
+// 响应序列化层不得出现 model_name / request_id / upstream_request_id。
+// 归因闭环（settle/refund 复用 submit 快照的 request_id）由上面两条 *_RequestID 单测在
+// 结构体层守护——这里只断言 JSON 线上不暴露给客户。
+func TestFeatureUsageDetails_ResponseOmitsModelAndRequestIDs(t *testing.T) {
+	baseTs := int64(1_700_000_500)
+	seedFeatureUsageLogs(t, 7106, baseTs)
+	res, err := GetFeatureUsageDetails(7106, baseTs, baseTs+1000, FeatureUsageDetailsFilter{}, 1, 100)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Items)
+
+	b, err := json.Marshal(res)
+	require.NoError(t, err)
+
+	var wire struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(b, &wire))
+	require.NotEmpty(t, wire.Items)
+	for i, item := range wire.Items {
+		_, hasModel := item["model_name"]
+		_, hasReq := item["request_id"]
+		_, hasUp := item["upstream_request_id"]
+		assert.False(t, hasModel, "items[%d] 客户侧响应不得包含 model_name", i)
+		assert.False(t, hasReq, "items[%d] 客户侧响应不得包含 request_id", i)
+		assert.False(t, hasUp, "items[%d] 客户侧响应不得包含 upstream_request_id", i)
+	}
 }
 
 // findDetail 按 billing_stage 找明细。

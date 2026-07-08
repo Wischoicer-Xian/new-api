@@ -356,25 +356,28 @@ func GetFeatureUsageTasks(userId int, startTimestamp, endTimestamp int64, filter
 
 // FeatureUsageDetailItem details 接口单条明细。
 type FeatureUsageDetailItem struct {
-	CreatedAt         int64   `json:"created_at"`
-	FeatureCode       string  `json:"feature_code"`
-	FeatureName       string  `json:"feature_name"`
-	BizTaskID         string  `json:"biz_task_id"`
-	BizTaskTitle      string  `json:"biz_task_title"`
-	OperationCode     string  `json:"operation_code"`
-	OperationName     string  `json:"operation_name"`
-	SubTaskID         string  `json:"sub_task_id"`
-	BillingStage      string  `json:"billing_stage"`
-	LogType           string  `json:"log_type"`
-	ModelName         string  `json:"model_name"`
+	CreatedAt     int64  `json:"created_at"`
+	FeatureCode   string `json:"feature_code"`
+	FeatureName   string `json:"feature_name"`
+	BizTaskID     string `json:"biz_task_id"`
+	BizTaskTitle  string `json:"biz_task_title"`
+	OperationCode string `json:"operation_code"`
+	OperationName string `json:"operation_name"`
+	SubTaskID     string `json:"sub_task_id"`
+	BillingStage  string `json:"billing_stage"`
+	LogType       string `json:"log_type"`
+	// WIS-514: model_name / request_id / upstream_request_id 仅在 self 接口响应序列化层裁剪
+	// （json:"-"），不进客户侧响应。原始日志 / 内部排障 / 归因闭环不受影响；结构体字段保留
+	// 供稳定分页排序（RequestID）与单测守护（TestFeatureUsageDetails_*RequestID）。
+	ModelName         string  `json:"-"`
 	TokenName         string  `json:"token_name"`
 	TokenID           int     `json:"token_id"`
 	Quota             int     `json:"quota"`
 	CostRMB           float64 `json:"cost_rmb"`
 	PromptTokens      int     `json:"prompt_tokens"`
 	CompletionTokens  int     `json:"completion_tokens"`
-	RequestID         *string `json:"request_id"`
-	UpstreamRequestID *string `json:"upstream_request_id"`
+	RequestID         *string `json:"-"`
+	UpstreamRequestID *string `json:"-"`
 	ProviderTaskID    *string `json:"provider_task_id"`
 }
 
