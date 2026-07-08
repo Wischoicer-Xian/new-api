@@ -72,7 +72,12 @@ func GetFeatureUsageSummary(c *gin.Context) {
 		common.ApiErrorMsg(c, "未知的 feature_code")
 		return
 	}
-	result, err := model.GetFeatureUsageSummary(userId, start, end, featureCode)
+	result, err := model.GetFeatureUsageSummary(userId, start, end, model.FeatureUsageSummaryFilter{
+		FeatureCode:   featureCode,
+		BizTaskID:     c.Query("biz_task_id"),
+		TaskKeyword:   c.Query("task_keyword"),
+		OperationCode: c.Query("operation_code"),
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -127,6 +132,7 @@ func GetFeatureUsageDetails(c *gin.Context) {
 	result, err := model.GetFeatureUsageDetails(userId, start, end, model.FeatureUsageDetailsFilter{
 		FeatureCode:   featureCode,
 		BizTaskID:     c.Query("biz_task_id"),
+		TaskKeyword:   c.Query("task_keyword"),
 		OperationCode: c.Query("operation_code"),
 	}, page, pageSize)
 	if err != nil {
