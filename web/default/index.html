@@ -2,25 +2,25 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <base href="/" />
     <script>
-      // Base bootloader — MUST execute before any asset tag below it.
-      // Assets are emitted relative (rsbuild assetPrefix: './') so a single
-      // build runs under root '/', '/token-platform/', and '/token-platform-fe/'.
-      // On a client-route deep link such as /dashboard/models, a relative URL
-      // would otherwise resolve against the route path (/dashboard/static/...)
-      // and the SPA fallback would return index.html as the asset, which the
-      // browser then tries to execute → "SyntaxError: Unexpected token '<'".
-      // Pinning <base href> to the detected proxy basepath makes every relative
-      // asset resolve from the base instead. Detection mirrors src/lib/basepath.ts.
-      // See WIS-518.
+      // The static <base href="/"> above is correct for the Go server root and —
+      // crucially — because it is static, the browser's preload scanner sees it.
+      // That stops the scanner from speculatively fetching /dashboard/static/...
+      // on a client-route deep link (e.g. /dashboard/models) and getting index.html
+      // back: it fetches /static/... like the main parser, so the two dedupe instead
+      // of producing duplicate text/html requests. For the /token-platform* proxy
+      // deployments, switch <base> to the proxy prefix before the asset tags below
+      // parse. Detection mirrors src/lib/basepath.ts. See WIS-518.
       (function () {
         var p = window.location.pathname;
         var base = '/';
         if (p.indexOf('/token-platform-fe') === 0) base = '/token-platform-fe/';
         else if (p.indexOf('/token-platform') === 0) base = '/token-platform/';
-        var el = document.createElement('base');
-        el.href = base;
-        document.head.appendChild(el);
+        if (base !== '/') {
+          var b = document.querySelector('base');
+          if (b) b.href = base;
+        }
       })();
     </script>
     <link rel="icon" type="image/png" href="./logo.png" />
