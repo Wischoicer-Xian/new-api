@@ -135,8 +135,15 @@ func formatUserLogs(logs []*Log, startIdx int) {
 }
 
 // getHiddenSystemTokenIdsForUser returns the ids of the given user's hidden
-// system tokens (知言云策系统 key). User-facing log/quota reads use this to mask
-// real model names on the read path (WIS-515). Identification is strictly
+// system tokens (知言云策系统 key), INCLUDING soft-deleted ones. User-facing
+// log/feature-usage reads use this to mask real model names on the read path
+// (WIS-515).
+//
+// Unscoped is required: Token uses gorm.DeletedAt (soft delete via Token.Delete),
+// and system keys are rotated/soft-deleted over time. Historical logs and
+// feature-usage rows still carry the old token_id, so the hidden set must cover
+// soft-deleted tokens too — otherwise pre-WIS-505 rows on a rotated system key
+// would resurface their raw model to end users. Identification is strictly
 // user_id + hidden — never a model-name string — so a normal API key calling the
 // same real model is never affected. A failed lookup returns nil and logs
 // loudly; new writes are still protected by WIS-505 write-time masking, only
@@ -146,7 +153,7 @@ func getHiddenSystemTokenIdsForUser(userId int) []int {
 		return nil
 	}
 	var ids []int
-	if err := DB.Model(&Token{}).Where("user_id = ? AND hidden = true", userId).Pluck("id", &ids).Error; err != nil {
+	if err := DB.Unscoped().Model(&Token{}).Where("user_id = ? AND hidden = true", userId).Pluck("id", &ids).Error; err != nil {
 		common.SysError(fmt.Sprintf("failed to load hidden system token ids for user %d: %s", userId, err.Error()))
 		return nil
 	}

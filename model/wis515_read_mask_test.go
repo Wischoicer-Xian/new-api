@@ -211,3 +211,48 @@ func TestGetFeatureUsageDetailsMasksHiddenSystemToken(t *testing.T) {
 	require.Equal(t, common.MaskedSystemModelAlias, modelByToken[hidden.Id], "费用明细 must mask hidden system token model")
 	require.Equal(t, real, modelByToken[normal.Id], "费用明细 must keep real model for normal attributed token")
 }
+
+// TestGetUserLogsMasksAfterHiddenTokenSoftDeleted: a rotated/soft-deleted system
+// key's historical logs must STAY masked. The hidden set covers soft-deleted
+// tokens (Unscoped read), so pre-WIS-505 rows never resurface the raw model
+// after a system key rotation. (Regression for 记星 R2 P1.)
+func TestGetUserLogsMasksAfterHiddenTokenSoftDeleted(t *testing.T) {
+	const real = "claude-opus-4-wis515-sd"
+	hidden := wis515SeedToken(t, 515171, wis515User, true, "sk-wis515-hidden-sd", "hidden-sys")
+	wis515SeedLog(t, wis515User, hidden.Id, real, "wis515-sd-hidden")
+	// Rotate / soft-delete the system key (mirrors Token.Delete in production).
+	require.NoError(t, hidden.Delete())
+
+	logs, _, err := GetUserLogs(wis515User, LogTypeUnknown, 0, 0, "", "", 0, 100, "", "", "")
+	require.NoError(t, err)
+	byReq := modelNamesByRequest(logs)
+	require.Equal(t, common.MaskedSystemModelAlias, byReq["wis515-sd-hidden"],
+		"historical log of a soft-deleted hidden system token must still be masked")
+}
+
+// TestGetFeatureUsageDetailsMasksAfterHiddenTokenSoftDeleted: same guarantee for
+// the 费用明细 details API after the hidden system token is soft-deleted.
+func TestGetFeatureUsageDetailsMasksAfterHiddenTokenSoftDeleted(t *testing.T) {
+	const (
+		fuUserSD = 515006
+		realSD   = "doubao-seedance-wis515-sd-fu"
+	)
+	hidden := wis515SeedToken(t, 515181, fuUserSD, true, "sk-wis515-hidden-sd-fu", "hidden-sys")
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId: fuUserSD, CreatedAt: wis515Ts, Type: LogTypeConsume, ModelName: realSD, TokenId: hidden.Id, Quota: 100,
+		RequestId: "wis515-sd-fu-hidden",
+		Other:     buildOtherJSON("image_creation", "image_creation.generate", "biz-fu-sd", common.WischoicerStageRequest, "", "", ""),
+	}).Error)
+	t.Cleanup(func() { LOG_DB.Unscoped().Where("request_id = ?", "wis515-sd-fu-hidden").Delete(&Log{}) })
+	// Rotate / soft-delete the system key after the historical row exists.
+	require.NoError(t, hidden.Delete())
+
+	res, err := GetFeatureUsageDetails(fuUserSD, wis515Ts, wis515Ts+3600, FeatureUsageDetailsFilter{}, 1, 100)
+	require.NoError(t, err)
+	modelByToken := map[int]string{}
+	for _, it := range res.Items {
+		modelByToken[it.TokenID] = it.ModelName
+	}
+	require.Equal(t, common.MaskedSystemModelAlias, modelByToken[hidden.Id],
+		"费用明细 must keep masking after the hidden system token is soft-deleted")
+}
