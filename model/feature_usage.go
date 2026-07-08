@@ -138,9 +138,19 @@ type FeatureUsageSummaryResult struct {
 	Uncategorized FeatureUsageUncategorized `json:"uncategorized"`
 }
 
+// FeatureUsageSummaryFilter summary 接口过滤参数。
+// WIS-514 方案 A：与 tasks/details 同口径，新增 biz_task_id / task_keyword / operation_code，
+// 使顶部汇总与任务聚合、调用明细三层视图口径一致（加性扩参，零值 = 不过滤，向后兼容）。
+type FeatureUsageSummaryFilter struct {
+	FeatureCode   string
+	BizTaskID     string
+	TaskKeyword   string // 匹配 biz_task_title（大小写不敏感包含）
+	OperationCode string
+}
+
 // GetFeatureUsageSummary 聚合功能板块费用概览（RFC §4.1）。
-// featureCode 非空时仅返回该功能（且 uncategorized 不适用）；为空时返回全部已知功能 + uncategorized。
-func GetFeatureUsageSummary(userId int, startTimestamp, endTimestamp int64, featureCode string) (FeatureUsageSummaryResult, error) {
+// filter.FeatureCode 非空时仅返回该功能（且 uncategorized 不适用）；为空时返回全部已知功能 + uncategorized。
+func GetFeatureUsageSummary(userId int, startTimestamp, endTimestamp int64, filter FeatureUsageSummaryFilter) (FeatureUsageSummaryResult, error) {
 	result := FeatureUsageSummaryResult{Features: []FeatureUsageFeatureAgg{}}
 	rows, err := loadSelfAttributedLogs(userId, startTimestamp, endTimestamp)
 	if err != nil {
@@ -161,7 +171,17 @@ func GetFeatureUsageSummary(userId int, startTimestamp, endTimestamp int64, feat
 
 	for _, r := range rows {
 		// 指定 feature_code 时，只统计该 feature 范围；uncategorized 与其它 feature 不进 totals。
-		if featureCode != "" && r.FeatureCode != featureCode {
+		if filter.FeatureCode != "" && r.FeatureCode != filter.FeatureCode {
+			continue
+		}
+		// WIS-514 方案 A：summary 与 tasks/details 同口径，按任务 ID / 操作步骤 / 任务标题关键字过滤。
+		if filter.BizTaskID != "" && r.BizTaskID != filter.BizTaskID {
+			continue
+		}
+		if filter.OperationCode != "" && r.OperationCode != filter.OperationCode {
+			continue
+		}
+		if filter.TaskKeyword != "" && !containsFold(r.BizTaskTitle, filter.TaskKeyword) {
 			continue
 		}
 		signed := featureUsageSignedQuota(r.Log)
@@ -391,9 +411,11 @@ type FeatureUsageDetailsResult struct {
 
 // FeatureUsageDetailsFilter details 接口过滤参数。
 // FeatureCode 允许传 "uncategorized"（只看未归类）或具体 feature code。
+// WIS-514 方案 A：新增 TaskKeyword，与 tasks 同口径，使调用明细受任务标题关键字筛选。
 type FeatureUsageDetailsFilter struct {
 	FeatureCode   string
 	BizTaskID     string
+	TaskKeyword   string // 匹配 biz_task_title（大小写不敏感包含）
 	OperationCode string
 }
 
@@ -426,6 +448,9 @@ func GetFeatureUsageDetails(userId int, startTimestamp, endTimestamp int64, filt
 			continue
 		}
 		if filter.OperationCode != "" && r.OperationCode != filter.OperationCode {
+			continue
+		}
+		if filter.TaskKeyword != "" && !containsFold(r.BizTaskTitle, filter.TaskKeyword) {
 			continue
 		}
 

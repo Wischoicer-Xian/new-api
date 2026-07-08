@@ -195,7 +195,7 @@ func TestGetFeatureUsageDetailsMasksHiddenSystemToken(t *testing.T) {
 		require.NoError(t, LOG_DB.Create(&Log{
 			UserId: fuUser, CreatedAt: wis515Ts, Type: LogTypeConsume, ModelName: real, TokenId: tokenId, Quota: 100,
 			RequestId: requestID,
-			Other:     buildOtherJSON("image_creation", "image_creation.generate", bizTask, common.WischoicerStageRequest, "", "", ""),
+			Other:     buildOtherJSON("image_creation", "image_creation.generate", bizTask, "", common.WischoicerStageRequest, "", "", ""),
 		}).Error)
 		t.Cleanup(func() { LOG_DB.Unscoped().Where("request_id = ?", requestID).Delete(&Log{}) })
 	}
@@ -241,7 +241,7 @@ func TestGetFeatureUsageDetailsMasksAfterHiddenTokenSoftDeleted(t *testing.T) {
 	require.NoError(t, LOG_DB.Create(&Log{
 		UserId: fuUserSD, CreatedAt: wis515Ts, Type: LogTypeConsume, ModelName: realSD, TokenId: hidden.Id, Quota: 100,
 		RequestId: "wis515-sd-fu-hidden",
-		Other:     buildOtherJSON("image_creation", "image_creation.generate", "biz-fu-sd", common.WischoicerStageRequest, "", "", ""),
+		Other:     buildOtherJSON("image_creation", "image_creation.generate", "biz-fu-sd", "", common.WischoicerStageRequest, "", "", ""),
 	}).Error)
 	t.Cleanup(func() { LOG_DB.Unscoped().Where("request_id = ?", "wis515-sd-fu-hidden").Delete(&Log{}) })
 	// Rotate / soft-delete the system key after the historical row exists.

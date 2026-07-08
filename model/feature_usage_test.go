@@ -11,7 +11,8 @@ import (
 
 // 构造一条日志的 other JSON。attributed=true 时带 wischoicer 归因对象。
 // providerTaskID 写 other.provider_task_id（上游真实任务 ID，仅异步任务日志有）。
-func buildOtherJSON(featureCode, opCode, bizTaskID, billingStage, providerTaskID, snapReq, snapUp string) string {
+// bizTaskTitle 写归因 biz_task_title（WIS-514 方案 A task_keyword 过滤测试依赖）。
+func buildOtherJSON(featureCode, opCode, bizTaskID, bizTaskTitle, billingStage, providerTaskID, snapReq, snapUp string) string {
 	m := map[string]interface{}{}
 	if providerTaskID != "" {
 		m["provider_task_id"] = providerTaskID
@@ -25,6 +26,9 @@ func buildOtherJSON(featureCode, opCode, bizTaskID, billingStage, providerTaskID
 		"biz_task_id":       bizTaskID,
 		"account_id":        "acct-1",
 		"app_user_id":       "acct-1",
+	}
+	if bizTaskTitle != "" {
+		w["biz_task_title"] = bizTaskTitle
 	}
 	if billingStage != "" {
 		w["billing_stage"] = billingStage
@@ -52,20 +56,20 @@ func seedFeatureUsageLogs(t *testing.T, userId int, baseTs int64) {
 		// merch_video_clone 同一 biz_task_id 的 submit / settle / refund
 		{UserId: userId, CreatedAt: baseTs + 10, Type: LogTypeConsume, ModelName: "doubao-seedance", TokenId: 1, Quota: 100,
 			RequestId: "req-submit", UpstreamRequestId: "up-submit",
-			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageSubmit, "upstream-task-1", "", "")},
+			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", "爆款复刻带货视频任务A", common.WischoicerStageSubmit, "upstream-task-1", "", "")},
 		{UserId: userId, CreatedAt: baseTs + 20, Type: LogTypeConsume, ModelName: "doubao-seedance", TokenId: 1, Quota: 50,
 			RequestId: "req-settle", UpstreamRequestId: "up-settle",
-			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageSettle, "upstream-task-1", "req-submit", "up-submit")},
+			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", "爆款复刻带货视频任务A", common.WischoicerStageSettle, "upstream-task-1", "req-submit", "up-submit")},
 		{UserId: userId, CreatedAt: baseTs + 30, Type: LogTypeRefund, ModelName: "doubao-seedance", TokenId: 1, Quota: 30,
-			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", common.WischoicerStageRefund, "upstream-task-1", "req-submit", "up-submit")},
+			Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-1", "爆款复刻带货视频任务A", common.WischoicerStageRefund, "upstream-task-1", "req-submit", "up-submit")},
 		// image_creation 同步消费
 		{UserId: userId, CreatedAt: baseTs + 40, Type: LogTypeConsume, ModelName: "gpt-image-2", TokenId: 1, Quota: 200,
 			RequestId: "req-img", UpstreamRequestId: "up-img",
-			Other: buildOtherJSON("image_creation", "image_creation.generate", "biz-2", common.WischoicerStageRequest, "", "", "")},
+			Other: buildOtherJSON("image_creation", "image_creation.generate", "biz-2", "图片生成任务B", common.WischoicerStageRequest, "", "", "")},
 		// uncategorized：归因有效但 feature_code 缺失
 		{UserId: userId, CreatedAt: baseTs + 50, Type: LogTypeConsume, ModelName: "gemini-3.5-flash", TokenId: 1, Quota: 40,
 			RequestId: "req-uncat",
-			Other:     buildOtherJSON("", "some.unknown.op", "biz-3", common.WischoicerStageRequest, "", "", "")},
+			Other:     buildOtherJSON("", "some.unknown.op", "biz-3", "未归因历史任务C", common.WischoicerStageRequest, "", "", "")},
 		// 普通 API Key 消耗：无 wischoicer，绝不能被聚合误伤
 		{UserId: userId, CreatedAt: baseTs + 60, Type: LogTypeConsume, ModelName: "gpt-4o", TokenId: 2, Quota: 9999,
 			RequestId: "req-normal", Other: `{"is_task":false}`},
@@ -81,7 +85,7 @@ func TestFeatureUsageSummary_AggregationAndUncategorizedNotHarmed(t *testing.T) 
 	seedFeatureUsageLogs(t, 7101, baseTs)
 	start, end := baseTs, baseTs+1000
 
-	res, err := GetFeatureUsageSummary(7101, start, end, "")
+	res, err := GetFeatureUsageSummary(7101, start, end, FeatureUsageSummaryFilter{})
 	require.NoError(t, err)
 
 	// totals = 全部归因日志净值：100(submit)+50(settle)-30(refund)+200(img)+40(uncat) = 360
@@ -119,7 +123,7 @@ func TestFeatureUsageSummary_AggregationAndUncategorizedNotHarmed(t *testing.T) 
 func TestFeatureUsageSummary_FeatureFilterRejectsUncategorized(t *testing.T) {
 	baseTs := int64(1_700_000_000)
 	seedFeatureUsageLogs(t, 7102, baseTs)
-	res, err := GetFeatureUsageSummary(7102, baseTs, baseTs+1000, "image_creation")
+	res, err := GetFeatureUsageSummary(7102, baseTs, baseTs+1000, FeatureUsageSummaryFilter{FeatureCode: "image_creation"})
 	require.NoError(t, err)
 	require.Len(t, res.Features, 1)
 	assert.Equal(t, "image_creation", res.Features[0].FeatureCode)
@@ -205,7 +209,7 @@ func TestFeatureUsageDetails_NoSnapshotReturnsNullRequestID(t *testing.T) {
 	baseTs := int64(1_700_000_300)
 	require.NoError(t, LOG_DB.Create(&Log{
 		UserId: 7002, CreatedAt: baseTs + 5, Type: LogTypeRefund, ModelName: "doubao-seedance", Quota: 30,
-		Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-x", common.WischoicerStageRefund, "upstream-x", "", ""),
+		Other: buildOtherJSON("merch_video_clone", "merch_video_clone.step3.full_video.segment_submit", "biz-x", "", common.WischoicerStageRefund, "upstream-x", "", ""),
 	}).Error)
 	res, err := GetFeatureUsageDetails(7002, baseTs, baseTs+1000, FeatureUsageDetailsFilter{}, 1, 100)
 	require.NoError(t, err)
@@ -263,4 +267,59 @@ func findDetail(items []FeatureUsageDetailItem, stage string) *FeatureUsageDetai
 		}
 	}
 	return nil
+}
+
+// WIS-514 方案 A：summary 加性扩参 biz_task_id / task_keyword / operation_code，与 tasks/details 同口径，
+// 使顶部汇总受任务/操作筛选影响。下方用同一 seed 验证 summary 三参过滤；向后兼容（零值 filter 行为不变）
+// 由 TestFeatureUsageSummary_AggregationAndUncategorizedNotHarmed / _FeatureFilterRejectsUncategorized 守护
+// （它们传零值 / 仅 FeatureCode 的 filter，结果与扩参前一致）。
+
+func TestFeatureUsageSummary_FiltersByTaskKeyword(t *testing.T) {
+	baseTs := int64(1_700_000_600)
+	seedFeatureUsageLogs(t, 7107, baseTs)
+	// task_keyword="带货视频" 只命中 merch/biz-1（title "爆款复刻带货视频任务A"）。
+	res, err := GetFeatureUsageSummary(7107, baseTs, baseTs+1000, FeatureUsageSummaryFilter{TaskKeyword: "带货视频"})
+	require.NoError(t, err)
+	assert.Equal(t, 120, res.Totals.Quota) // 100(submit)+50(settle)-30(refund)
+	assert.Equal(t, 1, res.Totals.RequestCount)
+	require.Len(t, res.Features, 1)
+	assert.Equal(t, "merch_video_clone", res.Features[0].FeatureCode)
+	assert.Equal(t, 120, res.Features[0].Quota)
+	assert.False(t, res.Uncategorized.Present, "task_keyword 限定到已知 feature，uncategorized 不应出现")
+}
+
+func TestFeatureUsageSummary_FiltersByBizTaskID(t *testing.T) {
+	baseTs := int64(1_700_000_700)
+	seedFeatureUsageLogs(t, 7108, baseTs)
+	// biz_task_id="biz-2" 只命中 image_creation。
+	res, err := GetFeatureUsageSummary(7108, baseTs, baseTs+1000, FeatureUsageSummaryFilter{BizTaskID: "biz-2"})
+	require.NoError(t, err)
+	assert.Equal(t, 200, res.Totals.Quota)
+	assert.Equal(t, 1, res.Totals.RequestCount)
+	require.Len(t, res.Features, 1)
+	assert.Equal(t, "image_creation", res.Features[0].FeatureCode)
+}
+
+func TestFeatureUsageSummary_FiltersByOperationCode(t *testing.T) {
+	baseTs := int64(1_700_000_800)
+	seedFeatureUsageLogs(t, 7109, baseTs)
+	// operation_code 只命中 image_creation.generate。
+	res, err := GetFeatureUsageSummary(7109, baseTs, baseTs+1000, FeatureUsageSummaryFilter{OperationCode: "image_creation.generate"})
+	require.NoError(t, err)
+	assert.Equal(t, 200, res.Totals.Quota)
+	require.Len(t, res.Features, 1)
+	assert.Equal(t, "image_creation", res.Features[0].FeatureCode)
+}
+
+// WIS-514 方案 A：details 加 task_keyword，与 tasks 同口径，调用明细受任务标题关键字筛选。
+func TestFeatureUsageDetails_FiltersByTaskKeyword(t *testing.T) {
+	baseTs := int64(1_700_000_900)
+	seedFeatureUsageLogs(t, 7110, baseTs)
+	res, err := GetFeatureUsageDetails(7110, baseTs, baseTs+1000, FeatureUsageDetailsFilter{TaskKeyword: "图片"}, 1, 100)
+	require.NoError(t, err)
+	// task_keyword="图片" 只命中 image/biz-2 一条明细。
+	require.Equal(t, 1, res.Total)
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, "image_creation", res.Items[0].FeatureCode)
+	assert.Equal(t, "biz-2", res.Items[0].BizTaskID)
 }
