@@ -80,6 +80,15 @@ export default defineConfig(({ envMode }) => {
       // Production optimizations
       minify: isProd,
       target: 'web',
+      // Relative prefix is intentional: one build ships under the Go server root
+      // ('/'), the '/token-platform/' nginx proxy, and the '/token-platform-fe/'
+      // workstation proxy, so emitted asset URLs must stay relative and be
+      // anchored at runtime by the <base href> bootloader in index.html.
+      // A leading-slash prefix would hardcode the root and break both proxy
+      // deployments. That <base> bootloader is also what fixes deep-link/refresh
+      // white screens (e.g. /dashboard/models), where relative URLs would
+      // otherwise resolve against the route path (/dashboard/static/...) and the
+      // SPA fallback would serve index.html as the asset. See WIS-518.
       assetPrefix: './',
       distPath: {
         root: 'dist',
