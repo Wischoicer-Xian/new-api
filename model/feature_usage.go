@@ -402,6 +402,13 @@ func GetFeatureUsageDetails(userId int, startTimestamp, endTimestamp int64, filt
 	if err != nil {
 		return result, err
 	}
+	// WIS-515: mask real model names for the user's hidden system tokens so the
+	// 费用明细 API never returns a raw model_name (boundary #2). Identified by
+	// token_id + hidden, never by model-name string.
+	hiddenSet := make(map[int]bool)
+	for _, id := range getHiddenSystemTokenIdsForUser(userId) {
+		hiddenSet[id] = true
+	}
 
 	items := make([]FeatureUsageDetailItem, 0, len(rows))
 	for _, r := range rows {
@@ -461,6 +468,13 @@ func GetFeatureUsageDetails(userId int, startTimestamp, endTimestamp int64, filt
 			UpstreamRequestID: upstreamID,
 			ProviderTaskID:    strPtrOrNil(r.ProviderTaskID),
 		})
+	}
+	// WIS-515: rewrite real model_name → system alias for hidden system token rows
+	// (covers historical rows written before WIS-505's write-time masking).
+	for i := range items {
+		if items[i].TokenID != 0 && hiddenSet[items[i].TokenID] {
+			items[i].ModelName = common.MaskedSystemModelAlias
+		}
 	}
 	// 按 created_at 倒序，相同则 request_id 倒序，分页稳定。
 	sort.Slice(items, func(i, j int) bool {

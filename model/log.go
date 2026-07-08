@@ -134,6 +134,42 @@ func formatUserLogs(logs []*Log, startIdx int) {
 	assignDisplayLogIds(logs, startIdx)
 }
 
+// getHiddenSystemTokenIdsForUser returns the ids of the given user's hidden
+// system tokens (知言云策系统 key). User-facing log/quota reads use this to mask
+// real model names on the read path (WIS-515). Identification is strictly
+// user_id + hidden — never a model-name string — so a normal API key calling the
+// same real model is never affected. A failed lookup returns nil and logs
+// loudly; new writes are still protected by WIS-505 write-time masking, only
+// historical rows would be at risk during such a failure.
+func getHiddenSystemTokenIdsForUser(userId int) []int {
+	if userId <= 0 {
+		return nil
+	}
+	var ids []int
+	if err := DB.Model(&Token{}).Where("user_id = ? AND hidden = true", userId).Pluck("id", &ids).Error; err != nil {
+		common.SysError(fmt.Sprintf("failed to load hidden system token ids for user %d: %s", userId, err.Error()))
+		return nil
+	}
+	return ids
+}
+
+// maskHiddenSystemLogsForUser rewrites ModelName to the system alias for any log
+// whose token_id is one of the user's hidden system tokens. This is the
+// read-side guarantee (WIS-515): rows written before WIS-505's write-time
+// masking — or via any path that stored a real model_name — never surface the
+// real upstream model to end users. formatUserLogs has already stripped the
+// admin-only Other fields (upstream_model_name / is_model_mapped).
+func maskHiddenSystemLogsForUser(logs []*Log, hiddenTokenIds map[int]bool) {
+	if len(hiddenTokenIds) == 0 {
+		return
+	}
+	for _, l := range logs {
+		if l != nil && l.TokenId != 0 && hiddenTokenIds[l.TokenId] {
+			l.ModelName = common.MaskedSystemModelAlias
+		}
+	}
+}
+
 func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 	order := "id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
@@ -141,6 +177,16 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 	}
 	err = LOG_DB.Model(&Log{}).Where("token_id = ?", tokenId).Order(order).Limit(common.MaxRecentItems).Find(&logs).Error
 	formatUserLogs(logs, 0)
+	// WIS-515: if this token is a hidden system token, mask real model names on
+	// the read path (defense for historical rows; new writes already masked at
+	// write time by WIS-505). All rows here belong to this one token.
+	if tokenId > 0 {
+		if t, e := GetTokenById(tokenId); e == nil && t.Hidden {
+			for _, l := range logs {
+				l.ModelName = common.MaskedSystemModelAlias
+			}
+		}
+	}
 	return logs, err
 }
 
@@ -652,6 +698,14 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 const logSearchCountLimit = 10000
 
 func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+	// WIS-515: load the user's hidden system token ids once. Used both to keep the
+	// model filter from leaking historical system-key rows and to mask any real
+	// model_name still stored on such rows at read time.
+	hiddenIds := getHiddenSystemTokenIdsForUser(userId)
+	hiddenSet := make(map[int]bool, len(hiddenIds))
+	for _, id := range hiddenIds {
+		hiddenSet[id] = true
+	}
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB.Where("logs.user_id = ?", userId)
@@ -659,8 +713,26 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 		tx = LOG_DB.Where("logs.user_id = ? and logs.type = ?", userId, logType)
 	}
 
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
-		return nil, 0, err
+	// WIS-515: harden the model filter against historical system-key rows (written
+	// before WIS-505's write-time masking, so they still carry the real model name).
+	// Filtering by the alias must surface system rows; filtering by a real model
+	// must never surface hidden system rows. Identified by token_id + hidden, never
+	// by model-name string, so a normal API key calling the same model is unaffected.
+	if modelName != "" {
+		if modelName == common.MaskedSystemModelAlias {
+			if len(hiddenIds) > 0 {
+				tx = tx.Where("(logs.model_name = ? OR logs.token_id IN ?)", modelName, hiddenIds)
+			} else {
+				tx = tx.Where("logs.model_name = ?", modelName)
+			}
+		} else {
+			if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
+				return nil, 0, err
+			}
+			if len(hiddenIds) > 0 {
+				tx = tx.Where("logs.token_id NOT IN ?", hiddenIds)
+			}
+		}
 	}
 	if tokenName != "" {
 		tx = tx.Where("logs.token_name = ?", tokenName)
@@ -696,6 +768,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	}
 
 	formatUserLogs(logs, startIdx)
+	maskHiddenSystemLogsForUser(logs, hiddenSet)
 	return logs, total, err
 }
 
