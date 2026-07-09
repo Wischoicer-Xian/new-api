@@ -141,3 +141,32 @@ func GetFeatureUsageDetails(c *gin.Context) {
 	}
 	common.ApiSuccess(c, result)
 }
+
+// GetFeatureUsageAnalytics GET /api/log/self/feature-usage/analytics（WIS-523）。
+// 与 summary/tasks/details 不同：feature_code 不按静态枚举校验——动态/未来 feature 也要能查，
+// 未命中返回空结果而非报错。time_granularity 空 → 后端按窗口自动推断。
+func GetFeatureUsageAnalytics(c *gin.Context) {
+	userId := c.GetInt("id")
+	start, end, ok := parseFeatureUsageRange(c)
+	if !ok {
+		return
+	}
+	granularity := c.Query("time_granularity")
+	switch granularity {
+	case "", model.FeatureUsageGranularityHour, model.FeatureUsageGranularityDay, model.FeatureUsageGranularityWeek:
+	default:
+		common.ApiErrorMsg(c, "time_granularity 仅支持 hour/day/week")
+		return
+	}
+	result, err := model.GetFeatureUsageAnalytics(userId, start, end, granularity, model.FeatureUsageAnalyticsFilter{
+		FeatureCode:   c.Query("feature_code"),
+		BizTaskID:     c.Query("biz_task_id"),
+		TaskKeyword:   c.Query("task_keyword"),
+		OperationCode: c.Query("operation_code"),
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, result)
+}

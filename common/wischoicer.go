@@ -76,6 +76,10 @@ func WischoicerFeatureDisplayName(code string) string {
 	return wischoicerFeatureCodes[code]
 }
 
+// WischoicerOtherFeatureLabel 归因有效但 feature_code 缺失时面向用户的兜底展示名。
+// 用于 analytics 汇总，避免把「缺 feature_code / 内部调用」等技术文案暴露给客户。
+const WischoicerOtherFeatureLabel = "其他功能消耗"
+
 // WischoicerIsKnownFeatureCode 判断 feature_code 是否属于已定义枚举（含预留）。
 // 不在枚举内（含空串）的 code 在聚合时归入 uncategorized。
 func WischoicerIsKnownFeatureCode(code string) bool {

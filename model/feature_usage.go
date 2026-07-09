@@ -3,6 +3,7 @@ package model
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -543,4 +544,294 @@ func strValOrEmpty(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// WIS-523 §建议后端实现：功能模块消耗分析（user-self 趋势接口）。
+//
+// 与 summary/tasks/details 的差异：analytics 不按静态 feature 枚举折叠未知 feature。
+// 任意非空 feature_code（含尚未进枚举的未来新板块）都独立成行，按日志快照/兜底名展示；
+// 仅 feature_code 缺失的归因日志归入「其他功能消耗」。时间桶在 Go 层按 UTC 对齐
+// （与 quota_data 的小时桶口径一致），bucket_ts 为 Unix 秒，前端按本地时区格式化。
+
+const (
+	FeatureUsageGranularityHour = "hour"
+	FeatureUsageGranularityDay  = "day"
+	FeatureUsageGranularityWeek = "week"
+)
+
+// featureUsageTokenUsed token 计入口径：仅 consume 行计入 prompt+completion，
+// refund 不倒扣 token（WIS-523 §后端统计口径 5）。
+func featureUsageTokenUsed(lg *Log) int {
+	if lg.Type == LogTypeRefund {
+		return 0
+	}
+	return lg.PromptTokens + lg.CompletionTokens
+}
+
+// featureUsageFeatureName 面向用户的功能展示名。
+// 空 feature_code → 「其他功能消耗」；非空 code → 枚举 canonical 名优先，
+// 回退日志快照 feature_name，再回退 code 本身（保证永不为空，未知新板块也能展示）。
+func featureUsageFeatureName(code, snapshot string) string {
+	if code == "" {
+		return common.WischoicerOtherFeatureLabel
+	}
+	if name := common.WischoicerFeatureDisplayName(code); name != "" {
+		return name
+	}
+	if snapshot != "" {
+		return snapshot
+	}
+	return code
+}
+
+// featureUsageNormalizeGranularity 归一化粒度：空串或非法值按时间范围自动推断。
+func featureUsageNormalizeGranularity(granularity string, spanSeconds int64) string {
+	switch granularity {
+	case FeatureUsageGranularityHour, FeatureUsageGranularityDay, FeatureUsageGranularityWeek:
+		return granularity
+	}
+	// 自动推断：≤3 天按小时、≤84 天（12 周）按日、否则按周。
+	switch {
+	case spanSeconds <= 3*24*60*60:
+		return FeatureUsageGranularityHour
+	case spanSeconds <= 84*24*60*60:
+		return FeatureUsageGranularityDay
+	default:
+		return FeatureUsageGranularityWeek
+	}
+}
+
+// featureUsageBucketTs 把日志时间归到 UTC 桶起点。hour/day 用整数取模（与 quota_data 一致）；
+// week 以周一 00:00 UTC 为桶起点（Go time 计算星期，不依赖 epoch 对齐）。
+func featureUsageBucketTs(ts int64, granularity string) int64 {
+	switch granularity {
+	case FeatureUsageGranularityHour:
+		return ts - ts%3600
+	case FeatureUsageGranularityWeek:
+		t := time.Unix(ts, 0).UTC()
+		daysSinceMonday := (int(t.Weekday()) + 6) % 7 // 周一→0 … 周日→6
+		midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		return midnight.AddDate(0, 0, -daysSinceMonday).Unix()
+	default: // day
+		return ts - ts%86400
+	}
+}
+
+// featureUsageBucketLabel 桶展示标签。hour 带 HH:mm；day/week 取桶起点的 MM-DD。
+func featureUsageBucketLabel(bucketTs int64, granularity string) string {
+	t := time.Unix(bucketTs, 0).UTC()
+	if granularity == FeatureUsageGranularityHour {
+		return t.Format("01-02 15:04")
+	}
+	return t.Format("01-02")
+}
+
+// FeatureUsageAnalyticsTotals analytics 顶部合计。
+type FeatureUsageAnalyticsTotals struct {
+	Quota        int     `json:"quota"`
+	CostRMB      float64 `json:"cost_rmb"`
+	RequestCount int     `json:"request_count"`
+	TokenUsed    int     `json:"token_used"`
+	AvgRPM       float64 `json:"avg_rpm"`
+	AvgTPM       float64 `json:"avg_tpm"`
+}
+
+// FeatureUsageAnalyticsFeature analytics 按功能模块聚合行。
+type FeatureUsageAnalyticsFeature struct {
+	FeatureCode  string  `json:"feature_code"`
+	FeatureName  string  `json:"feature_name"`
+	Quota        int     `json:"quota"`
+	CostRMB      float64 `json:"cost_rmb"`
+	RequestCount int     `json:"request_count"`
+	TokenUsed    int     `json:"token_used"`
+	FirstSeen    int64   `json:"first_seen"`
+	LastSeen     int64   `json:"last_seen"`
+}
+
+// FeatureUsageAnalyticsPoint analytics 时间桶 × 功能模块聚合行（堆叠图单点）。
+type FeatureUsageAnalyticsPoint struct {
+	BucketTs     int64   `json:"bucket_ts"`
+	BucketLabel  string  `json:"bucket_label"`
+	FeatureCode  string  `json:"feature_code"`
+	FeatureName  string  `json:"feature_name"`
+	Quota        int     `json:"quota"`
+	CostRMB      float64 `json:"cost_rmb"`
+	RequestCount int     `json:"request_count"`
+	TokenUsed    int     `json:"token_used"`
+}
+
+// FeatureUsageAnalyticsResult analytics 接口响应 data。
+// Granularity 为实际生效的聚合粒度（自动推断时回填），前端据此格式化坐标轴/图例。
+type FeatureUsageAnalyticsResult struct {
+	Totals      FeatureUsageAnalyticsTotals    `json:"totals"`
+	Features    []FeatureUsageAnalyticsFeature `json:"features"`
+	Points      []FeatureUsageAnalyticsPoint   `json:"points"`
+	Granularity string                         `json:"granularity"`
+}
+
+// FeatureUsageAnalyticsFilter analytics 接口过滤参数（与 summary 同口径，加性扩参）。
+// FeatureCode 为普通字符串匹配：不按静态枚举校验，动态/未来 feature 也能查。
+type FeatureUsageAnalyticsFilter struct {
+	FeatureCode   string
+	BizTaskID     string
+	TaskKeyword   string // 匹配 biz_task_title（大小写不敏感包含）
+	OperationCode string
+}
+
+// GetFeatureUsageAnalytics 功能模块消耗趋势聚合（WIS-523 §建议后端实现）。
+// 口径：复用 loadSelfAttributedLogs；quota/cost_rmb 净额（consume 正 / refund 负）；
+// request_count 只计 request/submit；token_used 仅 consume 行计入；avg_rpm/avg_tpm =
+// request_count|token_used / 时间范围分钟数；未知非空 feature 自动成行，缺 feature_code 归「其他功能消耗」。
+func GetFeatureUsageAnalytics(userId int, startTimestamp, endTimestamp int64, granularity string, filter FeatureUsageAnalyticsFilter) (FeatureUsageAnalyticsResult, error) {
+	result := FeatureUsageAnalyticsResult{
+		Features: []FeatureUsageAnalyticsFeature{},
+		Points:   []FeatureUsageAnalyticsPoint{},
+	}
+	rows, err := loadSelfAttributedLogs(userId, startTimestamp, endTimestamp)
+	if err != nil {
+		return result, err
+	}
+	granularity = featureUsageNormalizeGranularity(granularity, endTimestamp-startTimestamp)
+	result.Granularity = granularity
+
+	type featAcc struct {
+		name         string
+		requestCount int
+		quota        int
+		tokenUsed    int
+		first        int64
+		last         int64
+	}
+	feats := make(map[string]*featAcc)
+
+	type pointKey struct {
+		bucket int64
+		code   string
+	}
+	type pointAcc struct {
+		name         string
+		requestCount int
+		quota        int
+		tokenUsed    int
+	}
+	points := make(map[pointKey]*pointAcc)
+
+	var totalsQuota, totalsRequest, totalsToken int
+	for _, r := range rows {
+		if filter.FeatureCode != "" && r.FeatureCode != filter.FeatureCode {
+			continue
+		}
+		if filter.BizTaskID != "" && r.BizTaskID != filter.BizTaskID {
+			continue
+		}
+		if filter.OperationCode != "" && r.OperationCode != filter.OperationCode {
+			continue
+		}
+		if filter.TaskKeyword != "" && !containsFold(r.BizTaskTitle, filter.TaskKeyword) {
+			continue
+		}
+
+		signed := featureUsageSignedQuota(r.Log)
+		tok := featureUsageTokenUsed(r.Log)
+		countsAsReq := featureUsageCountsAsRequest(r.BillingStage)
+		seen := r.Log.CreatedAt
+		name := featureUsageFeatureName(r.FeatureCode, r.FeatureName)
+
+		totalsQuota += signed
+		totalsToken += tok
+		if countsAsReq {
+			totalsRequest++
+		}
+
+		acc, ok := feats[r.FeatureCode]
+		if !ok {
+			acc = &featAcc{name: name}
+			feats[r.FeatureCode] = acc
+		}
+		if acc.name == "" {
+			acc.name = name
+		}
+		acc.quota += signed
+		acc.tokenUsed += tok
+		if countsAsReq {
+			acc.requestCount++
+		}
+		if acc.first == 0 || seen < acc.first {
+			acc.first = seen
+		}
+		if seen > acc.last {
+			acc.last = seen
+		}
+
+		bucket := featureUsageBucketTs(seen, granularity)
+		pk := pointKey{bucket: bucket, code: r.FeatureCode}
+		pa, ok := points[pk]
+		if !ok {
+			pa = &pointAcc{name: name}
+			points[pk] = pa
+		}
+		if pa.name == "" {
+			pa.name = name
+		}
+		pa.quota += signed
+		pa.tokenUsed += tok
+		if countsAsReq {
+			pa.requestCount++
+		}
+	}
+
+	minutes := float64(endTimestamp-startTimestamp) / 60.0
+	result.Totals = FeatureUsageAnalyticsTotals{
+		Quota:        totalsQuota,
+		CostRMB:      featureUsageCostRMB(totalsQuota),
+		RequestCount: totalsRequest,
+		TokenUsed:    totalsToken,
+	}
+	if minutes > 0 {
+		result.Totals.AvgRPM = float64(totalsRequest) / minutes
+		result.Totals.AvgTPM = float64(totalsToken) / minutes
+	}
+
+	for code, acc := range feats {
+		result.Features = append(result.Features, FeatureUsageAnalyticsFeature{
+			FeatureCode:  code,
+			FeatureName:  acc.name,
+			Quota:        acc.quota,
+			CostRMB:      featureUsageCostRMB(acc.quota),
+			RequestCount: acc.requestCount,
+			TokenUsed:    acc.tokenUsed,
+			FirstSeen:    acc.first,
+			LastSeen:     acc.last,
+		})
+	}
+	sort.Slice(result.Features, func(i, j int) bool {
+		if result.Features[i].Quota != result.Features[j].Quota {
+			return result.Features[i].Quota > result.Features[j].Quota
+		}
+		return result.Features[i].FeatureCode < result.Features[j].FeatureCode
+	})
+
+	for pk, pa := range points {
+		result.Points = append(result.Points, FeatureUsageAnalyticsPoint{
+			BucketTs:     pk.bucket,
+			BucketLabel:  featureUsageBucketLabel(pk.bucket, granularity),
+			FeatureCode:  pk.code,
+			FeatureName:  pa.name,
+			Quota:        pa.quota,
+			CostRMB:      featureUsageCostRMB(pa.quota),
+			RequestCount: pa.requestCount,
+			TokenUsed:    pa.tokenUsed,
+		})
+	}
+	sort.Slice(result.Points, func(i, j int) bool {
+		if result.Points[i].BucketTs != result.Points[j].BucketTs {
+			return result.Points[i].BucketTs < result.Points[j].BucketTs
+		}
+		if result.Points[i].Quota != result.Points[j].Quota {
+			return result.Points[i].Quota > result.Points[j].Quota
+		}
+		return result.Points[i].FeatureCode < result.Points[j].FeatureCode
+	})
+
+	return result, nil
 }
