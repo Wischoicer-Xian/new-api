@@ -300,6 +300,7 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/self/feature-usage/summary", middleware.UserAuth(), controller.GetFeatureUsageSummary)
 		logRoute.GET("/self/feature-usage/tasks", middleware.UserAuth(), controller.GetFeatureUsageTasks)
 		logRoute.GET("/self/feature-usage/details", middleware.UserAuth(), controller.GetFeatureUsageDetails)
+		logRoute.GET("/self/feature-usage/analytics", middleware.UserAuth(), controller.GetFeatureUsageAnalytics)
 
 		systemTaskRoute := apiRouter.Group("/system-task")
 		systemTaskRoute.Use(middleware.RootAuth())
