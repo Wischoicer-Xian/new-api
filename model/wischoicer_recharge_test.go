@@ -783,6 +783,86 @@ func TestIncreaseUserQuota_DbTrueBlockedByCapacityGuard(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// P1-2：RefundUserQuota 退还先前扣除，走守卫并在容量瞬时打满时降级直写
+// ---------------------------------------------------------------------------
+
+// 守卫通过时 RefundUserQuota 等价于 CreditUserQuota：current + reserved + delta <= limit 放行。
+func TestRefundUserQuota_GuardAdmitsWhenCapacityAvailable(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	seedWischoicerUser(t, 50081, 600000)
+
+	// 预留 300000：current(600000)+reserved(300000)=900000，剩余 100000。
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_REFUND_081",
+		NewApiUserId:    50081,
+		Quota:           300000,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// 退还 100000 使总和恰好 == limit → 守卫放行，quota 到账。
+	require.NoError(t, RefundUserQuota(50081, 100000))
+	assert.Equal(t, 700000, reloadUserQuota(t, 50081))
+}
+
+// 守卫拒绝时（current + reserved + delta > limit）RefundUserQuota 必须降级直写，
+// 保证退款不丢失额度；quota 实际到账，不变量瞬时被突破但无资金损失。
+func TestRefundUserQuota_FallbackOnCapacityGuardReject(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	// current(850000) + reserved(100000) = 950000；退款 100000 → 1050000 > limit。
+	seedWischoicerUser(t, 50082, 850000)
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_REFUND_082",
+		NewApiUserId:    50082,
+		Quota:           100000,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// 退还 100000：守卫拒绝但降级直写，quota 必须到账。
+	require.NoError(t, RefundUserQuota(50082, 100000))
+	assert.Equal(t, 950000, reloadUserQuota(t, 50082))
+
+	// 后续 Reserve 在容量检查时安全失败：current(950000)+reserved(100000)+new(1) > limit。
+	_, err = ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_REFUND_082_BLOCK",
+		NewApiUserId:    50082,
+		Quota:           1,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+}
+
+// 无 RESERVED 时 RefundUserQuota 不会触发降级：守卫必定放行（current + 0 + delta <= limit）。
+func TestRefundUserQuota_NoReservationAlwaysAdmitted(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	seedWischoicerUser(t, 50083, 400000)
+
+	require.NoError(t, RefundUserQuota(50083, 500000))
+	assert.Equal(t, 900000, reloadUserQuota(t, 50083))
+}
+
+// 非正 delta 是 no-op，不会触碰守卫或写库。
+func TestRefundUserQuota_NonPositiveDeltaIsNoOp(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	seedWischoicerUser(t, 50084, 300000)
+
+	require.NoError(t, RefundUserQuota(50084, 0))
+	require.NoError(t, RefundUserQuota(50084, -5))
+	assert.Equal(t, 300000, reloadUserQuota(t, 50084))
+}
+
+// ---------------------------------------------------------------------------
 // P1-5：删除用户与创建预留的 TOCTOU
 // ---------------------------------------------------------------------------
 

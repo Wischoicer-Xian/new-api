@@ -1096,13 +1096,16 @@ func GetUserSetting(id int, fromDB bool) (settingMap dto.UserSetting, err error)
 //
 // db=true（立即写库）路径经过容量守卫 CreditUserQuota，保证
 // currentUserQuota + activeReservedQuota + delta <= WischoicerMaxUserQuota（方案 §3.2）。
-// 管理员加额、任务退款、资金回滚等需要容量安全的路径应传 db=true。守卫成功后才异步增加缓存，
+// 管理员加额等会引入新容量承诺的正向写入必须传 db=true。守卫成功后才异步增加缓存，
 // 避免守卫拒绝时缓存虚高。
 //
-// db=false 路径保留聚合批量 / 直接 quota+? 语义，供中继消费链路的退还使用
-// （service/task_billing.go、service/funding_source.go、service/quota.go）：这些 delta 源自
-// 近期扣除，超容量风险低，且不应依赖 wischoicer_recharge_credits 表。
-// TODO(billing-recharge): 若批量路径需要容量安全，在 flush 点按用户加锁 + 容量校验。
+// db=false 路径保留聚合批量 / 直接 quota+? 语义，仅供中继消费链路的负向差额结算
+// （DecreaseUserQuota 扣费聚合）：负向 delta 不会超容量，不需要守卫。
+//
+// 退还先前扣除额度的正向写入（funding_source/task_billing/quota 的退款、差额退还）
+// 不能用本函数 db=false（会在 RESERVED 存在时破坏容量不变量），也不能用 db=true
+// （守卫在容量接近上限时拒绝会让退款丢失额度）；统一使用 RefundUserQuota，它走守卫
+// 并在容量瞬时打满时受控降级直写 + 告警，保证退款必到账。
 func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
@@ -1171,10 +1174,44 @@ func DeltaUpdateUserQuota(id int, delta int) (err error) {
 		return nil
 	}
 	if delta > 0 {
-		return IncreaseUserQuota(id, delta, false)
+		return IncreaseUserQuota(id, delta, true)
 	} else {
 		return DecreaseUserQuota(id, -delta, false)
 	}
+}
+
+// RefundUserQuota 把先前扣除的 quota 退还给用户。
+//
+// 退还 delta 源自近期的 DecreaseUserQuota（预扣费、差额补扣），业务上必须到账，
+// 不能因容量瞬时打满而丢额度。本函数先经容量守卫 CreditUserQuota；若被拒
+// （ErrWischoicerQuotaCapacityExceeded，说明 currentUserQuota + activeReservedQuota + delta
+// 瞬时超上限），降级为直接 increaseUserQuota 并 SysError 告警，让运维关注
+// 「退还后 current + reserved > limit」异常——此时没有资金损失或超卖，后续 Reserve 会在
+// 容量检查时安全失败，等待 RESERVED 凭据 SUCCESS/RELEASE 后恢复正常。
+//
+// 容量守卫通过或降级直写成功后，异步增加缓存。
+func RefundUserQuota(id int, quota int) (err error) {
+	if quota <= 0 {
+		return nil
+	}
+	err = CreditUserQuota(id, quota)
+	if err == nil {
+		// 守卫通过：异步更新缓存。
+	} else if errors.Is(err, ErrWischoicerQuotaCapacityExceeded) {
+		// 容量瞬时超限：退款必须到账，降级直写并告警（CreditUserQuota 内部已记录一次容量详情）。
+		common.SysError(fmt.Sprintf("quota capacity guard rejected refund, falling back to direct increase: user=%d delta=%d", id, quota))
+		if err = increaseUserQuota(id, quota); err != nil {
+			return err
+		}
+	} else {
+		return err
+	}
+	gopool.Go(func() {
+		if e := cacheIncrUserQuota(id, int64(quota)); e != nil {
+			common.SysLog("failed to increase user quota cache: " + e.Error())
+		}
+	})
+	return nil
 }
 
 //func GetRootUserEmail() (email string) {
