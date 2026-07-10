@@ -129,6 +129,10 @@ func main() {
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 
+	// Wischoicer recharge credit 两阶段缓存删除扫描任务（仅 master 节点）。
+	// 入账事务提交后异步收敛 user:{id} 缓存；失败时由本任务重试，只删缓存不修改 quota。
+	model.StartWischoicerCacheScanTask()
+
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()

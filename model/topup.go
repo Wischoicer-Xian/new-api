@@ -141,8 +141,16 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 		}
 
 		quota = topUp.Money * common.QuotaPerUnit
-		err = tx.Model(&User{}).Where("id = ?", topUp.UserId).Updates(map[string]interface{}{"stripe_customer": customerId, "quota": gorm.Expr("quota + ?", quota)}).Error
-		if err != nil {
+		quotaInt := int(quota)
+		if quotaInt <= 0 {
+			return errors.New("无效的充值额度")
+		}
+		// 正向额度增加统一走容量守卫 CreditUserQuotaTx（方案 §3.2）。
+		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaInt); err != nil {
+			return err
+		}
+		// stripe_customer 仍需在同一事务内更新。
+		if err := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("stripe_customer", customerId).Error; err != nil {
 			return err
 		}
 
@@ -370,8 +378,8 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 			return err
 		}
 
-		// 增加用户额度（立即写库，保持一致性）
-		if err := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", gorm.Expr("quota + ?", quotaToAdd)).Error; err != nil {
+		// 增加用户额度（走容量守卫 CreditUserQuotaTx，方案 §3.2）
+		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaToAdd); err != nil {
 			return err
 		}
 
@@ -425,29 +433,25 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 
 		// Creem 直接使用 Amount 作为充值额度（整数）
 		quota = topUp.Amount
-
-		// 构建更新字段，优先使用邮箱，如果邮箱为空则使用用户名
-		updateFields := map[string]interface{}{
-			"quota": gorm.Expr("quota + ?", quota),
+		if quota <= 0 {
+			return errors.New("无效的充值额度")
 		}
 
 		// 如果有客户邮箱，尝试更新用户邮箱（仅当用户邮箱为空时）
 		if customerEmail != "" {
-			// 先检查用户当前邮箱是否为空
 			var user User
-			err = tx.Where("id = ?", topUp.UserId).First(&user).Error
-			if err != nil {
+			if err := tx.Where("id = ?", topUp.UserId).First(&user).Error; err != nil {
 				return err
 			}
-
-			// 如果用户邮箱为空，则更新为支付时使用的邮箱
 			if user.Email == "" {
-				updateFields["email"] = customerEmail
+				if err := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("email", customerEmail).Error; err != nil {
+					return err
+				}
 			}
 		}
 
-		err = tx.Model(&User{}).Where("id = ?", topUp.UserId).Updates(updateFields).Error
-		if err != nil {
+		// 正向额度增加走容量守卫（方案 §3.2）
+		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, int(quota)); err != nil {
 			return err
 		}
 
@@ -508,7 +512,8 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 			return err
 		}
 
-		if err := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", gorm.Expr("quota + ?", quotaToAdd)).Error; err != nil {
+		// 正向额度增加走容量守卫（方案 §3.2）
+		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaToAdd); err != nil {
 			return err
 		}
 
@@ -569,7 +574,8 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return err
 		}
 
-		if err := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", gorm.Expr("quota + ?", quotaToAdd)).Error; err != nil {
+		// 正向额度增加走容量守卫（方案 §3.2）
+		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaToAdd); err != nil {
 			return err
 		}
 

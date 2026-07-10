@@ -415,6 +415,14 @@ func DeleteUserById(id int) (err error) {
 	if id == 0 {
 		return errors.New("id 为空！")
 	}
+	// 存在 RESERVED 容量预留的用户禁止删除：防止已收款订单失去入账目标（方案 §3.2、§11）。
+	hasReserved, err := HasActiveWischoicerReservation(id)
+	if err != nil {
+		return err
+	}
+	if hasReserved {
+		return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
+	}
 	user := User{Id: id}
 	return user.Delete()
 }
@@ -422,6 +430,14 @@ func DeleteUserById(id int) (err error) {
 func HardDeleteUserById(id int) error {
 	if id == 0 {
 		return errors.New("id 为空！")
+	}
+	// 硬删除同样禁止：一旦物理删除，预留记录的 user 关联失效。
+	hasReserved, err := HasActiveWischoicerReservation(id)
+	if err != nil {
+		return err
+	}
+	if hasReserved {
+		return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		if err := deleteUserOAuthBindingsByUserId(tx, id); err != nil {
@@ -466,12 +482,16 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 		return errors.New("邀请额度不足！")
 	}
 
-	// 更新用户额度
-	user.AffQuota -= quota
-	user.Quota += quota
+	// 扣减 AffQuota 与累计历史额度
+	if err := tx.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]interface{}{
+		"aff_quota":  gorm.Expr("aff_quota - ?", quota),
+		"aff_history": gorm.Expr("aff_history + ?", quota),
+	}).Error; err != nil {
+		return err
+	}
 
-	// 保存用户状态
-	if err := tx.Save(user).Error; err != nil {
+	// 正向额度增加走容量守卫（方案 §3.2）
+	if err := CreditUserQuotaTx(nil, tx, user.Id, quota); err != nil {
 		return err
 	}
 
@@ -577,7 +597,10 @@ func (user *User) finishInsert(inviterId int) {
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
 		if common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
+			// 正向额度增加走容量守卫 CreditUserQuota（方案 §3.2）
+			if err := CreditUserQuota(user.Id, common.QuotaForInvitee); err != nil {
+				common.SysError("failed to credit invitee bonus: " + err.Error())
+			}
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
 		if common.QuotaForInviter > 0 {
@@ -634,7 +657,10 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
 		if common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
+			// 正向额度增加走容量守卫 CreditUserQuota（方案 §3.2）
+			if err := CreditUserQuota(user.Id, common.QuotaForInvitee); err != nil {
+				common.SysError("failed to credit invitee bonus (oauth): " + err.Error())
+			}
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
 		if common.QuotaForInviter > 0 {

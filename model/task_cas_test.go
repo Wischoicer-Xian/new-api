@@ -51,6 +51,7 @@ func TestMain(m *testing.M) {
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
+		&WischoicerRechargeCredit{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
