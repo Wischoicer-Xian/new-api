@@ -415,31 +415,47 @@ func DeleteUserById(id int) (err error) {
 	if id == 0 {
 		return errors.New("id 为空！")
 	}
-	// 存在 RESERVED 容量预留的用户禁止删除：防止已收款订单失去入账目标（方案 §3.2、§11）。
-	hasReserved, err := HasActiveWischoicerReservation(id)
+	// 事务内锁 user 行后重查 RESERVED 预留并执行软删除，消除「检查 → 删除」之间的 TOCTOU：
+	// 并发 ReserveExternalRecharge 会在同一 user 行上排队，本事务提交前无法创建新预留
+	// （方案 §3.2、§11）。锁顺序与 ReserveExternalRecharge 一致：users → wischoicer_recharge_credits。
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+			return err
+		}
+		hasReserved, err := hasActiveReservedQuotaTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if hasReserved {
+			return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
+		}
+		return tx.Delete(&User{}, id).Error
+	})
 	if err != nil {
 		return err
 	}
-	if hasReserved {
-		return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
-	}
-	user := User{Id: id}
-	return user.Delete()
+	return invalidateUserCache(id)
 }
 
 func HardDeleteUserById(id int) error {
 	if id == 0 {
 		return errors.New("id 为空！")
 	}
-	// 硬删除同样禁止：一旦物理删除，预留记录的 user 关联失效。
-	hasReserved, err := HasActiveWischoicerReservation(id)
-	if err != nil {
-		return err
-	}
-	if hasReserved {
-		return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
-	}
+	// 锁 user 行后重查预留，与 DeleteUserById 一致地消除 TOCTOU；硬删除同样禁止，
+	// 因为物理删除后预留记录的 user 关联失效。
 	return DB.Transaction(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+			return err
+		}
+		hasReserved, err := hasActiveReservedQuotaTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if hasReserved {
+			return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
+		}
 		if err := deleteUserOAuthBindingsByUserId(tx, id); err != nil {
 			return err
 		}
@@ -1076,17 +1092,41 @@ func GetUserSetting(id int, fromDB bool) (settingMap dto.UserSetting, err error)
 	return userBase.GetSetting(), nil
 }
 
+// IncreaseUserQuota 对用户 quota 做正向增量。
+//
+// db=true（立即写库）路径经过容量守卫 CreditUserQuota，保证
+// currentUserQuota + activeReservedQuota + delta <= WischoicerMaxUserQuota（方案 §3.2）。
+// 管理员加额、任务退款、资金回滚等需要容量安全的路径应传 db=true。守卫成功后才异步增加缓存，
+// 避免守卫拒绝时缓存虚高。
+//
+// db=false 路径保留聚合批量 / 直接 quota+? 语义，供中继消费链路的退还使用
+// （service/task_billing.go、service/funding_source.go、service/quota.go）：这些 delta 源自
+// 近期扣除，超容量风险低，且不应依赖 wischoicer_recharge_credits 表。
+// TODO(billing-recharge): 若批量路径需要容量安全，在 flush 点按用户加锁 + 容量校验。
 func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
+	if quota == 0 {
+		return nil
+	}
+	if db {
+		if err := CreditUserQuota(id, quota); err != nil {
+			return err
+		}
+		gopool.Go(func() {
+			if err := cacheIncrUserQuota(id, int64(quota)); err != nil {
+				common.SysLog("failed to increase user quota cache: " + err.Error())
+			}
+		})
+		return nil
+	}
 	gopool.Go(func() {
-		err := cacheIncrUserQuota(id, int64(quota))
-		if err != nil {
+		if err := cacheIncrUserQuota(id, int64(quota)); err != nil {
 			common.SysLog("failed to increase user quota: " + err.Error())
 		}
 	})
-	if !db && common.BatchUpdateEnabled {
+	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
 		return nil
 	}

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -747,4 +748,117 @@ func truncateWischoicerTables(t *testing.T) {
 		DB.Exec("DELETE FROM wischoicer_recharge_credits")
 		DB.Exec("DELETE FROM users")
 	})
+}
+
+// ---------------------------------------------------------------------------
+// P1-3：IncreaseUserQuota 正向增加路径必须经过容量守卫
+// ---------------------------------------------------------------------------
+
+// db=true 路径在 IncreaseUserQuota 内部委托 CreditUserQuota 守卫；
+// current + reserved + delta > limit 时拒绝且不改变 quota，delta 使总和恰好等于 limit 时放行。
+func TestIncreaseUserQuota_DbTrueBlockedByCapacityGuard(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	seedWischoicerUser(t, 50080, 600000)
+
+	// 预留 300000：current(600000)+reserved(300000)=900000，剩余 100000。
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_GUARD_080",
+		NewApiUserId:    50080,
+		Quota:           300000,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// delta=200000 使总和 1100000 > limit → 守卫拒绝。
+	err = IncreaseUserQuota(50080, 200000, true)
+	assert.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+	assert.Equal(t, 600000, reloadUserQuota(t, 50080))
+
+	// delta=100000 使总和 == limit → 成功。
+	require.NoError(t, IncreaseUserQuota(50080, 100000, true))
+	assert.Equal(t, 700000, reloadUserQuota(t, 50080))
+}
+
+// ---------------------------------------------------------------------------
+// P1-5：删除用户与创建预留的 TOCTOU
+// ---------------------------------------------------------------------------
+
+// DeleteUserById/HardDeleteUserById 被拦时用户不能被删除：事务内重查发现预留即回滚，
+// 软删除的 deleted_at 保持 NULL，硬删除不发生物理删除。
+func TestDeleteUserById_NoDeleteWhenReservationBlocks(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 5000000)
+	seedWischoicerUser(t, 50090, 0)
+
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_TOCTOU_090",
+		NewApiUserId:    50090,
+		Quota:           500000,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// 软删除被拦，deleted_at 保持 NULL。
+	require.Error(t, DeleteUserById(50090))
+	var user User
+	require.NoError(t, DB.Unscoped().Where("id = ?", 50090).First(&user).Error)
+	assert.False(t, user.DeletedAt.Valid)
+
+	// 硬删除同样被拦，行仍在。
+	require.Error(t, HardDeleteUserById(50090))
+	var count int64
+	DB.Unscoped().Model(&User{}).Where("id = ?", 50090).Count(&count)
+	assert.Equal(t, int64(1), count)
+}
+
+// TestDeleteVsReserve_NoLostReservation 并发跑删除与预留，断言不会出现
+// 「用户已删除 且 存在活跃 RESERVED 预留」的丢失状态。
+//
+// SQLite 单写连接下退化为串行；MySQL/PostgreSQL 的 lockForUpdate(FOR UPDATE)
+// 才让删除事务与 reserve 事务在 user 行上真正串行化，覆盖 TOCTOU 竞态。
+// 本测试在 MySQL/PG CI 下回归保护该不变量。
+func TestDeleteVsReserve_NoLostReservation(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 5000000)
+	seedWischoicerUser(t, 50091, 0)
+
+	const deleters = 2
+	const reservers = 3
+	var wg sync.WaitGroup
+	wg.Add(deleters + reservers)
+
+	for i := 0; i < deleters; i++ {
+		go func() {
+			defer wg.Done()
+			_ = DeleteUserById(50091)
+		}()
+	}
+	for i := 0; i < reservers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			_, _ = ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+				OrderNo:         fmt.Sprintf("ORDER_RACE_%d", idx),
+				NewApiUserId:    50091,
+				Quota:           100000,
+				AmountCents:     1000,
+				Currency:        "CNY",
+				PaymentProvider: "wischoicer_wechat",
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	// 不变量：用户被（软）删除时不能残留活跃 RESERVED 预留。
+	var user User
+	err := DB.Where("id = ?", 50091).First(&user).Error
+	userGone := errors.Is(err, gorm.ErrRecordNotFound)
+	hasReserved, _ := HasActiveWischoicerReservation(50091)
+	if userGone && hasReserved {
+		t.Fatalf("TOCTOU: user deleted but active reservation remains")
+	}
 }

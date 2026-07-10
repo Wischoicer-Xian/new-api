@@ -549,6 +549,22 @@ func HasActiveWischoicerReservation(userID int) (bool, error) {
 	return count > 0, nil
 }
 
+// hasActiveReservedQuotaTx 是 HasActiveWischoicerReservation 的事务内版本，
+// 供 DeleteUserById/HardDeleteUserById 在锁住 user 行后重查预留，消除 TOCTOU。
+func hasActiveReservedQuotaTx(tx *gorm.DB, userID int) (bool, error) {
+	if userID <= 0 {
+		return false, nil
+	}
+	var count int64
+	err := tx.Model(&WischoicerRechargeCredit{}).
+		Where("new_api_user_id = ? AND status = ?", userID, WischoicerCreditStatusReserved).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // ---------------------------------------------------------------------------
 // 校验与辅助
 // ---------------------------------------------------------------------------
