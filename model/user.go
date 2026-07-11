@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -1185,10 +1186,16 @@ func DeltaUpdateUserQuota(id int, delta int) (err error) {
 // 退还 delta 源自近期的 DecreaseUserQuota（预扣费、差额补扣），业务上必须到账，
 // 不能因容量瞬时打满而丢额度。本函数先经容量守卫 CreditUserQuota；若被拒
 // （ErrWischoicerQuotaCapacityExceeded，说明 currentUserQuota + activeReservedQuota + delta
-// 瞬时超上限），降级为直接 increaseUserQuota 并 SysError 告警，让运维关注
+// 瞬时超软上限），降级为直接 increaseUserQuota 并 SysError 告警，让运维关注
 // 「退还后 current + reserved > limit」异常。
 //
-// 降级直写会让 current 瞬时突破 limit，但不影响已付款 RESERVED 凭据的消费：
+// WischoicerMaxUserQuota 是「新预约/新正向加额」的软上限（reservation admission
+// threshold），不是物理硬界——退款必到账允许突破它。真正的物理硬界是 user.quota 列的
+// int32 宽度：降级直写前用原子 CAS 守住 `quota + delta <= math.MaxInt32`，溢出时拒绝
+// 退款（ErrWischoicerQuotaOverflow）并 SysError 告警。这是「退款必须到账」的唯一例外——
+// int32 物理溢出无业务解，需运维人工介入（如核账后手动调整或迁移到 bigint）。
+//
+// 降级直写会让 current 瞬时突破软上限，但不影响已付款 RESERVED 凭据的消费：
 // consumeQuotaForCreditTx 不再检查容量，消费只是把 reserved 转为 actual、净额不变，
 // 退款突破不会让已付款 reservation 永久拒绝（避免用户付了钱到不了账）。突破只影响
 // 新 reservation——ReserveExternalRecharge 的 `current + activeReserved + newQuota <= limit`
@@ -1204,9 +1211,8 @@ func RefundUserQuota(id int, quota int) (err error) {
 	if err == nil {
 		// 守卫通过：异步更新缓存。
 	} else if errors.Is(err, ErrWischoicerQuotaCapacityExceeded) {
-		// 容量瞬时超限：退款必须到账，降级直写并告警（CreditUserQuota 内部已记录一次容量详情）。
-		common.SysError(fmt.Sprintf("quota capacity guard rejected refund, falling back to direct increase: user=%d delta=%d", id, quota))
-		if err = increaseUserQuota(id, quota); err != nil {
+		// 软上限瞬时超限：退款必须到账，降级直写（仍守 int32 物理硬界）。
+		if err = refundUserQuotaDirectWithInt32Cap(id, quota); err != nil {
 			return err
 		}
 	} else {
@@ -1217,6 +1223,34 @@ func RefundUserQuota(id int, quota int) (err error) {
 			common.SysLog("failed to increase user quota cache: " + e.Error())
 		}
 	})
+	return nil
+}
+
+// refundUserQuotaDirectWithInt32Cap 是 RefundUserQuota 的降级直写路径：软上限已拒绝，
+// 退款在 user.quota 上直接叠加 delta。
+//
+// 唯一约束：user.quota 列是 int32（MySQL/PG int4），叠加后不得溢出。用原子 CAS
+// `quota <= math.MaxInt32 - delta` 守住——条件改写为减法避免数据库端 `quota + delta`
+// 在 PG int4 上溢出报错，同时天然防并发退款 TOCTOU（两个并发退款叠加溢出时，后执行者
+// CAS 失败 RowsAffected=0）。溢出即拒绝并 SysError 告警；走到这里时 CreditUserQuota 已
+// 校验用户存在，RowsAffected=0 只可能是 int32 溢出。
+func refundUserQuotaDirectWithInt32Cap(id int, quota int) error {
+	result := DB.Model(&User{}).
+		Where("id = ? AND quota <= ?", id, math.MaxInt32-quota).
+		Update("quota", gorm.Expr("quota + ?", quota))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var current int
+		_ = DB.Model(&User{}).Where("id = ?", id).Select("quota").Scan(&current).Error
+		common.SysError(fmt.Sprintf(
+			"quota refund rejected: would overflow int32 hard cap, manual intervention required: user=%d current=%d delta=%d",
+			id, current, quota,
+		))
+		return ErrWischoicerQuotaOverflow
+	}
+	common.SysError(fmt.Sprintf("quota capacity guard rejected refund, falling back to direct increase: user=%d delta=%d", id, quota))
 	return nil
 }
 

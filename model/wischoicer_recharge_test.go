@@ -1,13 +1,16 @@
 package model
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -652,10 +655,10 @@ func TestConsumeReservedQuotaTx_SucceedsWhenCurrentExceedsLimit(t *testing.T) {
 	assert.Equal(t, "TX_060", *c.ExternalTransactionId)
 }
 
-// 关键回归：RefundUserQuota 降级直写把 user.quota 推过 limit 后，已付款 RESERVED 凭据
-// 的消费仍能成功。这是本轮 P1 修复的核心——consumeQuotaForCreditTx 不再检查容量，
-// 避免退款 fallback 永久阻断已付款 reservation 消费。同时验证新 reservation 仍被容量
-// 守卫正确拒绝（不变量对新预留生效）。
+// 关键回归：RefundUserQuota 降级直写把 user.quota 推过软上限后，已付款 RESERVED 凭据
+// 的消费仍能成功。软上限（WISCHOICER_MAX_USER_QUOTA）只是「新预约门槛」，不是物理硬界；
+// consumeQuotaForCreditTx 不再检查它，避免退款 fallback 永久阻断已付款 reservation 消费。
+// 同时验证：退款降级产生 SysError 审计；新 reservation 仍被软上限守卫正确拒绝。
 func TestConsumeReservedQuota_SucceedsAfterRefundBreakthrough(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, 1000000)
@@ -671,10 +674,12 @@ func TestConsumeReservedQuota_SucceedsAfterRefundBreakthrough(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 退款 700000：守卫拒绝（400000 + 500000 + 700000 = 1600000 > limit），降级直写，
-	// quota → 1100000 > limit。
+	// 退款 700000：软上限守卫拒绝（400000 + 500000 + 700000 = 1600000 > limit），降级直写，
+	// quota → 1100000 > 软上限。退款必须到账（软上限不是硬界），但降级必须产生 SysError 审计。
+	logBuf := captureSysError(t)
 	require.NoError(t, RefundUserQuota(50061, 700000))
 	require.Equal(t, 1100000, reloadUserQuota(t, 50061))
+	assert.Contains(t, logBuf.String(), "falling back to direct increase")
 
 	// 已付款的 RESERVED 凭据仍能成功消费（不被 consumeQuotaForCreditTx 拒绝）。
 	result, err := CreditExternalRecharge(nil, CreditExternalRechargeRequest{
@@ -810,6 +815,24 @@ func truncateWischoicerTables(t *testing.T) {
 	})
 }
 
+// captureSysError 捕获 common.SysError 写入 gin.DefaultErrorWriter 的输出，供测试断言
+// 降级路径/溢出告警被正确审计。SysError 读取 writer 时持 LogWriterMu.RLock，替换/恢复
+// 用 Lock 同步。测试串行运行，不存在并发干扰。
+func captureSysError(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	common.LogWriterMu.Lock()
+	orig := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = buf
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = orig
+		common.LogWriterMu.Unlock()
+	})
+	return buf
+}
+
 // ---------------------------------------------------------------------------
 // P1-3：IncreaseUserQuota 正向增加路径必须经过容量守卫
 // ---------------------------------------------------------------------------
@@ -885,9 +908,11 @@ func TestRefundUserQuota_FallbackOnCapacityGuardReject(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 退还 100000：守卫拒绝但降级直写，quota 必须到账。
+	// 退还 100000：软上限守卫拒绝但降级直写，quota 必须到账，并产生 SysError 审计。
+	logBuf := captureSysError(t)
 	require.NoError(t, RefundUserQuota(50082, 100000))
 	assert.Equal(t, 950000, reloadUserQuota(t, 50082))
+	assert.Contains(t, logBuf.String(), "falling back to direct increase")
 
 	// 后续 Reserve 在容量检查时安全失败：current(950000)+reserved(100000)+new(1) > limit。
 	_, err = ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
@@ -920,6 +945,25 @@ func TestRefundUserQuota_NonPositiveDeltaIsNoOp(t *testing.T) {
 	require.NoError(t, RefundUserQuota(50084, 0))
 	require.NoError(t, RefundUserQuota(50084, -5))
 	assert.Equal(t, 300000, reloadUserQuota(t, 50084))
+}
+
+// 退款叠加会溢出 int32 物理硬界时，RefundUserQuota 拒绝直写、不改变 quota、SysError 告警。
+// 这是「退款必须到账」的唯一例外——int32 物理溢出无业务解，需运维人工介入。
+// 软上限（WISCHOICER_MAX_USER_QUOTA）放到 MaxInt32，确保退款先被软上限守卫拒绝再走降级，
+// 由降级路径的 int32 CAS 兜住。
+func TestRefundUserQuota_RejectedWhenInt32Overflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	// current 接近 MaxInt32；叠加 delta 后溢出 int32 物理硬界。
+	seedWischoicerUser(t, 50085, math.MaxInt32-100)
+
+	logBuf := captureSysError(t)
+	err := RefundUserQuota(50085, 200)
+	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
+	// CAS 拒绝写入，quota 保持不变。
+	assert.Equal(t, math.MaxInt32-100, reloadUserQuota(t, 50085))
+	// 告警包含溢出关键字，供运维检索。
+	assert.Contains(t, logBuf.String(), "overflow int32 hard cap")
 }
 
 // ---------------------------------------------------------------------------

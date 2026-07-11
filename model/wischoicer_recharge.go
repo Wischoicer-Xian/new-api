@@ -64,6 +64,7 @@ var (
 	ErrWischoicerReservationReleased  = errors.New("RESERVATION_RELEASED")
 	ErrWischoicerCreditUserUnavailable = errors.New("CREDIT_USER_UNAVAILABLE")
 	ErrWischoicerQuotaCapacityExceeded = errors.New("QUOTA_CAPACITY_EXCEEDED")
+	ErrWischoicerQuotaOverflow         = errors.New("QUOTA_OVERFLOW")
 	ErrWischoicerInvalidArgument      = errors.New("INVALID_ARGUMENT")
 )
 
@@ -108,9 +109,15 @@ type CreditExternalRechargeResult struct {
 
 // CreditUserQuotaTx 是所有正向额度增加的唯一 model 层入口。
 //
-// 不变量（方案 §3.2）：
+// 这里守卫的是「新正向额度的预约门槛（软上限）」（方案 §3.2）：
 //
-//	currentUserQuota + activeReservedQuota + delta <= capacityLimit <= math.MaxInt32
+//	currentUserQuota + activeReservedQuota + delta <= WISCHOICER_MAX_USER_QUOTA
+//
+// WischoicerMaxUserQuota 不是物理硬界——退款降级直写（RefundUserQuota）会为了「退款
+// 必到账」突破它，已付款 RESERVED 凭据的消费（consumeQuotaForCreditTx）也不再检查它。
+// 真正的物理硬界是 user.quota 列的 int32 宽度（math.MaxInt32），由 RefundUserQuota
+// 降级路径的 int32 溢出 CAS 守住。本函数守卫的软上限只 gate 新预约和新正向加额（admin
+// 加额、签到等），对已付款的 RESERVED 消费 provably safe（Reserve 阶段已 gate）。
 //
 // 调用前必须已持有 tx（事务）；本函数在同一事务内锁 users 行、汇总该用户
 // RESERVED 状态的预留 quota 总和、校验容量后再更新 quota。
@@ -235,7 +242,8 @@ func ReserveExternalRecharge(ctx context.Context, req ReserveExternalRechargeReq
 			return findErr
 		}
 
-		// 容量校验：current + reserved + newQuota <= limit。
+		// 软上限校验（新预约门槛）：current + reserved + newQuota <= limit。
+		// limit 是软上限——退款降级直写或已付款 RESERVED 消费会突破它，但新预约始终受 gate。
 		reservedSum, err := sumActiveReservedQuotaTx(tx, req.NewApiUserId)
 		if err != nil {
 			return err
@@ -453,15 +461,17 @@ func handleAlreadySuccess(credit *WischoicerRechargeCredit, req CreditExternalRe
 
 // consumeQuotaForCreditTx 把 RESERVED 凭据的 quota 转为实际 user.quota。
 //
-// 这里不做容量校验。该凭据的 quota 已在 ReserveExternalRecharge 阶段计入
+// 这里不做软上限校验。该凭据的 quota 已在 ReserveExternalRecharge 阶段计入
 // activeReservedQuota 并通过 `current + activeReserved + newQuota <= limit` 守卫；
 // 消费只是把 reserved 占用转为 actual 占用，`current + reserved` 净额不变，数学上
-// 不会突破上限（limit 不支持热更新，见方案 §3.2）。
+// provably safe——不破坏软上限（limit 不支持热更新，见方案 §3.2）。软上限只 gate 新预约。
 //
-// 即便 user.quota 已被 RefundUserQuota 降级直写推过 limit，这里仍允许消费：退款必须
+// 即便 user.quota 已被 RefundUserQuota 降级直写推过软上限，这里仍允许消费：退款必须
 // 到账，已付款的 RESERVED 凭据不能因退款突破而被永久拒绝（否则用户付了钱到不了账，
 // billing 只能重试/死信）。此时新 reservation 会被 ReserveExternalRecharge 的容量检查
-// 正确拒绝，不变量对新预留仍然生效；CreditUserQuotaTx（其他正向加额）也仍守卫容量。
+// 正确拒绝，软上限对新预留仍然生效；CreditUserQuotaTx（其他正向加额）也仍守卫容量。
+// int32 物理硬界由 RefundUserQuota 降级路径的 CAS 守住退款写入；消费侧不重复检查，
+// 极端边界下若叠加溢出由数据库 int4 列兜底报错（事务回滚，不静默截断）。
 func consumeQuotaForCreditTx(tx *gorm.DB, user *User, delta int) error {
 	result := tx.Model(&User{}).
 		Where("id = ?", user.Id).
