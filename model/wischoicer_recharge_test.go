@@ -608,14 +608,19 @@ func TestCreditUserQuotaTx_RedeemStylePathBlockedByReservation(t *testing.T) {
 	assert.Equal(t, 700000, reloadUserQuota(t, 50050))
 }
 
-func TestConsumeReservedQuotaTx_RollsBackOnQuotaFailure(t *testing.T) {
+// 消费 RESERVED 凭据时不检查容量：该凭据的 quota 已在 Reserve 阶段计入
+// activeReservedQuota，消费只是把 reserved 转为 actual、净额不变。即使
+// user.quota + delta > limit（例如退款降级直写把 current 推过 limit），已付款的
+// RESERVED 消费仍必须成功，否则用户付了钱到不了账。
+func TestConsumeReservedQuotaTx_SucceedsWhenCurrentExceedsLimit(t *testing.T) {
 	truncateWischoicerTables(t)
-	// 故意把 limit 设到 < 用户已预留的 quota，模拟入账时溢出。
-	// user.quota=900000, reserved quota=500000 → consume 时 900000+500000 会超 1000000。
+	// 故意把 limit 设到 < 用户 quota + reserved quota，模拟 current 已被退款突破。
+	// user.quota=900000, reserved quota=500000 → consume 后 1400000 > limit 1000000。
 	setWischoicerCapacity(t, 1000000)
 	seedWischoicerUser(t, 50060, 900000)
 
-	// 直接插入 RESERVED 凭据（绕过 reserve 的容量校验，模拟历史数据）。
+	// 直接插入 RESERVED 凭据（绕过 reserve 的容量校验，模拟退款把 current 推过 limit
+	// 后仍残留的已付款预留）。
 	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
 		OrderNo:         "ORDER_ROLLBACK_060",
 		NewAPIUserId:    50060,
@@ -637,13 +642,68 @@ func TestConsumeReservedQuotaTx_RollsBackOnQuotaFailure(t *testing.T) {
 		TransactionId:   "TX_060",
 		PaidAt:          1720000007,
 	})
-	assert.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+	require.NoError(t, err)
 
-	// quota 与凭据都回滚。
-	assert.Equal(t, 900000, reloadUserQuota(t, 50060))
+	// 消费成功：quota 增加（即便已超 limit），凭据转 SUCCESS。
+	assert.Equal(t, 1400000, reloadUserQuota(t, 50060))
 	c := reloadCredit(t, "ORDER_ROLLBACK_060")
-	assert.Equal(t, WischoicerCreditStatusReserved, c.Status)
-	assert.Nil(t, c.ExternalTransactionId)
+	assert.Equal(t, WischoicerCreditStatusSuccess, c.Status)
+	require.NotNil(t, c.ExternalTransactionId)
+	assert.Equal(t, "TX_060", *c.ExternalTransactionId)
+}
+
+// 关键回归：RefundUserQuota 降级直写把 user.quota 推过 limit 后，已付款 RESERVED 凭据
+// 的消费仍能成功。这是本轮 P1 修复的核心——consumeQuotaForCreditTx 不再检查容量，
+// 避免退款 fallback 永久阻断已付款 reservation 消费。同时验证新 reservation 仍被容量
+// 守卫正确拒绝（不变量对新预留生效）。
+func TestConsumeReservedQuota_SucceedsAfterRefundBreakthrough(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	// 初始 current=400000，预留 500000（current+reserved=900000 <= limit）。
+	seedWischoicerUser(t, 50061, 400000)
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_REFUND_THEN_CONSUME",
+		NewApiUserId:    50061,
+		Quota:           500000,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// 退款 700000：守卫拒绝（400000 + 500000 + 700000 = 1600000 > limit），降级直写，
+	// quota → 1100000 > limit。
+	require.NoError(t, RefundUserQuota(50061, 700000))
+	require.Equal(t, 1100000, reloadUserQuota(t, 50061))
+
+	// 已付款的 RESERVED 凭据仍能成功消费（不被 consumeQuotaForCreditTx 拒绝）。
+	result, err := CreditExternalRecharge(nil, CreditExternalRechargeRequest{
+		OrderNo:         "ORDER_REFUND_THEN_CONSUME",
+		NewApiUserId:    50061,
+		Quota:           500000,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+		TransactionId:   "TX_REFUND_THEN_CONSUME",
+		PaidAt:          1720000009,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Credited)
+	// quota = 1100000 + 500000 = 1600000。
+	assert.Equal(t, 1600000, reloadUserQuota(t, 50061))
+	c := reloadCredit(t, "ORDER_REFUND_THEN_CONSUME")
+	assert.Equal(t, WischoicerCreditStatusSuccess, c.Status)
+
+	// 新 reservation 被正确拒绝：current(1600000) + reserved(0) + new(1) > limit。
+	_, err = ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_REFUND_THEN_BLOCK",
+		NewApiUserId:    50061,
+		Quota:           1,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	assert.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
 }
 
 func TestConsumeReservedQuotaTx_ConcurrentOnlyOneCredit(t *testing.T) {

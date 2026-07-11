@@ -1186,8 +1186,14 @@ func DeltaUpdateUserQuota(id int, delta int) (err error) {
 // 不能因容量瞬时打满而丢额度。本函数先经容量守卫 CreditUserQuota；若被拒
 // （ErrWischoicerQuotaCapacityExceeded，说明 currentUserQuota + activeReservedQuota + delta
 // 瞬时超上限），降级为直接 increaseUserQuota 并 SysError 告警，让运维关注
-// 「退还后 current + reserved > limit」异常——此时没有资金损失或超卖，后续 Reserve 会在
-// 容量检查时安全失败，等待 RESERVED 凭据 SUCCESS/RELEASE 后恢复正常。
+// 「退还后 current + reserved > limit」异常。
+//
+// 降级直写会让 current 瞬时突破 limit，但不影响已付款 RESERVED 凭据的消费：
+// consumeQuotaForCreditTx 不再检查容量，消费只是把 reserved 转为 actual、净额不变，
+// 退款突破不会让已付款 reservation 永久拒绝（避免用户付了钱到不了账）。突破只影响
+// 新 reservation——ReserveExternalRecharge 的 `current + activeReserved + newQuota <= limit`
+// 守卫会正确拒绝，等待 RESERVED 凭据 SUCCESS/RELEASE 后恢复正常。CreditUserQuotaTx
+// （其他正向加额，如 admin 加额/签到）仍守卫容量，是新正向额度的唯一 gate。
 //
 // 容量守卫通过或降级直写成功后，异步增加缓存。
 func RefundUserQuota(id int, quota int) (err error) {

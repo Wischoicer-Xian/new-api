@@ -451,14 +451,18 @@ func handleAlreadySuccess(credit *WischoicerRechargeCredit, req CreditExternalRe
 	return nil, ErrWischoicerCreditConflict
 }
 
-// consumeQuotaForCreditTx 执行 guarded quota 更新。
+// consumeQuotaForCreditTx 把 RESERVED 凭据的 quota 转为实际 user.quota。
 //
-// 首次消费时，该凭据的 quota 已在 Reserve 阶段计入 activeReservedQuota；现在把
-// reserved 转为实际 quota，等效占用不变，只需保证 user.quota + delta <= limit。
+// 这里不做容量校验。该凭据的 quota 已在 ReserveExternalRecharge 阶段计入
+// activeReservedQuota 并通过 `current + activeReserved + newQuota <= limit` 守卫；
+// 消费只是把 reserved 占用转为 actual 占用，`current + reserved` 净额不变，数学上
+// 不会突破上限（limit 不支持热更新，见方案 §3.2）。
+//
+// 即便 user.quota 已被 RefundUserQuota 降级直写推过 limit，这里仍允许消费：退款必须
+// 到账，已付款的 RESERVED 凭据不能因退款突破而被永久拒绝（否则用户付了钱到不了账，
+// billing 只能重试/死信）。此时新 reservation 会被 ReserveExternalRecharge 的容量检查
+// 正确拒绝，不变量对新预留仍然生效；CreditUserQuotaTx（其他正向加额）也仍守卫容量。
 func consumeQuotaForCreditTx(tx *gorm.DB, user *User, delta int) error {
-	if int64(user.Quota)+int64(delta) > int64(common.WischoicerMaxUserQuota) {
-		return ErrWischoicerQuotaCapacityExceeded
-	}
 	result := tx.Model(&User{}).
 		Where("id = ?", user.Id).
 		Update("quota", gorm.Expr("quota + ?", delta))
