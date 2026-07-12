@@ -118,6 +118,28 @@ func TestOaiResponsesToChatStreamHandlerUsesCallerModelWhenMapped(t *testing.T) 
 	require.NotContains(t, got, `"model":"upstream-model"`)
 }
 
+func TestOaiResponsesToChatHandlerUsesCallerModelWhenMapped(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	body := `{"id":"resp_1","model":"upstream-model","created_at":1710000000,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`
+
+	c, recorder, resp, info := newResponsesChatTestContext(t, body, false)
+	info.OriginModelName = "caller-model"
+	info.UpstreamModelName = "upstream-model"
+	info.ChannelMeta.UpstreamModelName = "upstream-model"
+	info.IsModelMapped = true
+
+	usage, err := OaiResponsesToChatHandler(c, info, resp)
+	require.Nil(t, err)
+	require.NotNil(t, usage)
+
+	got := recorder.Body.String()
+	require.Contains(t, got, `"model":"caller-model"`)
+	require.NotContains(t, got, `"model":"upstream-model"`)
+}
+
 func TestOaiResponsesToChatBufferedStreamHandlerReturnsJSONFromSSE(t *testing.T) {
 	oldMode := gin.Mode()
 	gin.SetMode(gin.TestMode)
@@ -146,6 +168,33 @@ func TestOaiResponsesToChatBufferedStreamHandlerReturnsJSONFromSSE(t *testing.T)
 	require.Contains(t, got, `"name":"lookup"`)
 	require.Contains(t, got, `"arguments":"{\"q\":\"x\"}"`)
 	require.Contains(t, got, `"finish_reason":"tool_calls"`)
+}
+
+func TestOaiResponsesToChatBufferedStreamHandlerUsesCallerModelWhenMapped(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	body := strings.Join([]string{
+		`data: {"type":"response.output_text.delta","delta":"buffered text"}`,
+		`data: {"type":"response.done","response":{"model":"upstream-model","status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	c, recorder, resp, info := newResponsesChatTestContext(t, body, false)
+	info.OriginModelName = "caller-model"
+	info.UpstreamModelName = "upstream-model"
+	info.ChannelMeta.UpstreamModelName = "upstream-model"
+	info.IsModelMapped = true
+
+	usage, err := OaiResponsesToChatBufferedStreamHandler(c, info, resp)
+	require.Nil(t, err)
+	require.NotNil(t, usage)
+
+	got := recorder.Body.String()
+	require.Contains(t, got, `"model":"caller-model"`)
+	require.NotContains(t, got, `"model":"upstream-model"`)
 }
 
 func TestOaiChatToResponsesStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {
