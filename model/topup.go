@@ -168,6 +168,57 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 	return nil
 }
 
+// CompleteEpayTopUpTx 在同一数据库事务内原子完成 Epay 已收款到账：锁定 topup 行
+// （MySQL/PostgreSQL FOR UPDATE 跨进程行锁，SQLite 单写串行）→ 校验 provider/status
+// → 幂等（已 SUCCESS 直接返回 credited=false）→ 同事务 CreditPaidTopUpTx 增额 →
+// 标记 SUCCESS。调用方必须已持有事务 tx。
+//
+// 与 Recharge（Stripe）/ RechargeCreem / RechargeWaffo / ManualCompleteTopUp 同一事务
+// 模式：quota 增额与订单状态变更原子提交，任一步失败整体回滚。跨进程幂等由 trade_no
+// 唯一行 + 行锁保证——重复通知命中已 SUCCESS 时 credited=false，不再增 quota（防双到账）。
+// 返回 credited=true 仅在本次实际完成到账时，供调用方决定是否记录“充值成功”日志，
+// 避免重复通知产生重复用户日志（r7 P1-2）。
+//
+// actualPaymentMethod 为渠道回调里的实际支付方式，与订单记录不同时同步到 PaymentMethod
+// 字段（仅记录，不影响资金）。
+func CompleteEpayTopUpTx(tx *gorm.DB, tradeNo string, quotaToAdd int, actualPaymentMethod string) (credited bool, err error) {
+	refCol := "`trade_no`"
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		refCol = `"trade_no"`
+	}
+	topUp := &TopUp{}
+	if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+		return false, errors.New("充值订单不存在")
+	}
+	if topUp.PaymentProvider != PaymentProviderEpay {
+		return false, ErrPaymentMethodMismatch
+	}
+	// 幂等：已 SUCCESS 直接返回，重复通知不再增 quota（防双到账）。
+	if topUp.Status == common.TopUpStatusSuccess {
+		return false, nil
+	}
+	if topUp.Status != common.TopUpStatusPending {
+		return false, errors.New("充值订单状态错误")
+	}
+	if quotaToAdd <= 0 {
+		return false, errors.New("无效的充值额度")
+	}
+	if actualPaymentMethod != "" && topUp.PaymentMethod != actualPaymentMethod {
+		topUp.PaymentMethod = actualPaymentMethod
+	}
+	topUp.CompleteTime = common.GetTimestamp()
+	topUp.Status = common.TopUpStatusSuccess
+	if err := tx.Save(topUp).Error; err != nil {
+		return false, err
+	}
+	// 同事务内增 quota（已收款到账入口，不被“新售卖软上限”拒绝；int32 硬界溢出或 DB
+	// 错误时返回 error 触发整体回滚，订单保持 Pending、quota 不变，等待重试或人工介入）。
+	if err := CreditPaidTopUpTx(tx, topUp.UserId, quotaToAdd); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // topUpQueryWindowSeconds 限制充值记录查询的时间窗口（秒）。
 const topUpQueryWindowSeconds int64 = 30 * 24 * 60 * 60
 

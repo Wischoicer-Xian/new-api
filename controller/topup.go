@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 func GetTopUpInfo(c *gin.Context) {
@@ -351,16 +352,11 @@ func EpayNotify(c *gin.Context) {
 		return
 	}
 	verifyInfo, err := client.Verify(params)
-	if err == nil && verifyInfo.VerifyStatus {
-		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 webhook 验签成功 trade_no=%s callback_type=%s trade_status=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, verifyInfo.TradeStatus, c.ClientIP(), common.GetJsonString(verifyInfo)))
-		_, err := c.Writer.Write([]byte("success"))
-		if err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 trade_no=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, c.ClientIP(), err.Error()))
-		}
-	} else {
-		_, err := c.Writer.Write([]byte("fail"))
-		if err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
+	if err != nil || !verifyInfo.VerifyStatus {
+		// 验签失败：不 ACK success，让 epay 按协议重试。
+		_, werr := c.Writer.Write([]byte("fail"))
+		if werr != nil {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), werr.Error()))
 		}
 		if err != nil {
 			logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 验签失败 path=%q client_ip=%s verify_error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
@@ -370,47 +366,59 @@ func EpayNotify(c *gin.Context) {
 		return
 	}
 
-	if verifyInfo.TradeStatus == epay.StatusTradeSuccess {
-		LockOrder(verifyInfo.ServiceTradeNo)
-		defer UnlockOrder(verifyInfo.ServiceTradeNo)
-		topUp := model.GetTopUpByTradeNo(verifyInfo.ServiceTradeNo)
-		if topUp == nil {
-			logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 回调订单不存在 trade_no=%s callback_type=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, c.ClientIP(), common.GetJsonString(verifyInfo)))
-			return
-		}
-		if topUp.PaymentProvider != model.PaymentProviderEpay {
-			logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 订单支付网关不匹配 trade_no=%s order_provider=%s callback_type=%s client_ip=%s", verifyInfo.ServiceTradeNo, topUp.PaymentProvider, verifyInfo.Type, c.ClientIP()))
-			return
-		}
-		if topUp.Status == common.TopUpStatusPending {
-			if topUp.PaymentMethod != verifyInfo.Type {
-				logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 实际支付方式与订单不同 trade_no=%s order_payment_method=%s actual_type=%s client_ip=%s", verifyInfo.ServiceTradeNo, topUp.PaymentMethod, verifyInfo.Type, c.ClientIP()))
-				topUp.PaymentMethod = verifyInfo.Type
-			}
-			//user, _ := model.GetUserById(topUp.UserId, false)
-			//user.Quota += topUp.Amount * 500000
-			dAmount := decimal.NewFromInt(int64(topUp.Amount))
-			dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-			quotaToAdd := int(dAmount.Mul(dQuotaPerUnit).IntPart())
-			// 先到账再标记订单成功：CreditPaidTopUp 是已收款到账入口，不会被「新售卖
-			// 软上限」拒绝。若到账失败（如 DB 错误），订单必须保持 Pending，不能提前
-			// 标记 Success——否则后续重复回调或人工补单会因为 topUp.Status 已是
-			// Success 而被跳过，导致这笔已收款的充值永久丢失额度（方案 §3.2）。
-			if err := model.CreditPaidTopUp(topUp.UserId, quotaToAdd); err != nil {
-				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新用户额度失败，订单保持待处理等待人工介入 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, err.Error(), common.GetJsonString(topUp)))
-				return
-			}
-			topUp.Status = common.TopUpStatusSuccess
-			if err := topUp.Update(); err != nil {
-				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新充值订单失败，额度已到账但订单状态未同步 trade_no=%s user_id=%d client_ip=%s error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), err.Error(), common.GetJsonString(topUp)))
-				return
-			}
-			logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值成功 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d money=%.2f topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, topUp.Money, common.GetJsonString(topUp)))
-			model.RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money), c.ClientIP(), topUp.PaymentMethod, "epay")
-		}
-	} else {
+	logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 webhook 验签成功 trade_no=%s callback_type=%s trade_status=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, verifyInfo.TradeStatus, c.ClientIP(), common.GetJsonString(verifyInfo)))
+
+	if verifyInfo.TradeStatus != epay.StatusTradeSuccess {
+		// 验签通过但非交易成功事件（如 wait）：ACK success 让 epay 停止重试，无需到账。
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 webhook 忽略事件 trade_no=%s callback_type=%s trade_status=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, verifyInfo.TradeStatus, c.ClientIP(), common.GetJsonString(verifyInfo)))
+		_, _ = c.Writer.Write([]byte("success"))
+		return
 	}
+
+	// 进程内互斥，单实例串行化重复通知；跨进程由 DB 行锁保证（CompleteEpayTopUpTx 内
+	// lockForUpdate）。保留进程内锁可减少同进程并发重复进入业务逻辑，DB 行锁兜底跨实例。
+	LockOrder(verifyInfo.ServiceTradeNo)
+	defer UnlockOrder(verifyInfo.ServiceTradeNo)
+
+	// 事务外读 topUp 仅用于计算 quotaToAdd 与日志字段；事务内 CompleteEpayTopUpTx 会
+	// 权威地重新锁定并校验 provider/status。Amount 创建后不可变，事务外读到旧值不影响
+	// 资金正确性。
+	topUp := model.GetTopUpByTradeNo(verifyInfo.ServiceTradeNo)
+	if topUp == nil {
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 回调订单不存在 trade_no=%s callback_type=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, c.ClientIP(), common.GetJsonString(verifyInfo)))
+		_, _ = c.Writer.Write([]byte("fail"))
+		return
+	}
+
+	dAmount := decimal.NewFromInt(int64(topUp.Amount))
+	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+	quotaToAdd := int(dAmount.Mul(dQuotaPerUnit).IntPart())
+
+	// 单事务原子完成：锁 topup → provider/status 校验 → 幂等（已 SUCCESS 返回 credited=false）
+	// → CreditPaidTopUpTx 增 quota → 标记 SUCCESS。quota 增额与状态变更同提交，任一步
+	// 失败整体回滚（订单保持 Pending + quota 不变）。仅在事务提交成功后才 ACK success，
+	// 失败写 fail 让 epay 重试（方案 §3.2 / r7 P1-2）。
+	var credited bool
+	txErr := model.DB.Transaction(func(tx *gorm.DB) error {
+		c, err := model.CompleteEpayTopUpTx(tx, verifyInfo.ServiceTradeNo, quotaToAdd, verifyInfo.Type)
+		credited = c
+		return err
+	})
+	if txErr != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 充值事务失败，订单保持待处理等待重试或人工介入 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, txErr.Error(), common.GetJsonString(topUp)))
+		_, _ = c.Writer.Write([]byte("fail"))
+		return
+	}
+
+	if credited {
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值成功 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d money=%.2f topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, topUp.Money, common.GetJsonString(topUp)))
+		model.RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money), c.ClientIP(), topUp.PaymentMethod, "epay")
+	} else {
+		// 幂等命中：订单已是 SUCCESS（通常为 epay 重复通知），不再增 quota 也不重复记日志。
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值订单已处理，跳过重复通知 trade_no=%s user_id=%d client_ip=%s", topUp.TradeNo, topUp.UserId, c.ClientIP()))
+	}
+	// 事务提交成功（新建到账或幂等命中），ACK success 让 epay 停止重试。
+	_, _ = c.Writer.Write([]byte("success"))
 }
 
 func RequestAmount(c *gin.Context) {
