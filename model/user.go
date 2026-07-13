@@ -1228,19 +1228,125 @@ func RefundUserQuota(id int, quota int) (err error) {
 	return nil
 }
 
-// refundUserQuotaDirectWithInt32Cap 是 RefundUserQuota 的降级直写路径：软上限已拒绝，
-// 退款在 user.quota 上直接叠加 delta。
+// directIncreaseWithInt32CapTx 是「软上限拒绝后降级直写」的共享 CAS 核心：在已持有的
+// tx 内锁 user 行，汇总 activeReservedQuota，校验 current+reserved+delta 不超过 int32
+// 物理硬界后直接叠加 quota。
 //
 // 唯一约束：user.quota 列是 int32（MySQL/PG int4），叠加后不得溢出。真正的硬界不是
 // `current + delta`，而是「用户所有未消费 RESERVED 凭据消费完之后」的 quota 峰值，
 // 即 `current + activeReservedQuota + delta`——已付款 RESERVED 消费
 // （consumeQuotaForCreditTx）不再检查容量，只把 reserved 转 actual 直接叠加到
-// quota 列，一旦退款把 current 推到某个值，使得 current+reserved 后续消费会溢出
+// quota 列，一旦降级直写把 current 推到某个值，使得 current+reserved 后续消费会溢出
 // int32，consume 阶段只能靠数据库报错回滚，已付款订单永久死信、无法入账。所以硬界
 // 检查必须锁 user 行、汇总 activeReservedQuota，与 CreditUserQuotaTx 同构，只是上限换成
-// math.MaxInt32（物理硬界）而不是 WischoicerMaxUserQuota（软上限）。溢出即拒绝并
-// SysError 告警，需运维人工介入（如核账后手动调整或迁移到 bigint）。
+// math.MaxInt32（物理硬界）而不是 WischoicerMaxUserQuota（软上限）。
+//
+// 是 RefundUserQuota（退款降级）与 CreditPaidTopUp（已收款到账降级）共享的核心；
+// 调用方持有各自的事务边界，负责在溢出时补上带上下文的 SysError 审计文案。
+func directIncreaseWithInt32CapTx(tx *gorm.DB, id int, quota int) (reservedSum int, currentQuota int, err error) {
+	var user User
+	if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, 0, ErrWischoicerCreditUserUnavailable
+		}
+		return 0, 0, err
+	}
+	reservedSum, err = sumActiveReservedQuotaTx(tx, id)
+	if err != nil {
+		return 0, user.Quota, err
+	}
+	// int64 运算避免溢出后再截断检查；硬界覆盖 current+reserved+delta，
+	// 防止降级直写推高 current 后，已付款 RESERVED 消费叠加 reserved 物理溢出 int32。
+	projected := int64(user.Quota) + int64(reservedSum) + int64(quota)
+	if projected > int64(math.MaxInt32) {
+		return reservedSum, user.Quota, ErrWischoicerQuotaOverflow
+	}
+	result := tx.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", quota))
+	if result.Error != nil {
+		return reservedSum, user.Quota, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return reservedSum, user.Quota, ErrWischoicerCreditUserUnavailable
+	}
+	return reservedSum, user.Quota, nil
+}
+
+// refundUserQuotaDirectWithInt32Cap 是 RefundUserQuota 的降级直写路径：软上限已拒绝，
+// 退款在 user.quota 上直接叠加 delta，仍守 int32 硬界。溢出即拒绝并 SysError 告警，
+// 需运维人工介入（如核账后手动调整或迁移到 bigint）。
 func refundUserQuotaDirectWithInt32Cap(id int, quota int) error {
+	return runWischoicerTx(func(tx *gorm.DB) error {
+		reservedSum, currentQuota, err := directIncreaseWithInt32CapTx(tx, id, quota)
+		if err != nil {
+			if errors.Is(err, ErrWischoicerQuotaOverflow) {
+				common.SysError(fmt.Sprintf(
+					"quota refund rejected: would overflow int32 hard cap including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
+					id, currentQuota, reservedSum, quota,
+				))
+			}
+			return err
+		}
+		common.SysError(fmt.Sprintf("quota capacity guard rejected refund, falling back to direct increase: user=%d delta=%d", id, quota))
+		return nil
+	})
+}
+
+// CreditPaidTopUpTx 是已确认收款的充值到账入口（Stripe/Creem/Waffo/Epay 等无预留的
+// 旧充值通道，与 Wis 微信充值的 reserve→pay→consume 不同，钱已经在支付回调时收到）。
+// 调用方必须已持有事务 tx。
+//
+// 与 RefundUserQuota 同样语义：钱已收到，credit 是不可拒绝的义务，不能被「新售卖软
+// 上限」（WischoicerMaxUserQuota）挡住，否则用户已付款却拿不到额度。守卫放行走正常
+// 路径；软上限拒绝时降级为 directIncreaseWithInt32CapTx（仅检查 int32+activeReserved
+// 硬界的 CAS，与 refundUserQuotaDirectWithInt32Cap 相同的硬界保护）。
+func CreditPaidTopUpTx(tx *gorm.DB, id int, quota int) error {
+	if quota <= 0 {
+		return nil
+	}
+	err := CreditUserQuotaTx(nil, tx, id, quota)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrWischoicerQuotaCapacityExceeded) {
+		return err
+	}
+	// 软上限瞬时超限：已收款的到账必须成立，降级直写（仍守 int32 物理硬界）。
+	reservedSum, currentQuota, dErr := directIncreaseWithInt32CapTx(tx, id, quota)
+	if dErr != nil {
+		if errors.Is(dErr, ErrWischoicerQuotaOverflow) {
+			common.SysError(fmt.Sprintf(
+				"paid topup credit rejected: would overflow int32 hard cap including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
+				id, currentQuota, reservedSum, quota,
+			))
+		}
+		return dErr
+	}
+	common.SysError(fmt.Sprintf("paid topup credit rejected by soft cap, falling back to direct increase: user=%d delta=%d", id, quota))
+	return nil
+}
+
+// CreditPaidTopUp 是 CreditPaidTopUpTx 的事务包装，供未持有事务句柄的调用方使用
+// （如 Epay webhook 回调）。
+func CreditPaidTopUp(id int, quota int) error {
+	if quota <= 0 {
+		return nil
+	}
+	return runWischoicerTx(func(tx *gorm.DB) error {
+		return CreditPaidTopUpTx(tx, id, quota)
+	})
+}
+
+// SetUserQuota 是管理员显式设置用户 quota 绝对值的唯一入口（override 操作）。
+//
+// override 是管理员显式管理行为，不是「新预约」，不受「新售卖准入」软上限
+// （WischoicerMaxUserQuota）限制。但物理硬界不能突破：锁 user 行、汇总
+// activeReservedQuota，校验 newQuota+activeReservedQuota 不超过 int32 宽度
+// （math.MaxInt32），避免后续已付款 RESERVED 凭据消费（consumeQuotaForCreditTx 不
+// 检查容量，直接叠加到 quota 列）时物理溢出。
+func SetUserQuota(id int, newQuota int) error {
+	if newQuota < 0 || newQuota > math.MaxInt32 {
+		return ErrWischoicerInvalidArgument
+	}
 	return runWischoicerTx(func(tx *gorm.DB) error {
 		var user User
 		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
@@ -1253,24 +1359,16 @@ func refundUserQuotaDirectWithInt32Cap(id int, quota int) error {
 		if err != nil {
 			return err
 		}
-		// int64 运算避免溢出后再截断检查；硬界覆盖 current+reserved+delta，
-		// 防止退款推高 current 后，已付款 RESERVED 消费叠加 reserved 物理溢出 int32。
-		projected := int64(user.Quota) + int64(reservedSum) + int64(quota)
-		if projected > int64(math.MaxInt32) {
-			common.SysError(fmt.Sprintf(
-				"quota refund rejected: would overflow int32 hard cap including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
-				id, user.Quota, reservedSum, quota,
-			))
+		if int64(newQuota)+int64(reservedSum) > int64(math.MaxInt32) {
 			return ErrWischoicerQuotaOverflow
 		}
-		result := tx.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", quota))
+		result := tx.Model(&User{}).Where("id = ?", id).Update("quota", newQuota)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
 			return ErrWischoicerCreditUserUnavailable
 		}
-		common.SysError(fmt.Sprintf("quota capacity guard rejected refund, falling back to direct increase: user=%d delta=%d", id, quota))
 		return nil
 	})
 }

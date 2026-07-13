@@ -1163,7 +1163,11 @@ func ManageUser(c *gin.Context) {
 			})
 		case "override":
 			oldQuota := user.Quota
-			if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("quota", req.Value).Error; err != nil {
+			if err := model.SetUserQuota(user.Id, req.Value); err != nil {
+				if errors.Is(err, model.ErrWischoicerQuotaOverflow) {
+					common.ApiErrorMsg(c, "设置的额度加上未完成充值预留会超出上限，无法设置")
+					return
+				}
 				common.ApiError(c, err)
 				return
 			}

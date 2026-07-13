@@ -1162,3 +1162,111 @@ func TestDeleteVsReserve_NoLostReservation(t *testing.T) {
 		t.Fatalf("TOCTOU: user deleted but active reservation remains")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// R6 P1-4：CreditPaidTopUp / CreditPaidTopUpTx — 已收款到账不可被软上限拒绝
+// ---------------------------------------------------------------------------
+
+// 容量充足时 CreditPaidTopUp 等价于 CreditUserQuota：正常走软上限守卫放行。
+func TestCreditPaidTopUp_GuardAdmitsWhenCapacityAvailable(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	seedWischoicerUser(t, 50100, 600000)
+
+	require.NoError(t, CreditPaidTopUp(50100, 100000))
+	assert.Equal(t, 700000, reloadUserQuota(t, 50100))
+}
+
+// 软上限拒绝时 CreditPaidTopUp 必须降级直写，保证已收款的充值不丢失额度。
+func TestCreditPaidTopUp_FallbackOnCapacityGuardReject(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	// current(850000) + reserved(100000) = 950000；到账 100000 → 1050000 > limit。
+	seedWischoicerUser(t, 50101, 850000)
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_PAIDTOPUP_101",
+		NewApiUserId:    50101,
+		Quota:           100000,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	logBuf := captureSysError(t)
+	require.NoError(t, CreditPaidTopUp(50101, 100000))
+	assert.Equal(t, 950000, reloadUserQuota(t, 50101))
+	assert.Contains(t, logBuf.String(), "paid topup credit rejected by soft cap, falling back to direct increase")
+}
+
+// 降级直写叠加会溢出 int32 物理硬界时拒绝，不改变 quota，SysError 告警——已收款到账
+// 也不能突破物理硬界，这是唯一例外（需运维人工介入）。
+func TestCreditPaidTopUp_RejectedWhenInt32Overflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 50102, math.MaxInt32-100)
+
+	logBuf := captureSysError(t)
+	err := CreditPaidTopUp(50102, 200)
+	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
+	assert.Equal(t, math.MaxInt32-100, reloadUserQuota(t, 50102))
+	assert.Contains(t, logBuf.String(), "paid topup credit rejected: would overflow int32 hard cap")
+}
+
+// 非正 delta 是 no-op。
+func TestCreditPaidTopUp_NonPositiveDeltaIsNoOp(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	seedWischoicerUser(t, 50103, 300000)
+
+	require.NoError(t, CreditPaidTopUp(50103, 0))
+	require.NoError(t, CreditPaidTopUp(50103, -5))
+	assert.Equal(t, 300000, reloadUserQuota(t, 50103))
+}
+
+// ---------------------------------------------------------------------------
+// R6 P1-6：SetUserQuota — 管理员 override 仍守 int32+reserved 硬界
+// ---------------------------------------------------------------------------
+
+// 正常范围内 override 成功，不受软上限限制（管理员显式管理行为）。
+func TestSetUserQuota_SucceedsWithinHardCap(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000) // 软上限很小，override 不应受它限制。
+	seedWischoicerUser(t, 50110, 500000)
+
+	require.NoError(t, SetUserQuota(50110, 900000))
+	assert.Equal(t, 900000, reloadUserQuota(t, 50110))
+}
+
+// newQuota + activeReservedQuota 超过 int32 硬界时拒绝，quota 不变。
+func TestSetUserQuota_RejectedWhenReservedPushesOverHardCap(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 50111, 100)
+
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_SETQUOTA_111",
+		NewApiUserId:    50111,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// newQuota(MaxInt32-50) + reserved(100) > MaxInt32 → 拒绝。
+	err = SetUserQuota(50111, math.MaxInt32-50)
+	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
+	assert.Equal(t, 100, reloadUserQuota(t, 50111))
+}
+
+// 非法参数（负数或超过 int32）直接拒绝。
+func TestSetUserQuota_RejectsInvalidArgument(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 1000000)
+	seedWischoicerUser(t, 50112, 0)
+
+	require.ErrorIs(t, SetUserQuota(50112, -1), ErrWischoicerInvalidArgument)
+	require.ErrorIs(t, SetUserQuota(50112, math.MaxInt32+1), ErrWischoicerInvalidArgument)
+	assert.Equal(t, 0, reloadUserQuota(t, 50112))
+}

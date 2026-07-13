@@ -387,21 +387,22 @@ func EpayNotify(c *gin.Context) {
 				logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 实际支付方式与订单不同 trade_no=%s order_payment_method=%s actual_type=%s client_ip=%s", verifyInfo.ServiceTradeNo, topUp.PaymentMethod, verifyInfo.Type, c.ClientIP()))
 				topUp.PaymentMethod = verifyInfo.Type
 			}
-			topUp.Status = common.TopUpStatusSuccess
-			err := topUp.Update()
-			if err != nil {
-				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新充值订单失败 trade_no=%s user_id=%d client_ip=%s error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), err.Error(), common.GetJsonString(topUp)))
-				return
-			}
 			//user, _ := model.GetUserById(topUp.UserId, false)
 			//user.Quota += topUp.Amount * 500000
 			dAmount := decimal.NewFromInt(int64(topUp.Amount))
 			dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
 			quotaToAdd := int(dAmount.Mul(dQuotaPerUnit).IntPart())
-			// 正向额度增加走容量守卫 CreditUserQuota（方案 §3.2）
-			err = model.CreditUserQuota(topUp.UserId, quotaToAdd)
-			if err != nil {
-				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新用户额度失败 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, err.Error(), common.GetJsonString(topUp)))
+			// 先到账再标记订单成功：CreditPaidTopUp 是已收款到账入口，不会被「新售卖
+			// 软上限」拒绝。若到账失败（如 DB 错误），订单必须保持 Pending，不能提前
+			// 标记 Success——否则后续重复回调或人工补单会因为 topUp.Status 已是
+			// Success 而被跳过，导致这笔已收款的充值永久丢失额度（方案 §3.2）。
+			if err := model.CreditPaidTopUp(topUp.UserId, quotaToAdd); err != nil {
+				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新用户额度失败，订单保持待处理等待人工介入 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, err.Error(), common.GetJsonString(topUp)))
+				return
+			}
+			topUp.Status = common.TopUpStatusSuccess
+			if err := topUp.Update(); err != nil {
+				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新充值订单失败，额度已到账但订单状态未同步 trade_no=%s user_id=%d client_ip=%s error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), err.Error(), common.GetJsonString(topUp)))
 				return
 			}
 			logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值成功 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d money=%.2f topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, topUp.Money, common.GetJsonString(topUp)))

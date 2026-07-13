@@ -145,8 +145,9 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 		if quotaInt <= 0 {
 			return errors.New("无效的充值额度")
 		}
-		// 正向额度增加统一走容量守卫 CreditUserQuotaTx（方案 §3.2）。
-		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaInt); err != nil {
+		// 正向额度增加统一走已收款到账入口 CreditPaidTopUpTx：钱已确认支付，
+		// 不能被「新售卖软上限」拒绝导致已付款却拿不到额度（方案 §3.2）。
+		if err := CreditPaidTopUpTx(tx, topUp.UserId, quotaInt); err != nil {
 			return err
 		}
 		// stripe_customer 仍需在同一事务内更新。
@@ -378,8 +379,9 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 			return err
 		}
 
-		// 增加用户额度（走容量守卫 CreditUserQuotaTx，方案 §3.2）
-		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaToAdd); err != nil {
+		// 增加用户额度：管理员补单是确认订单已实际支付，走已收款到账入口
+		// CreditPaidTopUpTx，不能被「新售卖软上限」拒绝（方案 §3.2）。
+		if err := CreditPaidTopUpTx(tx, topUp.UserId, quotaToAdd); err != nil {
 			return err
 		}
 
@@ -450,8 +452,8 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 			}
 		}
 
-		// 正向额度增加走容量守卫（方案 §3.2）
-		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, int(quota)); err != nil {
+		// 正向额度增加走已收款到账入口 CreditPaidTopUpTx（方案 §3.2）
+		if err := CreditPaidTopUpTx(tx, topUp.UserId, int(quota)); err != nil {
 			return err
 		}
 
@@ -512,8 +514,8 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 			return err
 		}
 
-		// 正向额度增加走容量守卫（方案 §3.2）
-		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaToAdd); err != nil {
+		// 正向额度增加走已收款到账入口 CreditPaidTopUpTx（方案 §3.2）
+		if err := CreditPaidTopUpTx(tx, topUp.UserId, quotaToAdd); err != nil {
 			return err
 		}
 
@@ -574,8 +576,8 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return err
 		}
 
-		// 正向额度增加走容量守卫（方案 §3.2）
-		if err := CreditUserQuotaTx(nil, tx, topUp.UserId, quotaToAdd); err != nil {
+		// 正向额度增加走已收款到账入口 CreditPaidTopUpTx（方案 §3.2）
+		if err := CreditPaidTopUpTx(tx, topUp.UserId, quotaToAdd); err != nil {
 			return err
 		}
 
