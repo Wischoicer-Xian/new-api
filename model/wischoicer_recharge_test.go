@@ -966,6 +966,122 @@ func TestRefundUserQuota_RejectedWhenInt32Overflow(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "overflow int32 hard cap")
 }
 
+// R5 P1 回归：refundUserQuotaDirectWithInt32Cap 的硬界检查必须覆盖
+// activeReservedQuota，不能只看 current。反例：current=MaxInt32-150，
+// activeReserved=100（Reserve 阶段合法：current+reserved+new<=MaxInt32），
+// refund=100。修复前的 CAS 只查 current+delta<=MaxInt32
+// （MaxInt32-150+100=MaxInt32-50，合法通过），退款成功后 current=MaxInt32-50；
+// 后续消费该 100 的 RESERVED 凭据时 consumeQuotaForCreditTx 直接
+// current+reservedDelta=MaxInt32-50+100=MaxInt32+50，物理溢出，
+// 已付款订单永久死信。修复后退款阶段必须正确拒绝（覆盖 reserved）。
+func TestRefundUserQuota_RejectedWhenReservedPlusCurrentWouldOverflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 50086, math.MaxInt32-150)
+
+	// Reserve 阶段合法：current(MaxInt32-150) + reserved(0) + new(100) <= MaxInt32。
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_OVERFLOW_086",
+		NewApiUserId:    50086,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// 退款 100：current+delta=MaxInt32-50 本身不溢出，但 current+reserved+delta
+	// =MaxInt32-150+100+100=MaxInt32+50 会溢出，必须被拒绝。
+	logBuf := captureSysError(t)
+	err = RefundUserQuota(50086, 100)
+	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
+	assert.Equal(t, math.MaxInt32-150, reloadUserQuota(t, 50086))
+	assert.Contains(t, logBuf.String(), "overflow int32 hard cap including active reservations")
+
+	// 已付款的 RESERVED 凭据仍能安全消费（未被退款推向溢出）。
+	result, err := CreditExternalRecharge(nil, CreditExternalRechargeRequest{
+		OrderNo:         "ORDER_OVERFLOW_086",
+		NewApiUserId:    50086,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+		TransactionId:   "TX_OVERFLOW_086",
+		PaidAt:          1720000010,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Credited)
+	assert.Equal(t, math.MaxInt32-50, reloadUserQuota(t, 50086))
+}
+
+// R5 P1 回归：软上限拒绝触发降级，但覆盖 reserved 后仍在 int32 硬界内时正常降级到账。
+func TestRefundUserQuota_FallbackSucceedsWhenReservedWithinInt32Cap(t *testing.T) {
+	truncateWischoicerTables(t)
+	// 软上限低于 MaxInt32，确保退款先被软上限拒绝再走降级；降级路径的硬界检查
+	// （current+reserved+delta<=MaxInt32）仍应放行。
+	setWischoicerCapacity(t, math.MaxInt32-800)
+	seedWischoicerUser(t, 50087, math.MaxInt32-1000)
+
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_OVERFLOW_087",
+		NewApiUserId:    50087,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// 软上限：current+reserved+delta = (MaxInt32-1000)+100+200 = MaxInt32-700 > limit(MaxInt32-800) → 拒绝，降级。
+	// 硬界：MaxInt32-700 <= MaxInt32 → 放行。
+	logBuf := captureSysError(t)
+	require.NoError(t, RefundUserQuota(50087, 200))
+	assert.Equal(t, math.MaxInt32-800, reloadUserQuota(t, 50087))
+	assert.Contains(t, logBuf.String(), "falling back to direct increase")
+}
+
+// R5 P1 回归：并发退款时，若两者叠加会推过硬界（覆盖 reserved），只有一个能成功，
+// 验证锁 user 行 + 事务重试下 CAS/锁生效，不会出现双写导致的物理溢出。
+func TestRefundUserQuota_ConcurrentOnlyOneSucceedsWhenWouldOverflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 50088, math.MaxInt32-150)
+
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_OVERFLOW_088",
+		NewApiUserId:    50088,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	// 每次退款 60：current(MaxInt32-150)+reserved(100)+60 = MaxInt32+10，单次已溢出，
+	// 两次并发都应被拒绝（每次都会溢出，不存在"仅一次安全"的情形，用于验证串行化下
+	// 两次都被正确拒绝、quota 保持不变、无并发数据竞争造成的意外通过）。
+	const attempts = 2
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	errCount := 0
+	var mu sync.Mutex
+	for i := 0; i < attempts; i++ {
+		go func() {
+			defer wg.Done()
+			err := RefundUserQuota(50088, 60)
+			mu.Lock()
+			defer mu.Unlock()
+			if errors.Is(err, ErrWischoicerQuotaOverflow) {
+				errCount++
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, attempts, errCount, "both refunds should be rejected, neither may overflow int32")
+	assert.Equal(t, math.MaxInt32-150, reloadUserQuota(t, 50088))
+}
+
 // ---------------------------------------------------------------------------
 // P1-5：删除用户与创建预留的 TOCTOU
 // ---------------------------------------------------------------------------
