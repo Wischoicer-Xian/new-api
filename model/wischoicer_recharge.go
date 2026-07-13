@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -44,9 +45,9 @@ func (WischoicerRechargeCredit) TableName() string {
 
 // status 枚举
 const (
-	WischoicerCreditStatusReserved  = 0 // RESERVED — quota 容量已预留
-	WischoicerCreditStatusSuccess   = 1 // SUCCESS — 预留已转为实际 quota
-	WischoicerCreditStatusReleased  = 2 // RELEASED — 预留已释放，未入账
+	WischoicerCreditStatusReserved = 0 // RESERVED — quota 容量已预留
+	WischoicerCreditStatusSuccess  = 1 // SUCCESS — 预留已转为实际 quota
+	WischoicerCreditStatusReleased = 2 // RELEASED — 预留已释放，未入账
 )
 
 // cache_status 枚举
@@ -58,14 +59,14 @@ const (
 
 // 错误哨兵：Controller 层据此映射 HTTP code（方案 §10）。
 var (
-	ErrWischoicerCreditNotFound       = errors.New("wischoicer recharge credit not found")
-	ErrWischoicerReservationConflict  = errors.New("RESERVATION_CONFLICT")
-	ErrWischoicerCreditConflict       = errors.New("CREDIT_CONFLICT")
-	ErrWischoicerReservationReleased  = errors.New("RESERVATION_RELEASED")
+	ErrWischoicerCreditNotFound        = errors.New("wischoicer recharge credit not found")
+	ErrWischoicerReservationConflict   = errors.New("RESERVATION_CONFLICT")
+	ErrWischoicerCreditConflict        = errors.New("CREDIT_CONFLICT")
+	ErrWischoicerReservationReleased   = errors.New("RESERVATION_RELEASED")
 	ErrWischoicerCreditUserUnavailable = errors.New("CREDIT_USER_UNAVAILABLE")
 	ErrWischoicerQuotaCapacityExceeded = errors.New("QUOTA_CAPACITY_EXCEEDED")
 	ErrWischoicerQuotaOverflow         = errors.New("QUOTA_OVERFLOW")
-	ErrWischoicerInvalidArgument      = errors.New("INVALID_ARGUMENT")
+	ErrWischoicerInvalidArgument       = errors.New("INVALID_ARGUMENT")
 )
 
 // ---------------------------------------------------------------------------
@@ -474,9 +475,16 @@ func handleAlreadySuccess(credit *WischoicerRechargeCredit, req CreditExternalRe
 // 到账，已付款的 RESERVED 凭据不能因退款突破而被永久拒绝（否则用户付了钱到不了账，
 // billing 只能重试/死信）。此时新 reservation 会被 ReserveExternalRecharge 的容量检查
 // 正确拒绝，软上限对新预留仍然生效；CreditUserQuotaTx（其他正向加额）也仍守卫容量。
-// int32 物理硬界由 RefundUserQuota 降级路径的 CAS 守住退款写入；消费侧不重复检查，
-// 极端边界下若叠加溢出由数据库 int4 列兜底报错（事务回滚，不静默截断）。
+// int32 物理硬界由应用层在持有 users 行锁时显式检查，不依赖 MySQL/PostgreSQL 的
+// 列类型映射或隐式 cast；越界会让整个事务回滚，凭据仍保持 RESERVED。
 func consumeQuotaForCreditTx(tx *gorm.DB, user *User, delta int) error {
+	if int64(user.Quota)+int64(delta) > int64(math.MaxInt32) {
+		common.SysError(fmt.Sprintf(
+			"reserved quota consumption rejected: would overflow int32 hard cap: user=%d current=%d delta=%d",
+			user.Id, user.Quota, delta,
+		))
+		return ErrWischoicerQuotaCapacityExceeded
+	}
 	result := tx.Model(&User{}).
 		Where("id = ?", user.Id).
 		Update("quota", gorm.Expr("quota + ?", delta))

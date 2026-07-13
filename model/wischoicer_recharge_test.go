@@ -667,6 +667,41 @@ func TestConsumeReservedQuotaTx_SucceedsWhenCurrentExceedsLimit(t *testing.T) {
 	assert.Equal(t, "TX_060", *c.ExternalTransactionId)
 }
 
+// 软上限可以被退款路径突破，但 int32 物理硬界不能依赖数据库方言兜底。
+// 即使 SQLite/迁移后的 PostgreSQL 列允许更宽的中间表达式，应用层也必须在
+// users 行锁内拒绝越界，并把此前的 RESERVED→SUCCESS CAS 一并回滚。
+func TestConsumeReservedQuotaTx_Int32OverflowRollsBack(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 50062, math.MaxInt32-5)
+	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
+		OrderNo:         "ORDER_CONSUME_OVERFLOW_062",
+		NewAPIUserId:    50062,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+		Status:          WischoicerCreditStatusReserved,
+		CacheStatus:     WischoicerCacheStatusPending,
+	})
+
+	_, err := CreditExternalRecharge(nil, CreditExternalRechargeRequest{
+		OrderNo:         "ORDER_CONSUME_OVERFLOW_062",
+		NewApiUserId:    50062,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+		TransactionId:   "TX_CONSUME_OVERFLOW_062",
+		PaidAt:          1720000011,
+	})
+	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+	assert.Equal(t, math.MaxInt32-5, reloadUserQuota(t, 50062))
+	credit := reloadCredit(t, "ORDER_CONSUME_OVERFLOW_062")
+	assert.Equal(t, WischoicerCreditStatusReserved, credit.Status)
+	assert.Nil(t, credit.ExternalTransactionId)
+}
+
 // 关键回归：RefundUserQuota 降级直写把 user.quota 推过软上限后，已付款 RESERVED 凭据
 // 的消费仍能成功。软上限（WISCHOICER_MAX_USER_QUOTA）只是「新预约门槛」，不是物理硬界；
 // consumeQuotaForCreditTx 不再检查它，避免退款 fallback 永久阻断已付款 reservation 消费。

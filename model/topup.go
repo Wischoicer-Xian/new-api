@@ -125,9 +125,13 @@ func upsertEpayMoneyMismatchAnomaly(db *gorm.DB, mmErr *EpayMoneyMismatchError, 
 	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "dedup_key"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"caller_ip":        callerIp,
-			"last_seen_at":     now,
-			"occurrence_count": gorm.Expr("occurrence_count + 1"),
+			"caller_ip":    callerIp,
+			"last_seen_at": now,
+			// Qualify the target column: PostgreSQL exposes both the target and
+			// excluded rows inside ON CONFLICT and rejects the bare name as
+			// ambiguous. The table-qualified expression is valid on all three
+			// supported dialects.
+			"occurrence_count": gorm.Expr("epay_payment_anomalies.occurrence_count + 1"),
 		}),
 	}).Create(anomaly).Error
 }

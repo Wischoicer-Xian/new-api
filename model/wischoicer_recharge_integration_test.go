@@ -266,6 +266,7 @@ func TestConsumeReservedQuota_DatabaseInt32OverflowRollsBack(t *testing.T) {
 		PaidAt:          1720000010,
 	})
 	require.Error(t, err, "int32 overflow must cause the credit transaction to fail")
+	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
 
 	// Durable state: credit rolled back to RESERVED (CAS undone), quota unchanged.
 	credit := reloadCredit(t, "ORDER_INT_OVF_004")
