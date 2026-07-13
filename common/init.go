@@ -132,6 +132,10 @@ func InitEnv() {
 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
 	SearchRateLimitDuration = int64(GetEnvOrDefault("SEARCH_RATE_LIMIT_DURATION", 60))
 	initConstantEnv()
+
+	if err := initWischoicerRechargeConfig(); err != nil {
+		log.Fatal("wischoicer recharge config invalid: " + err.Error())
+	}
 }
 
 func initConstantEnv() {

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 
@@ -403,6 +404,20 @@ func SetApiRouter(router *gin.Engine) {
 			deploymentsRoute.PUT("/:id/name", controller.UpdateDeploymentName)
 			deploymentsRoute.POST("/:id/extend", controller.ExtendDeployment)
 			deploymentsRoute.DELETE("/:id", controller.DeleteDeployment)
+		}
+
+		// Wischoicer 充值容量预留 / 幂等入账内部接口（方案 §7.4/7.5）。
+		// 仅供 wischoicer-billing 调用，共享 Token 鉴权 + 请求体限制。
+		// Token 为空时不挂载路由（条件注册，不破坏现有部署，方案 §14 渐进上线）。
+		if common.WischoicerBillingInternalEnabled {
+			wischoicerBillingAuth := middleware.WischoicerBillingInternalAuth()
+			wischoicerInternal := apiRouter.Group("/internal/wischoicer", wischoicerBillingAuth, anonymousRequestBodyLimit)
+			{
+				wischoicerInternal.PUT("/recharge-reservations/:orderNo", controller.PutWischoicerRechargeReservation)
+				wischoicerInternal.POST("/recharge-reservations/:orderNo/release", controller.PostWischoicerRechargeReservationRelease)
+				wischoicerInternal.POST("/recharge-credits", controller.PostWischoicerRechargeCredit)
+				wischoicerInternal.GET("/recharge-credits/:orderNo", controller.GetWischoicerRechargeCredit)
+			}
 		}
 	}
 }

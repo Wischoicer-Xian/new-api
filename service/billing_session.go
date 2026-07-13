@@ -256,7 +256,10 @@ func (s *BillingSession) reserveFunding(delta int) error {
 func (s *BillingSession) rollbackFundingReserve(delta int) {
 	switch funding := s.funding.(type) {
 	case *WalletFunding:
-		if err := model.IncreaseUserQuota(funding.userId, delta, false); err != nil {
+		// 这是返还先前预扣的额度，必须到账：走 RefundUserQuota（容量守卫通过或
+		// 在软上限瞬时打满时降级直写，仍守 int32 物理硬界），不能用 IncreaseUserQuota
+		// db=true——那是新预约的软上限守卫，会在容量打满时让回滚丢失额度。
+		if err := model.RefundUserQuota(funding.userId, delta); err != nil {
 			common.SysLog("error rolling back wallet funding reserve: " + err.Error())
 		} else {
 			funding.consumed -= delta

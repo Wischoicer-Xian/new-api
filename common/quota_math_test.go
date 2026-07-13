@@ -96,6 +96,23 @@ func TestQuotaFromFloatStrictReturnsTypedClampError(t *testing.T) {
 	assert.ErrorContains(t, err, "clamped=2147483647")
 }
 
+// TestQuotaFromDecimalStrictReturnsTypedClampError mirrors the float strict
+// variant for the decimal entry point used by recharge/top-up quota conversion.
+func TestQuotaFromDecimalStrictReturnsTypedClampError(t *testing.T) {
+	quota, err := QuotaFromDecimalStrict(decimal.NewFromFloat(41.7))
+	require.NoError(t, err)
+	assert.Equal(t, 42, quota)
+
+	quota, err = QuotaFromDecimalStrict(decimal.NewFromInt(2000).Mul(decimal.NewFromFloat(1.8446744073686647e19)))
+	assert.Zero(t, quota)
+	var clamp *QuotaClamp
+	require.ErrorAs(t, err, &clamp)
+	assert.Equal(t, QuotaClampOverflow, clamp.Kind)
+	assert.Equal(t, MaxQuota, clamp.Clamped)
+	assert.ErrorContains(t, err, "QuotaFromDecimal")
+	assert.ErrorContains(t, err, "overflow")
+}
+
 // TestQuotaRoundChecked verifies the rounding entry point reports clamps the
 // same way.
 func TestQuotaRoundChecked(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -415,15 +416,47 @@ func DeleteUserById(id int) (err error) {
 	if id == 0 {
 		return errors.New("id 为空！")
 	}
-	user := User{Id: id}
-	return user.Delete()
+	// 事务内锁 user 行后重查 RESERVED 预留并执行软删除，消除「检查 → 删除」之间的 TOCTOU：
+	// 并发 ReserveExternalRecharge 会在同一 user 行上排队，本事务提交前无法创建新预留
+	// （方案 §3.2、§11）。锁顺序与 ReserveExternalRecharge 一致：users → wischoicer_recharge_credits。
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+			return err
+		}
+		hasReserved, err := hasActiveReservedQuotaTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if hasReserved {
+			return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
+		}
+		return tx.Delete(&User{}, id).Error
+	})
+	if err != nil {
+		return err
+	}
+	return invalidateUserCache(id)
 }
 
 func HardDeleteUserById(id int) error {
 	if id == 0 {
 		return errors.New("id 为空！")
 	}
+	// 锁 user 行后重查预留，与 DeleteUserById 一致地消除 TOCTOU；硬删除同样禁止，
+	// 因为物理删除后预留记录的 user 关联失效。
 	return DB.Transaction(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+			return err
+		}
+		hasReserved, err := hasActiveReservedQuotaTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if hasReserved {
+			return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
+		}
 		if err := deleteUserOAuthBindingsByUserId(tx, id); err != nil {
 			return err
 		}
@@ -466,12 +499,16 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 		return errors.New("邀请额度不足！")
 	}
 
-	// 更新用户额度
-	user.AffQuota -= quota
-	user.Quota += quota
+	// 扣减 AffQuota 与累计历史额度
+	if err := tx.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]interface{}{
+		"aff_quota":  gorm.Expr("aff_quota - ?", quota),
+		"aff_history": gorm.Expr("aff_history + ?", quota),
+	}).Error; err != nil {
+		return err
+	}
 
-	// 保存用户状态
-	if err := tx.Save(user).Error; err != nil {
+	// 正向额度增加走容量守卫（方案 §3.2）
+	if err := CreditUserQuotaTx(nil, tx, user.Id, quota); err != nil {
 		return err
 	}
 
@@ -577,7 +614,10 @@ func (user *User) finishInsert(inviterId int) {
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
 		if common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
+			// 正向额度增加走容量守卫 CreditUserQuota（方案 §3.2）
+			if err := CreditUserQuota(user.Id, common.QuotaForInvitee); err != nil {
+				common.SysError("failed to credit invitee bonus: " + err.Error())
+			}
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
 		if common.QuotaForInviter > 0 {
@@ -634,7 +674,10 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
 		if common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
+			// 正向额度增加走容量守卫 CreditUserQuota（方案 §3.2）
+			if err := CreditUserQuota(user.Id, common.QuotaForInvitee); err != nil {
+				common.SysError("failed to credit invitee bonus (oauth): " + err.Error())
+			}
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
 		if common.QuotaForInviter > 0 {
@@ -1050,17 +1093,44 @@ func GetUserSetting(id int, fromDB bool) (settingMap dto.UserSetting, err error)
 	return userBase.GetSetting(), nil
 }
 
+// IncreaseUserQuota 对用户 quota 做正向增量。
+//
+// db=true（立即写库）路径经过容量守卫 CreditUserQuota，保证
+// currentUserQuota + activeReservedQuota + delta <= WischoicerMaxUserQuota（方案 §3.2）。
+// 管理员加额等会引入新容量承诺的正向写入必须传 db=true。守卫成功后才异步增加缓存，
+// 避免守卫拒绝时缓存虚高。
+//
+// db=false 路径保留聚合批量 / 直接 quota+? 语义，仅供中继消费链路的负向差额结算
+// （DecreaseUserQuota 扣费聚合）：负向 delta 不会超容量，不需要守卫。
+//
+// 退还先前扣除额度的正向写入（funding_source/task_billing/quota 的退款、差额退还）
+// 不能用本函数 db=false（会在 RESERVED 存在时破坏容量不变量），也不能用 db=true
+// （守卫在容量接近上限时拒绝会让退款丢失额度）；统一使用 RefundUserQuota，它走守卫
+// 并在容量瞬时打满时受控降级直写 + 告警，保证退款必到账。
 func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
+	if quota == 0 {
+		return nil
+	}
+	if db {
+		if err := CreditUserQuota(id, quota); err != nil {
+			return err
+		}
+		gopool.Go(func() {
+			if err := cacheIncrUserQuota(id, int64(quota)); err != nil {
+				common.SysLog("failed to increase user quota cache: " + err.Error())
+			}
+		})
+		return nil
+	}
 	gopool.Go(func() {
-		err := cacheIncrUserQuota(id, int64(quota))
-		if err != nil {
+		if err := cacheIncrUserQuota(id, int64(quota)); err != nil {
 			common.SysLog("failed to increase user quota: " + err.Error())
 		}
 	})
-	if !db && common.BatchUpdateEnabled {
+	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
 		return nil
 	}
@@ -1105,10 +1175,202 @@ func DeltaUpdateUserQuota(id int, delta int) (err error) {
 		return nil
 	}
 	if delta > 0 {
-		return IncreaseUserQuota(id, delta, false)
+		return IncreaseUserQuota(id, delta, true)
 	} else {
 		return DecreaseUserQuota(id, -delta, false)
 	}
+}
+
+// RefundUserQuota 把先前扣除的 quota 退还给用户。
+//
+// 退还 delta 源自近期的 DecreaseUserQuota（预扣费、差额补扣），业务上必须到账，
+// 不能因容量瞬时打满而丢额度。本函数先经容量守卫 CreditUserQuota；若被拒
+// （ErrWischoicerQuotaCapacityExceeded，说明 currentUserQuota + activeReservedQuota + delta
+// 瞬时超软上限），降级为直接 increaseUserQuota 并 SysError 告警，让运维关注
+// 「退还后 current + reserved > limit」异常。
+//
+// WischoicerMaxUserQuota 是「新预约/新正向加额」的软上限（reservation admission
+// threshold），不是物理硬界——退款必到账允许突破它。真正的物理硬界是 user.quota 列的
+// int32 宽度：降级直写前锁 user 行、汇总 activeReservedQuota，守住
+// `current + activeReservedQuota + delta <= math.MaxInt32`（覆盖已付款 RESERVED 凭据
+// 消费时会叠加到 quota 列的那部分，不能只看 current），溢出时拒绝退款
+// （ErrWischoicerQuotaOverflow）并 SysError 告警。这是「退款必须到账」的唯一例外——
+// int32 物理溢出无业务解，需运维人工介入（如核账后手动调整或迁移到 bigint）。
+//
+// 降级直写会让 current 瞬时突破软上限，但不影响已付款 RESERVED 凭据的消费：
+// consumeQuotaForCreditTx 不再检查容量，消费只是把 reserved 转为 actual、净额不变，
+// 退款突破不会让已付款 reservation 永久拒绝（避免用户付了钱到不了账）。突破只影响
+// 新 reservation——ReserveExternalRecharge 的 `current + activeReserved + newQuota <= limit`
+// 守卫会正确拒绝，等待 RESERVED 凭据 SUCCESS/RELEASE 后恢复正常。CreditUserQuotaTx
+// （其他正向加额，如 admin 加额/签到）仍守卫容量，是新正向额度的唯一 gate。
+//
+// 容量守卫通过或降级直写成功后，异步增加缓存。
+func RefundUserQuota(id int, quota int) (err error) {
+	if quota <= 0 {
+		return nil
+	}
+	err = CreditUserQuota(id, quota)
+	if err == nil {
+		// 守卫通过：异步更新缓存。
+	} else if errors.Is(err, ErrWischoicerQuotaCapacityExceeded) {
+		// 软上限瞬时超限：退款必须到账，降级直写（仍守 int32 物理硬界）。
+		if err = refundUserQuotaDirectWithInt32Cap(id, quota); err != nil {
+			return err
+		}
+	} else {
+		return err
+	}
+	gopool.Go(func() {
+		if e := cacheIncrUserQuota(id, int64(quota)); e != nil {
+			common.SysLog("failed to increase user quota cache: " + e.Error())
+		}
+	})
+	return nil
+}
+
+// directIncreaseWithInt32CapTx 是「软上限拒绝后降级直写」的共享 CAS 核心：在已持有的
+// tx 内锁 user 行，汇总 activeReservedQuota，校验 current+reserved+delta 不超过 int32
+// 物理硬界后直接叠加 quota。
+//
+// 唯一约束：user.quota 列是 int32（MySQL/PG int4），叠加后不得溢出。真正的硬界不是
+// `current + delta`，而是「用户所有未消费 RESERVED 凭据消费完之后」的 quota 峰值，
+// 即 `current + activeReservedQuota + delta`——已付款 RESERVED 消费
+// （consumeQuotaForCreditTx）不再检查容量，只把 reserved 转 actual 直接叠加到
+// quota 列，一旦降级直写把 current 推到某个值，使得 current+reserved 后续消费会溢出
+// int32，consume 阶段只能靠数据库报错回滚，已付款订单永久死信、无法入账。所以硬界
+// 检查必须锁 user 行、汇总 activeReservedQuota，与 CreditUserQuotaTx 同构，只是上限换成
+// math.MaxInt32（物理硬界）而不是 WischoicerMaxUserQuota（软上限）。
+//
+// 是 RefundUserQuota（退款降级）与 CreditPaidTopUp（已收款到账降级）共享的核心；
+// 调用方持有各自的事务边界，负责在溢出时补上带上下文的 SysError 审计文案。
+func directIncreaseWithInt32CapTx(tx *gorm.DB, id int, quota int) (reservedSum int, currentQuota int, err error) {
+	var user User
+	if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, 0, ErrWischoicerCreditUserUnavailable
+		}
+		return 0, 0, err
+	}
+	reservedSum, err = sumActiveReservedQuotaTx(tx, id)
+	if err != nil {
+		return 0, user.Quota, err
+	}
+	// int64 运算避免溢出后再截断检查；硬界覆盖 current+reserved+delta，
+	// 防止降级直写推高 current 后，已付款 RESERVED 消费叠加 reserved 物理溢出 int32。
+	projected := int64(user.Quota) + int64(reservedSum) + int64(quota)
+	if projected > int64(math.MaxInt32) {
+		return reservedSum, user.Quota, ErrWischoicerQuotaOverflow
+	}
+	result := tx.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", quota))
+	if result.Error != nil {
+		return reservedSum, user.Quota, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return reservedSum, user.Quota, ErrWischoicerCreditUserUnavailable
+	}
+	return reservedSum, user.Quota, nil
+}
+
+// refundUserQuotaDirectWithInt32Cap 是 RefundUserQuota 的降级直写路径：软上限已拒绝，
+// 退款在 user.quota 上直接叠加 delta，仍守 int32 硬界。溢出即拒绝并 SysError 告警，
+// 需运维人工介入（如核账后手动调整或迁移到 bigint）。
+func refundUserQuotaDirectWithInt32Cap(id int, quota int) error {
+	return runWischoicerTx(func(tx *gorm.DB) error {
+		reservedSum, currentQuota, err := directIncreaseWithInt32CapTx(tx, id, quota)
+		if err != nil {
+			if errors.Is(err, ErrWischoicerQuotaOverflow) {
+				common.SysError(fmt.Sprintf(
+					"quota refund rejected: would overflow int32 hard cap including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
+					id, currentQuota, reservedSum, quota,
+				))
+			}
+			return err
+		}
+		common.SysError(fmt.Sprintf("quota capacity guard rejected refund, falling back to direct increase: user=%d delta=%d", id, quota))
+		return nil
+	})
+}
+
+// CreditPaidTopUpTx 是已确认收款的充值到账入口（Stripe/Creem/Waffo/Epay 等无预留的
+// 旧充值通道，与 Wis 微信充值的 reserve→pay→consume 不同，钱已经在支付回调时收到）。
+// 调用方必须已持有事务 tx。
+//
+// 与 RefundUserQuota 同样语义：钱已收到，credit 是不可拒绝的义务，不能被「新售卖软
+// 上限」（WischoicerMaxUserQuota）挡住，否则用户已付款却拿不到额度。守卫放行走正常
+// 路径；软上限拒绝时降级为 directIncreaseWithInt32CapTx（仅检查 int32+activeReserved
+// 硬界的 CAS，与 refundUserQuotaDirectWithInt32Cap 相同的硬界保护）。
+func CreditPaidTopUpTx(tx *gorm.DB, id int, quota int) error {
+	if quota <= 0 {
+		return nil
+	}
+	err := CreditUserQuotaTx(nil, tx, id, quota)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrWischoicerQuotaCapacityExceeded) {
+		return err
+	}
+	// 软上限瞬时超限：已收款的到账必须成立，降级直写（仍守 int32 物理硬界）。
+	reservedSum, currentQuota, dErr := directIncreaseWithInt32CapTx(tx, id, quota)
+	if dErr != nil {
+		if errors.Is(dErr, ErrWischoicerQuotaOverflow) {
+			common.SysError(fmt.Sprintf(
+				"paid topup credit rejected: would overflow int32 hard cap including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
+				id, currentQuota, reservedSum, quota,
+			))
+		}
+		return dErr
+	}
+	common.SysError(fmt.Sprintf("paid topup credit rejected by soft cap, falling back to direct increase: user=%d delta=%d", id, quota))
+	return nil
+}
+
+// CreditPaidTopUp 是 CreditPaidTopUpTx 的事务包装，供未持有事务句柄的调用方使用
+// （如 Epay webhook 回调）。
+func CreditPaidTopUp(id int, quota int) error {
+	if quota <= 0 {
+		return nil
+	}
+	return runWischoicerTx(func(tx *gorm.DB) error {
+		return CreditPaidTopUpTx(tx, id, quota)
+	})
+}
+
+// SetUserQuota 是管理员显式设置用户 quota 绝对值的唯一入口（override 操作）。
+//
+// override 是管理员显式管理行为，不是「新预约」，不受「新售卖准入」软上限
+// （WischoicerMaxUserQuota）限制。但物理硬界不能突破：锁 user 行、汇总
+// activeReservedQuota，校验 newQuota+activeReservedQuota 不超过 int32 宽度
+// （math.MaxInt32），避免后续已付款 RESERVED 凭据消费（consumeQuotaForCreditTx 不
+// 检查容量，直接叠加到 quota 列）时物理溢出。
+func SetUserQuota(id int, newQuota int) error {
+	if newQuota < 0 || newQuota > math.MaxInt32 {
+		return ErrWischoicerInvalidArgument
+	}
+	return runWischoicerTx(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrWischoicerCreditUserUnavailable
+			}
+			return err
+		}
+		reservedSum, err := sumActiveReservedQuotaTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if int64(newQuota)+int64(reservedSum) > int64(math.MaxInt32) {
+			return ErrWischoicerQuotaOverflow
+		}
+		result := tx.Model(&User{}).Where("id = ?", id).Update("quota", newQuota)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrWischoicerCreditUserUnavailable
+		}
+		return nil
+	})
 }
 
 //func GetRootUserEmail() (email string) {

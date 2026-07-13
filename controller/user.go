@@ -1097,7 +1097,9 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgUserCannotDeleteRootUser)
 			return
 		}
-		if err := user.Delete(); err != nil {
+		// 统一走 DeleteUserById：事务内锁 user 行 + 重查 RESERVED 预留 + 软删除，
+		// 与 DeleteSelf/DeleteUser 入口一致地保护充值容量预留（方案 §3.2、§11）。
+		if err := model.DeleteUserById(user.Id); err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": err.Error(),
@@ -1137,6 +1139,10 @@ func ManageUser(c *gin.Context) {
 				return
 			}
 			if err := model.IncreaseUserQuota(user.Id, req.Value, true); err != nil {
+				if errors.Is(err, model.ErrWischoicerQuotaCapacityExceeded) {
+					common.ApiErrorMsg(c, "用户额度达到上限，无法增加")
+					return
+				}
 				common.ApiError(c, err)
 				return
 			}
@@ -1157,7 +1163,11 @@ func ManageUser(c *gin.Context) {
 			})
 		case "override":
 			oldQuota := user.Quota
-			if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("quota", req.Value).Error; err != nil {
+			if err := model.SetUserQuota(user.Id, req.Value); err != nil {
+				if errors.Is(err, model.ErrWischoicerQuotaOverflow) {
+					common.ApiErrorMsg(c, "设置的额度加上未完成充值预留会超出上限，无法设置")
+					return
+				}
 				common.ApiError(c, err)
 				return
 			}
