@@ -518,6 +518,18 @@ func TestReleaseExternalRecharge_IdempotentAfterReleased(t *testing.T) {
 	assert.Equal(t, "closed", c.ReleaseReason)
 }
 
+func TestReleaseExternalRecharge_NotFoundIsIdempotent(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 5000000)
+	seedWischoicerUser(t, 50031, 0)
+
+	// release 一个 new-api 侧从未创建预约的 orderNo：语义是「确保无占用」，
+	// 记录不存在即已达成，幂等返回 nil（覆盖 billing reserve 响应丢失后兜底
+	// release 的场景，避免 release worker 因 NotFound 永久重试）。
+	err := ReleaseExternalRecharge(nil, "ORDER_NEVER_EXISTED", "closed")
+	require.NoError(t, err)
+}
+
 func TestReleaseExternalRecharge_SuccessCreditCannotRelease(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, 5000000)

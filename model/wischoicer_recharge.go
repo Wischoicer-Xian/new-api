@@ -304,7 +304,11 @@ func ReleaseExternalRecharge(ctx context.Context, orderNo string, reason string)
 		credit := &WischoicerRechargeCredit{}
 		if err := tx.Where("order_no = ?", orderNo).First(credit).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrWischoicerCreditNotFound
+				// 幂等：release 的语义是「确保该 orderNo 不再占用 RESERVED 容量」。
+				// 记录不存在即无占用，等同已释放，返回 nil。这覆盖 billing 侧
+				// reserve 响应丢失后兜底 release 的场景（本地 NOT_RESERVED 但不确定
+				// new-api 是否已建预约），避免 release worker 因 NotFound 永久重试。
+				return nil
 			}
 			return err
 		}
