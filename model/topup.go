@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -45,6 +46,7 @@ var (
 	ErrPaymentMethodMismatch = errors.New("payment method mismatch")
 	ErrTopUpNotFound         = errors.New("topup not found")
 	ErrTopUpStatusInvalid    = errors.New("topup status invalid")
+	ErrEpayMoneyMismatch     = errors.New("epay notify money mismatch")
 )
 
 func (topUp *TopUp) Insert() error {
@@ -170,8 +172,8 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 
 // CompleteEpayTopUpTx 在同一数据库事务内原子完成 Epay 已收款到账：锁定 topup 行
 // （MySQL/PostgreSQL FOR UPDATE 跨进程行锁，SQLite 单写串行）→ 校验 provider/status
-// → 幂等（已 SUCCESS 直接返回 credited=false）→ 同事务 CreditPaidTopUpTx 增额 →
-// 标记 SUCCESS。调用方必须已持有事务 tx。
+// → 幂等（已 SUCCESS 直接返回 credited=false）→ 回调金额核对 → 同事务
+// CreditPaidTopUpTx 增额 → 标记 SUCCESS。调用方必须已持有事务 tx。
 //
 // 与 Recharge（Stripe）/ RechargeCreem / RechargeWaffo / ManualCompleteTopUp 同一事务
 // 模式：quota 增额与订单状态变更原子提交，任一步失败整体回滚。跨进程幂等由 trade_no
@@ -179,9 +181,15 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 // 返回 credited=true 仅在本次实际完成到账时，供调用方决定是否记录“充值成功”日志，
 // 避免重复通知产生重复用户日志（r7 P1-2）。
 //
+// notifyMoneyCents 为渠道回调实际支付金额（最小货币单位，由 controller 从
+// verifyInfo.Money 字符串解析），必须等于订单创建时冻结的预期金额（topUp.Money 换算
+// 到分）。不一致返回 ErrEpayMoneyMismatch 触发事务回滚——签名有效但金额异常（渠道配置
+// 错误/协议漂移）时不能按本地订单全额到账（r8 P1-1）。幂等路径（已 SUCCESS）跳过金额
+// 校验，因为首次到账已核对过金额且无法回滚。
+//
 // actualPaymentMethod 为渠道回调里的实际支付方式，与订单记录不同时同步到 PaymentMethod
 // 字段（仅记录，不影响资金）。
-func CompleteEpayTopUpTx(tx *gorm.DB, tradeNo string, quotaToAdd int, actualPaymentMethod string) (credited bool, err error) {
+func CompleteEpayTopUpTx(tx *gorm.DB, tradeNo string, quotaToAdd int, actualPaymentMethod string, notifyMoneyCents int64) (credited bool, err error) {
 	refCol := "`trade_no`"
 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		refCol = `"trade_no"`
@@ -193,12 +201,20 @@ func CompleteEpayTopUpTx(tx *gorm.DB, tradeNo string, quotaToAdd int, actualPaym
 	if topUp.PaymentProvider != PaymentProviderEpay {
 		return false, ErrPaymentMethodMismatch
 	}
-	// 幂等：已 SUCCESS 直接返回，重复通知不再增 quota（防双到账）。
+	// 幂等：已 SUCCESS 直接返回，重复通知不再增 quota（防双到账），且跳过金额校验——
+	// 首次到账时已核对过金额，重复通知即使格式不同也无法回滚已到账额度。
 	if topUp.Status == common.TopUpStatusSuccess {
 		return false, nil
 	}
 	if topUp.Status != common.TopUpStatusPending {
 		return false, errors.New("充值订单状态错误")
+	}
+	// 金额核对：回调实际支付金额必须等于订单冻结金额（按最小货币单位）。topUp.Money 是
+	// 订单创建时冻结的预期金额（元，float64），math.Round 抵消 float 存储误差。
+	expectedCents := int64(math.Round(topUp.Money * 100))
+	if notifyMoneyCents != expectedCents {
+		common.SysError(fmt.Sprintf("epay notify money mismatch: trade_no=%s expected_cents=%d notify_cents=%d", tradeNo, expectedCents, notifyMoneyCents))
+		return false, ErrEpayMoneyMismatch
 	}
 	if quotaToAdd <= 0 {
 		return false, errors.New("无效的充值额度")

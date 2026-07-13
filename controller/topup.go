@@ -308,6 +308,23 @@ func UnlockOrder(tradeNo string) {
 	createLock.Unlock()
 }
 
+// parseMoneyToCents parses an epay notify money string (e.g. "10.00") into
+// integer cents using decimal arithmetic, avoiding float precision loss. The
+// result is compared transaction-side against the order's frozen amount, so the
+// parse must be exact and reject anything that is not a non-negative currency
+// value. Malformed input returns an error; the caller ACKs fail without
+// entering the credit transaction.
+func parseMoneyToCents(money string) (int64, error) {
+	d, err := decimal.NewFromString(money)
+	if err != nil {
+		return 0, fmt.Errorf("invalid money format %q: %w", money, err)
+	}
+	if d.IsNegative() {
+		return 0, fmt.Errorf("money must not be negative: %s", money)
+	}
+	return d.Mul(decimal.NewFromInt(100)).IntPart(), nil
+}
+
 func EpayNotify(c *gin.Context) {
 	if !isEpayWebhookEnabled() {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
@@ -390,17 +407,33 @@ func EpayNotify(c *gin.Context) {
 		return
 	}
 
+	// 解析渠道回调实际支付金额（字符串，如 "10.00"）→ 最小货币单位（分），用于事务内与
+	// 订单冻结金额精确比较。解析失败不进入事务，ACK fail 让 epay 重试或人工介入（r8 P1-1）。
+	notifyMoneyCents, err := parseMoneyToCents(verifyInfo.Money)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 回调金额解析失败 trade_no=%s money=%q client_ip=%s error=%q", verifyInfo.ServiceTradeNo, verifyInfo.Money, c.ClientIP(), err.Error()))
+		_, _ = c.Writer.Write([]byte("fail"))
+		return
+	}
+
 	dAmount := decimal.NewFromInt(int64(topUp.Amount))
 	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-	quotaToAdd := int(dAmount.Mul(dQuotaPerUnit).IntPart())
+	// quota 换算走统一安全 helper：溢出 int32 硬界时返回 error 而非裸 int() 截断，
+	// ACK fail 让 epay 重试或人工介入（r8 P1-1）。
+	quotaToAdd, err := common.QuotaFromDecimalStrict(dAmount.Mul(dQuotaPerUnit))
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 quota 换算溢出 trade_no=%s user_id=%d amount=%d client_ip=%s clamp=%q", topUp.TradeNo, topUp.UserId, topUp.Amount, c.ClientIP(), err.Error()))
+		_, _ = c.Writer.Write([]byte("fail"))
+		return
+	}
 
 	// 单事务原子完成：锁 topup → provider/status 校验 → 幂等（已 SUCCESS 返回 credited=false）
-	// → CreditPaidTopUpTx 增 quota → 标记 SUCCESS。quota 增额与状态变更同提交，任一步
-	// 失败整体回滚（订单保持 Pending + quota 不变）。仅在事务提交成功后才 ACK success，
-	// 失败写 fail 让 epay 重试（方案 §3.2 / r7 P1-2）。
+	// → 回调金额核对 → CreditPaidTopUpTx 增 quota → 标记 SUCCESS。quota 增额与状态变更同
+	// 提交，任一步失败整体回滚（订单保持 Pending + quota 不变）。仅在事务提交成功后才 ACK
+	// success，失败写 fail 让 epay 重试（方案 §3.2 / r7 P1-2 / r8 P1-1）。
 	var credited bool
 	txErr := model.DB.Transaction(func(tx *gorm.DB) error {
-		c, err := model.CompleteEpayTopUpTx(tx, verifyInfo.ServiceTradeNo, quotaToAdd, verifyInfo.Type)
+		c, err := model.CompleteEpayTopUpTx(tx, verifyInfo.ServiceTradeNo, quotaToAdd, verifyInfo.Type, notifyMoneyCents)
 		credited = c
 		return err
 	})

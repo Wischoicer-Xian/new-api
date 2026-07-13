@@ -39,11 +39,13 @@ func reloadTopUpByTradeNo(t *testing.T, tradeNo string) *TopUp {
 
 // runCompleteEpayTopUpTx 把 CompleteEpayTopUpTx 包进一个 DB.Transaction，复现
 // controller EpayNotify 的调用形态：调用方持有事务句柄，事务成功后才 ACK。
-func runCompleteEpayTopUpTx(t *testing.T, tradeNo string, quotaToAdd int, actualPaymentMethod string) (bool, error) {
+// notifyMoneyCents 模拟 controller 从 verifyInfo.Money 解析出的回调金额（分），
+// 传 1000 对应订单 Money=10.00 元的匹配回调。
+func runCompleteEpayTopUpTx(t *testing.T, tradeNo string, quotaToAdd int, actualPaymentMethod string, notifyMoneyCents int64) (bool, error) {
 	t.Helper()
 	var credited bool
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		c, e := CompleteEpayTopUpTx(tx, tradeNo, quotaToAdd, actualPaymentMethod)
+		c, e := CompleteEpayTopUpTx(tx, tradeNo, quotaToAdd, actualPaymentMethod, notifyMoneyCents)
 		credited = c
 		return e
 	})
@@ -70,7 +72,7 @@ func TestCompleteEpayTopUpTx_PendingSuccessCreditsAndMarksSuccess(t *testing.T) 
 	})
 
 	quotaToAdd := int(10 * common.QuotaPerUnit)
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_OK_001", quotaToAdd, "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_OK_001", quotaToAdd, "alipay", 1000)
 
 	require.NoError(t, err)
 	assert.True(t, credited)
@@ -103,7 +105,7 @@ func TestCompleteEpayTopUpTx_AlreadySuccessIdempotentNoDoubleCredit(t *testing.T
 	})
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", 61002).Update("quota", quotaToAdd).Error)
 
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_DUP_002", quotaToAdd, "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_DUP_002", quotaToAdd, "alipay", 1000)
 
 	require.NoError(t, err)
 	assert.False(t, credited, "idempotent re-notify must not report credited")
@@ -134,7 +136,7 @@ func TestCompleteEpayTopUpTx_QuotaOverflowRollsBackKeepsPending(t *testing.T) {
 		Status:          common.TopUpStatusPending,
 	})
 
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_OVF_003", 500_000_000, "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_OVF_003", 500_000_000, "alipay", 1000)
 
 	require.Error(t, err)
 	assert.False(t, credited)
@@ -163,7 +165,7 @@ func TestCompleteEpayTopUpTx_ProviderMismatchReturnsError(t *testing.T) {
 		Status:          common.TopUpStatusPending,
 	})
 
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_MM_004", int(10*common.QuotaPerUnit), "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_MM_004", int(10*common.QuotaPerUnit), "alipay", 1000)
 
 	require.Error(t, err)
 	assert.False(t, credited)
@@ -190,7 +192,7 @@ func TestCompleteEpayTopUpTx_StatusInvalidReturnsError(t *testing.T) {
 		Status:          common.TopUpStatusExpired,
 	})
 
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_ST_005", int(10*common.QuotaPerUnit), "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_ST_005", int(10*common.QuotaPerUnit), "alipay", 1000)
 
 	require.Error(t, err)
 	assert.False(t, credited)
@@ -206,7 +208,7 @@ func TestCompleteEpayTopUpTx_NotFoundReturnsError(t *testing.T) {
 	truncateTopUpTables(t)
 	setWischoicerCapacity(t, math.MaxInt32)
 
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_MISSING_006", int(10*common.QuotaPerUnit), "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_MISSING_006", int(10*common.QuotaPerUnit), "alipay", 1000)
 
 	require.Error(t, err)
 	assert.False(t, credited)
@@ -231,7 +233,7 @@ func TestCompleteEpayTopUpTx_InvalidQuotaReturnsError(t *testing.T) {
 		Status:          common.TopUpStatusPending,
 	})
 
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_QI_007", 0, "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_QI_007", 0, "alipay", 1000)
 
 	require.Error(t, err)
 	assert.False(t, credited)
@@ -268,7 +270,7 @@ func TestCompleteEpayTopUpTx_ConcurrentSingleCredit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			credited, err := runCompleteEpayTopUpTx(t, "EPAY_CONC_008", quotaToAdd, "alipay")
+			credited, err := runCompleteEpayTopUpTx(t, "EPAY_CONC_008", quotaToAdd, "alipay", 1000)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -311,10 +313,72 @@ func TestCompleteEpayTopUpTx_ActualPaymentMethodSynced(t *testing.T) {
 		Status:          common.TopUpStatusPending,
 	})
 
-	credited, err := runCompleteEpayTopUpTx(t, "EPAY_PM_009", int(10*common.QuotaPerUnit), "alipay")
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_PM_009", int(10*common.QuotaPerUnit), "alipay", 1000)
 
 	require.NoError(t, err)
 	assert.True(t, credited)
 	tu := reloadTopUpByTradeNo(t, "EPAY_PM_009")
 	assert.Equal(t, "alipay", tu.PaymentMethod, "actual payment method should be synced to order record")
+}
+
+// ---------------------------------------------------------------------------
+// 回调金额与订单冻结金额不一致（订单 10.00 元，回调 1.00 元）→ ErrEpayMoneyMismatch
+// + 事务回滚 + topUp 保持 Pending + quota 不变。签名有效但金额异常时不能按本地订单全额
+// 到账（r8 P1-1 核心不变量）。
+// ---------------------------------------------------------------------------
+
+func TestCompleteEpayTopUpTx_MoneyMismatchRollsBackKeepsPending(t *testing.T) {
+	truncateTopUpTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 61010, 0)
+	seedTopUpRow(t, &TopUp{
+		UserId:          61010,
+		Amount:          10,
+		Money:           10.0,
+		TradeNo:         "EPAY_MONEY_MM_010",
+		PaymentMethod:   "alipay",
+		PaymentProvider: PaymentProviderEpay,
+		CreateTime:      common.GetTimestamp(),
+		Status:          common.TopUpStatusPending,
+	})
+
+	// 订单冻结 10.00 元（expected_cents=1000），回调仅 1.00 元（100 分）。
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_MONEY_MM_010", int(10*common.QuotaPerUnit), "alipay", 100)
+
+	require.Error(t, err)
+	assert.False(t, credited)
+	assert.ErrorIs(t, err, ErrEpayMoneyMismatch)
+	// 事务回滚：订单状态与 quota 都不变。
+	assert.Equal(t, common.TopUpStatusPending, reloadTopUpByTradeNo(t, "EPAY_MONEY_MM_010").Status)
+	assert.Equal(t, 0, reloadUserQuota(t, 61010))
+}
+
+// ---------------------------------------------------------------------------
+// 回调金额等于订单冻结金额（含小数，Money=9.99）→ 成功到账。验证 math.Round 抵消
+// float64 存储误差：9.99 在 float64 中可能为 9.989999...，expected_cents 仍为 999。
+// ---------------------------------------------------------------------------
+
+func TestCompleteEpayTopUpTx_FractionalMoneyMatchCredits(t *testing.T) {
+	truncateTopUpTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 61011, 0)
+	seedTopUpRow(t, &TopUp{
+		UserId:          61011,
+		Amount:          10,
+		Money:           9.99,
+		TradeNo:         "EPAY_MONEY_OK_011",
+		PaymentMethod:   "alipay",
+		PaymentProvider: PaymentProviderEpay,
+		CreateTime:      common.GetTimestamp(),
+		Status:          common.TopUpStatusPending,
+	})
+
+	quotaToAdd := int(10 * common.QuotaPerUnit)
+	// 订单 9.99 元 → expected_cents=999，回调 "9.99" 解析也是 999。
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_MONEY_OK_011", quotaToAdd, "alipay", 999)
+
+	require.NoError(t, err)
+	assert.True(t, credited)
+	assert.Equal(t, common.TopUpStatusSuccess, reloadTopUpByTradeNo(t, "EPAY_MONEY_OK_011").Status)
+	assert.Equal(t, quotaToAdd, reloadUserQuota(t, 61011))
 }
