@@ -3,7 +3,6 @@ package model
 import (
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -48,6 +47,51 @@ var (
 	ErrTopUpStatusInvalid    = errors.New("topup status invalid")
 	ErrEpayMoneyMismatch     = errors.New("epay notify money mismatch")
 )
+
+// EpayMoneyMismatchError carries the details of a signature-valid epay notify
+// whose amount does not equal the order's frozen amount. The channel signature
+// passed, so the channel has confirmed a real fund movement that the local
+// credit transaction refused to honor; the caller must persist this as a
+// durable payment obligation (for manual reconciliation/refund) before ACKing.
+// Is keeps errors.Is(err, ErrEpayMoneyMismatch) working for callers that only
+// need the mismatch kind. See CompleteEpayTopUpTx (r9 P2-4).
+type EpayMoneyMismatchError struct {
+	TradeNo       string
+	UserId        int
+	ExpectedCents int64
+	NotifyCents   int64
+}
+
+func (e *EpayMoneyMismatchError) Error() string {
+	return fmt.Sprintf("epay notify money mismatch: trade_no=%s expected_cents=%d notify_cents=%d", e.TradeNo, e.ExpectedCents, e.NotifyCents)
+}
+
+func (e *EpayMoneyMismatchError) Is(target error) bool {
+	return target == ErrEpayMoneyMismatch
+}
+
+// RecordEpayMoneyMismatchAudit persists a signature-valid epay money mismatch
+// as a durable LogTypeManage audit record, independent of the rolled-back
+// credit transaction. The channel confirmed a fund fact the local credit
+// refused to honor; this record creates a queryable obligation for manual
+// reconciliation or refund, surviving even after the credit transaction's
+// volatile logs are lost. callerIp and epayTradeNo come from the notify
+// request context (r9 P2-4).
+func RecordEpayMoneyMismatchAudit(mmErr *EpayMoneyMismatchError, callerIp string, epayTradeNo string) {
+	if mmErr == nil {
+		return
+	}
+	params := map[string]interface{}{
+		"trade_no":       mmErr.TradeNo,
+		"expected_cents": mmErr.ExpectedCents,
+		"notify_cents":   mmErr.NotifyCents,
+		"user_id":        mmErr.UserId,
+	}
+	if epayTradeNo != "" && epayTradeNo != mmErr.TradeNo {
+		params["epay_trade_no"] = epayTradeNo
+	}
+	RecordOperationAuditLog(mmErr.UserId, mmErr.Error(), callerIp, "epay_money_mismatch", params, nil, nil)
+}
 
 func (topUp *TopUp) Insert() error {
 	var err error
@@ -182,10 +226,13 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 // 避免重复通知产生重复用户日志（r7 P1-2）。
 //
 // notifyMoneyCents 为渠道回调实际支付金额（最小货币单位，由 controller 从
-// verifyInfo.Money 字符串解析），必须等于订单创建时冻结的预期金额（topUp.Money 换算
-// 到分）。不一致返回 ErrEpayMoneyMismatch 触发事务回滚——签名有效但金额异常（渠道配置
-// 错误/协议漂移）时不能按本地订单全额到账（r8 P1-1）。幂等路径（已 SUCCESS）跳过金额
-// 校验，因为首次到账已核对过金额且无法回滚。
+// verifyInfo.Money 字符串经 common.MoneyToCents 解析），必须等于订单创建时冻结的预期
+// 金额（topUp.Money 经 common.FloatMoneyToCents 换算到分——与 notify 共用唯一定点换算
+// 路径）。不一致返回 *EpayMoneyMismatchError（errors.Is 命中 ErrEpayMoneyMismatch）触发
+// 事务回滚——签名有效但金额异常（渠道配置错误/协议漂移）时不能按本地订单全额到账
+// （r8 P1-1）。调用方应在此后事务外持久化 durable 审计（RecordEpayMoneyMismatchAudit），
+// 因为渠道已确认一笔资金事实，仅易失日志不足以保留人工补账/退款义务（r9 P2-4）。幂等路径
+// （已 SUCCESS）跳过金额校验，因为首次到账已核对过金额且无法回滚。
 //
 // actualPaymentMethod 为渠道回调里的实际支付方式，与订单记录不同时同步到 PaymentMethod
 // 字段（仅记录，不影响资金）。
@@ -209,12 +256,22 @@ func CompleteEpayTopUpTx(tx *gorm.DB, tradeNo string, quotaToAdd int, actualPaym
 	if topUp.Status != common.TopUpStatusPending {
 		return false, errors.New("充值订单状态错误")
 	}
-	// 金额核对：回调实际支付金额必须等于订单冻结金额（按最小货币单位）。topUp.Money 是
-	// 订单创建时冻结的预期金额（元，float64），math.Round 抵消 float 存储误差。
-	expectedCents := int64(math.Round(topUp.Money * 100))
+	// 金额核对：回调实际支付金额必须等于订单冻结金额（按最小货币单位）。expected 与 notify
+	// 共用 common.MoneyToCents 唯一定点换算路径：notify 侧直接解析渠道字符串，expected 侧
+	// 把 topUp.Money（float64）按发给渠道的两位小数格式化后反解析，消除 float64 存储误差
+	// （如 9.99 存成 9.989999... 两侧都得到 999 分）。expected 换算失败表示订单 Money 本身
+	// 损坏，返回普通 error 触发回滚，不属于渠道侧异常（r9 P2-4）。
+	expectedCents, err := common.FloatMoneyToCents(topUp.Money)
+	if err != nil {
+		return false, fmt.Errorf("epay order money invalid: trade_no=%s money=%f: %w", tradeNo, topUp.Money, err)
+	}
 	if notifyMoneyCents != expectedCents {
-		common.SysError(fmt.Sprintf("epay notify money mismatch: trade_no=%s expected_cents=%d notify_cents=%d", tradeNo, expectedCents, notifyMoneyCents))
-		return false, ErrEpayMoneyMismatch
+		return false, &EpayMoneyMismatchError{
+			TradeNo:       tradeNo,
+			UserId:        topUp.UserId,
+			ExpectedCents: expectedCents,
+			NotifyCents:   notifyMoneyCents,
+		}
 	}
 	if quotaToAdd <= 0 {
 		return false, errors.New("无效的充值额度")

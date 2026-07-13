@@ -382,3 +382,92 @@ func TestCompleteEpayTopUpTx_FractionalMoneyMatchCredits(t *testing.T) {
 	assert.Equal(t, common.TopUpStatusSuccess, reloadTopUpByTradeNo(t, "EPAY_MONEY_OK_011").Status)
 	assert.Equal(t, quotaToAdd, reloadUserQuota(t, 61011))
 }
+
+// ---------------------------------------------------------------------------
+// mismatch 返回 *EpayMoneyMismatchError（errors.Is 命中 ErrEpayMoneyMismatch），
+// 携带 trade_no / user_id / expected_cents / notify_cents 供 controller 事务外
+// 持久化 durable 审计（r9 P2-4）。
+// ---------------------------------------------------------------------------
+
+func TestCompleteEpayTopUpTx_MoneyMismatchReturnsTypedError(t *testing.T) {
+	truncateTopUpTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 61012, 0)
+	seedTopUpRow(t, &TopUp{
+		UserId:          61012,
+		Amount:          10,
+		Money:           10.0,
+		TradeNo:         "EPAY_TYPE_012",
+		PaymentMethod:   "alipay",
+		PaymentProvider: PaymentProviderEpay,
+		CreateTime:      common.GetTimestamp(),
+		Status:          common.TopUpStatusPending,
+	})
+
+	credited, err := runCompleteEpayTopUpTx(t, "EPAY_TYPE_012", int(10*common.QuotaPerUnit), "alipay", 100)
+
+	require.Error(t, err)
+	assert.False(t, credited)
+	// errors.Is 仍命中 sentinel（Is 方法兼容已有调用方）。
+	assert.ErrorIs(t, err, ErrEpayMoneyMismatch)
+	// 类型化错误携带 mismatch 详情。
+	var mmErr *EpayMoneyMismatchError
+	require.ErrorAs(t, err, &mmErr)
+	assert.Equal(t, "EPAY_TYPE_012", mmErr.TradeNo)
+	assert.Equal(t, 61012, mmErr.UserId)
+	assert.Equal(t, int64(1000), mmErr.ExpectedCents)
+	assert.Equal(t, int64(100), mmErr.NotifyCents)
+}
+
+// ---------------------------------------------------------------------------
+// mismatch 经 RecordEpayMoneyMismatchAudit 持久化为 LogTypeManage 审计行：
+// 即使到账事务已回滚，审计仍可查询（人工补账/退款义务 durable）。这是 r9 P2-4 核心
+// 不变量——签名有效但金额异常时，不能只靠易失日志（r9 P2-4）。
+// ---------------------------------------------------------------------------
+
+func TestRecordEpayMoneyMismatchAudit_PersistsDurableLog(t *testing.T) {
+	truncateTopUpTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 61013, 0)
+	seedTopUpRow(t, &TopUp{
+		UserId:          61013,
+		Amount:          10,
+		Money:           10.0,
+		TradeNo:         "EPAY_AUDIT_013",
+		PaymentMethod:   "alipay",
+		PaymentProvider: PaymentProviderEpay,
+		CreateTime:      common.GetTimestamp(),
+		Status:          common.TopUpStatusPending,
+	})
+
+	// 模拟 controller 流程：事务内 mismatch → 事务回滚 → 事务外持久化审计。
+	_, err := runCompleteEpayTopUpTx(t, "EPAY_AUDIT_013", int(10*common.QuotaPerUnit), "alipay", 100)
+	var mmErr *EpayMoneyMismatchError
+	require.ErrorAs(t, err, &mmErr)
+
+	// 事务已回滚（订单仍 Pending），此时事务外写审计。
+	RecordEpayMoneyMismatchAudit(mmErr, "203.0.113.9", "EPAY_AUDIT_013")
+
+	// 审计行持久化在 logs 表（LOG_DB），type=LogTypeManage，归属 mismatch 用户。
+	var audits []Log
+	require.NoError(t, LOG_DB.Where("type = ? AND user_id = ?", LogTypeManage, 61013).Find(&audits).Error)
+	require.Len(t, audits, 1, "exactly one durable mismatch audit row must be persisted")
+	audit := audits[0]
+	assert.Equal(t, "203.0.113.9", audit.Ip)
+	assert.Contains(t, audit.Content, "EPAY_AUDIT_013")
+	assert.Contains(t, audit.Content, "expected_cents=1000")
+	assert.Contains(t, audit.Content, "notify_cents=100")
+
+	// Other.op 携带 action + 结构化 params，供前端/运营查询。
+	otherMap, err := common.StrToMap(audit.Other)
+	require.NoError(t, err)
+	op, _ := otherMap["op"].(map[string]interface{})
+	assert.Equal(t, "epay_money_mismatch", op["action"])
+	params, _ := op["params"].(map[string]interface{})
+	assert.Equal(t, "EPAY_AUDIT_013", params["trade_no"])
+	assert.EqualValues(t, int64(1000), params["expected_cents"])
+	assert.EqualValues(t, int64(100), params["notify_cents"])
+
+	// 回滚后订单仍 Pending：审计与到账事务完全独立。
+	assert.Equal(t, common.TopUpStatusPending, reloadTopUpByTradeNo(t, "EPAY_AUDIT_013").Status)
+}

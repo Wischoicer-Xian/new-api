@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -308,23 +309,6 @@ func UnlockOrder(tradeNo string) {
 	createLock.Unlock()
 }
 
-// parseMoneyToCents parses an epay notify money string (e.g. "10.00") into
-// integer cents using decimal arithmetic, avoiding float precision loss. The
-// result is compared transaction-side against the order's frozen amount, so the
-// parse must be exact and reject anything that is not a non-negative currency
-// value. Malformed input returns an error; the caller ACKs fail without
-// entering the credit transaction.
-func parseMoneyToCents(money string) (int64, error) {
-	d, err := decimal.NewFromString(money)
-	if err != nil {
-		return 0, fmt.Errorf("invalid money format %q: %w", money, err)
-	}
-	if d.IsNegative() {
-		return 0, fmt.Errorf("money must not be negative: %s", money)
-	}
-	return d.Mul(decimal.NewFromInt(100)).IntPart(), nil
-}
-
 func EpayNotify(c *gin.Context) {
 	if !isEpayWebhookEnabled() {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
@@ -409,7 +393,9 @@ func EpayNotify(c *gin.Context) {
 
 	// 解析渠道回调实际支付金额（字符串，如 "10.00"）→ 最小货币单位（分），用于事务内与
 	// 订单冻结金额精确比较。解析失败不进入事务，ACK fail 让 epay 重试或人工介入（r8 P1-1）。
-	notifyMoneyCents, err := parseMoneyToCents(verifyInfo.Money)
+	// common.MoneyToCents 是与订单核对共用的唯一定点换算函数：精确拒绝超过两位小数与溢出
+	// 输入，不截断厘级（r9 P2-4）。
+	notifyMoneyCents, err := common.MoneyToCents(verifyInfo.Money)
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 回调金额解析失败 trade_no=%s money=%q client_ip=%s error=%q", verifyInfo.ServiceTradeNo, verifyInfo.Money, c.ClientIP(), err.Error()))
 		_, _ = c.Writer.Write([]byte("fail"))
@@ -438,6 +424,13 @@ func EpayNotify(c *gin.Context) {
 		return err
 	})
 	if txErr != nil {
+		// 签名有效但金额不一致：渠道已确认一笔资金事实，本地到账事务拒绝放行。事务已回滚，
+		// 在事务外持久化 durable 审计（LogTypeManage），形成可查询的人工补账/退款义务——
+		// 仅靠易失日志不足以在日志丢失后追溯义务（r9 P2-4）。
+		var mmErr *model.EpayMoneyMismatchError
+		if errors.As(txErr, &mmErr) {
+			model.RecordEpayMoneyMismatchAudit(mmErr, c.ClientIP(), verifyInfo.ServiceTradeNo)
+		}
 		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 充值事务失败，订单保持待处理等待重试或人工介入 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, txErr.Error(), common.GetJsonString(topUp)))
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
