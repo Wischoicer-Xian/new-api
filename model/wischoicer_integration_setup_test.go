@@ -96,6 +96,12 @@ func setupWischoicerIntegrationDB(t *testing.T) {
 			tcpostgres.WithDatabase("newapi_test"),
 			tcpostgres.WithUsername("newapi"),
 			tcpostgres.WithPassword("newapi_test"),
+			// PostgreSQL initializes a temporary cluster and restarts once before
+			// it is ready for client connections. Run does not install a wait
+			// strategy by default, so opening GORM immediately can race that
+			// restart and fail with connection reset by peer. The module's basic
+			// strategy waits for both readiness log entries and the mapped port.
+			tcpostgres.BasicWaitStrategies(),
 		)
 		if err != nil {
 			t.Fatalf("postgres testcontainer unavailable (integration gate is fail-closed): %v", err)
