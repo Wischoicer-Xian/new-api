@@ -13,9 +13,9 @@
 // UPDATE is a no-op (lockForUpdate skips the clause entirely), InnoDB record
 // locks never engage, and the int column has no 32-bit boundary. SQLite green-lit
 // the dual-prepay / capacity-oversell / overflow paths that the review flagged.
-// setupWischoicerMySQLDB lifts those scenarios onto a real mysql:8.0 so FOR
-// UPDATE, row locks, unique indexes and the int32 column width are actually
-// exercised.
+// setupWischoicerIntegrationDB lifts those scenarios onto real MySQL/PostgreSQL
+// so FOR UPDATE, row locks, unique indexes and the int32 column width are
+// actually exercised.
 //
 // Fail-closed (R9 P1-3): any container/connection failure is fatal (t.Fatalf),
 // never skipped — a green `go test -tags integration ./model/...` must prove
@@ -25,13 +25,16 @@ package model
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	gormmysql "gorm.io/driver/mysql"
+	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -40,17 +43,17 @@ const (
 	// wisIntegrationMySQLImage matches the InnoDB semantics (FOR UPDATE, record
 	// locks, error 1213 deadlock retry, strict int out-of-range) the integration
 	// suite exists to prove.
-	wisIntegrationMySQLImage = "mysql:8.0"
+	wisIntegrationMySQLImage    = "mysql:8.0"
+	wisIntegrationPostgresImage = "postgres:16-alpine"
 
 	// wisIntegrationStartup gives testcontainers enough room to pull the image on
 	// a cold CI cache before the wait-strategy declares the container ready.
 	wisIntegrationStartup = 3 * time.Minute
 )
 
-// setupWischoicerMySQLDB starts a disposable mysql:8.0 testcontainer, migrates
-// the tables the wischoicer feature touches (users / top_ups /
-// wischoicer_recharge_credits), points the package-global DB at it, and switches
-// common.MainDatabaseType to MySQL so lockForUpdate emits real FOR UPDATE and
+// setupWischoicerIntegrationDB starts a disposable MySQL or PostgreSQL
+// testcontainer, migrates the tables the wischoicer feature touches, points the
+// package-global DB at it, and switches common.MainDatabaseType so lockForUpdate emits real FOR UPDATE and
 // UsingMainDatabase(SQLite) returns false. Cleanup restores the prior (SQLite)
 // DB and type so non-integration tests are unaffected, then terminates the
 // container.
@@ -60,45 +63,72 @@ const (
 // global for its own lifetime. Tests in this file must NOT call t.Parallel — DB
 // is a process-wide global and concurrent swaps would clobber each other. Go
 // runs tests sequentially within a package by default, which is sufficient.
-func setupWischoicerMySQLDB(t *testing.T) {
+func setupWischoicerIntegrationDB(t *testing.T) {
 	t.Helper()
 
 	startCtx, cancel := context.WithTimeout(context.Background(), wisIntegrationStartup)
 	defer cancel()
 
-	container, err := tcmysql.Run(startCtx, wisIntegrationMySQLImage,
-		tcmysql.WithDatabase("newapi_test"),
+	database := os.Getenv("WIS_INTEGRATION_DATABASE")
+	if database == "" {
+		database = string(common.DatabaseTypeMySQL)
+	}
+	var (
+		dialector    gorm.Dialector
+		databaseType common.DatabaseType
+		terminate    func(context.Context) error
 	)
-	if err != nil {
-		t.Fatalf("mysql testcontainer unavailable — Docker not running or image pull failed (integration tag requires Docker): %v", err)
+	switch database {
+	case string(common.DatabaseTypeMySQL):
+		container, err := tcmysql.Run(startCtx, wisIntegrationMySQLImage, tcmysql.WithDatabase("newapi_test"))
+		if err != nil {
+			t.Fatalf("mysql testcontainer unavailable (integration gate is fail-closed): %v", err)
+		}
+		dsn, err := container.ConnectionString(startCtx, "parseTime=true", "loc=UTC")
+		if err != nil {
+			t.Fatalf("mysql testcontainer connection string: %v", err)
+		}
+		dialector = gormmysql.Open(dsn)
+		databaseType = common.DatabaseTypeMySQL
+		terminate = func(ctx context.Context) error { return container.Terminate(ctx) }
+	case string(common.DatabaseTypePostgreSQL):
+		container, err := tcpostgres.Run(startCtx, wisIntegrationPostgresImage,
+			tcpostgres.WithDatabase("newapi_test"),
+			tcpostgres.WithUsername("newapi"),
+			tcpostgres.WithPassword("newapi_test"),
+		)
+		if err != nil {
+			t.Fatalf("postgres testcontainer unavailable (integration gate is fail-closed): %v", err)
+		}
+		dsn, err := container.ConnectionString(startCtx, "sslmode=disable")
+		if err != nil {
+			t.Fatalf("postgres testcontainer connection string: %v", err)
+		}
+		dialector = gormpostgres.Open(dsn)
+		databaseType = common.DatabaseTypePostgreSQL
+		terminate = func(ctx context.Context) error { return container.Terminate(ctx) }
+	default:
+		t.Fatalf("unsupported WIS_INTEGRATION_DATABASE=%q; want mysql or postgres", database)
 	}
 
-	// parseTime=true so DATETIME/TIMESTAMP columns round-trip into time.Time;
-	// loc=UTC makes cross-goroutine time assertions deterministic regardless of
-	// host tz. The GORMDeletedAt soft-delete column on User needs parseTime.
-	dsn, err := container.ConnectionString(startCtx, "parseTime=true", "loc=UTC")
-	if err != nil {
-		t.Fatalf("mysql testcontainer connection string: %v", err)
-	}
-
-	db, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{
+	db, err := gorm.Open(dialector, &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
-		t.Fatalf("open mysql gorm: %v", err)
+		t.Fatalf("open %s gorm: %v", database, err)
 	}
 
 	// Migrate only the tables the wischoicer capacity/credit/Epay paths touch.
 	// AutoMigrate respects each model's gorm tags (type:int for the 32-bit quota
 	// column, uniqueIndex on order_no / trade_no / external_transaction_id).
-	if err := db.AutoMigrate(&User{}, &TopUp{}, &WischoicerRechargeCredit{}); err != nil {
-		t.Fatalf("auto-migrate mysql schema: %v", err)
+	if err := db.AutoMigrate(&User{}, &TopUp{}, &WischoicerRechargeCredit{}, &EpayPaymentAnomaly{}); err != nil {
+		t.Fatalf("auto-migrate %s schema: %v", database, err)
 	}
 
 	prevDB := DB
 	prevType := common.MainDatabaseType()
 	DB = db
-	common.SetMainDatabaseType(common.DatabaseTypeMySQL)
+	common.SetMainDatabaseType(databaseType)
 
 	t.Cleanup(func() {
 		DB = prevDB
@@ -110,6 +140,6 @@ func setupWischoicerMySQLDB(t *testing.T) {
 		// cancelled, and container shutdown must not be bounded by it.
 		termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer termCancel()
-		_ = container.Terminate(termCtx)
+		_ = terminate(termCtx)
 	})
 }

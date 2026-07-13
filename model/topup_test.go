@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -420,13 +421,12 @@ func TestCompleteEpayTopUpTx_MoneyMismatchReturnsTypedError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// mismatch 经 RecordEpayMoneyMismatchAudit 持久化为 LogTypeManage 审计行：
-// 即使到账事务已回滚，审计仍可查询（人工补账/退款义务 durable）。这是 r9 P2-4 核心
-// 不变量——签名有效但金额异常时，不能只靠易失日志（r9 P2-4）。
+// mismatch 经独立异常表持久化：到账事务回滚后仍可查询；重复回调收敛为同一资金事实。
 // ---------------------------------------------------------------------------
 
-func TestRecordEpayMoneyMismatchAudit_PersistsDurableLog(t *testing.T) {
+func TestUpsertEpayMoneyMismatchAnomaly_PersistsIdempotentObligation(t *testing.T) {
 	truncateTopUpTables(t)
+	t.Cleanup(func() { DB.Exec("DELETE FROM epay_payment_anomalies") })
 	setWischoicerCapacity(t, math.MaxInt32)
 	seedWischoicerUser(t, 61013, 0)
 	seedTopUpRow(t, &TopUp{
@@ -445,29 +445,29 @@ func TestRecordEpayMoneyMismatchAudit_PersistsDurableLog(t *testing.T) {
 	var mmErr *EpayMoneyMismatchError
 	require.ErrorAs(t, err, &mmErr)
 
-	// 事务已回滚（订单仍 Pending），此时事务外写审计。
-	RecordEpayMoneyMismatchAudit(mmErr, "203.0.113.9", "EPAY_AUDIT_013")
-
-	// 审计行持久化在 logs 表（LOG_DB），type=LogTypeManage，归属 mismatch 用户。
-	var audits []Log
-	require.NoError(t, LOG_DB.Where("type = ? AND user_id = ?", LogTypeManage, 61013).Find(&audits).Error)
-	require.Len(t, audits, 1, "exactly one durable mismatch audit row must be persisted")
-	audit := audits[0]
-	assert.Equal(t, "203.0.113.9", audit.Ip)
-	assert.Contains(t, audit.Content, "EPAY_AUDIT_013")
-	assert.Contains(t, audit.Content, "expected_cents=1000")
-	assert.Contains(t, audit.Content, "notify_cents=100")
-
-	// Other.op 携带 action + 结构化 params，供前端/运营查询。
-	otherMap, err := common.StrToMap(audit.Other)
-	require.NoError(t, err)
-	op, _ := otherMap["op"].(map[string]interface{})
-	assert.Equal(t, "epay_money_mismatch", op["action"])
-	params, _ := op["params"].(map[string]interface{})
-	assert.Equal(t, "EPAY_AUDIT_013", params["trade_no"])
-	assert.EqualValues(t, int64(1000), params["expected_cents"])
-	assert.EqualValues(t, int64(100), params["notify_cents"])
+	// 事务已回滚（订单仍 Pending），此时事务外写异常；重复通知只增加次数。
+	require.NoError(t, UpsertEpayMoneyMismatchAnomaly(mmErr, "203.0.113.9"))
+	require.NoError(t, UpsertEpayMoneyMismatchAnomaly(mmErr, "203.0.113.10"))
+	var anomalies []EpayPaymentAnomaly
+	require.NoError(t, DB.Where("trade_no = ?", "EPAY_AUDIT_013").Find(&anomalies).Error)
+	require.Len(t, anomalies, 1)
+	anomaly := anomalies[0]
+	assert.Equal(t, EpayAnomalyTypeMoneyMismatch, anomaly.AnomalyType)
+	assert.Equal(t, EpayAnomalyStatusOpen, anomaly.Status)
+	assert.EqualValues(t, 1000, anomaly.ExpectedCents)
+	assert.EqualValues(t, 100, anomaly.NotifyCents)
+	assert.EqualValues(t, 2, anomaly.OccurrenceCount)
+	assert.Equal(t, "203.0.113.10", anomaly.CallerIp)
 
 	// 回滚后订单仍 Pending：审计与到账事务完全独立。
 	assert.Equal(t, common.TopUpStatusPending, reloadTopUpByTradeNo(t, "EPAY_AUDIT_013").Status)
+}
+
+func TestUpsertEpayMoneyMismatchAnomaly_PropagatesPersistenceFailure(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	err = upsertEpayMoneyMismatchAnomaly(db, &EpayMoneyMismatchError{
+		TradeNo: "EPAY_AUDIT_FAILURE", UserId: 1, ExpectedCents: 1000, NotifyCents: 100,
+	}, "203.0.113.11")
+	require.Error(t, err, "missing obligation table must fail closed")
 }

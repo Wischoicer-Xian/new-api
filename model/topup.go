@@ -1,6 +1,8 @@
 package model
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -9,6 +11,7 @@ import (
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type TopUp struct {
@@ -62,6 +65,29 @@ type EpayMoneyMismatchError struct {
 	NotifyCents   int64
 }
 
+const (
+	EpayAnomalyTypeMoneyMismatch = "MONEY_MISMATCH"
+	EpayAnomalyStatusOpen        = "OPEN"
+	EpayAnomalyStatusResolved    = "RESOLVED"
+)
+
+// EpayPaymentAnomaly 是签名验证通过、但本地无法自动入账的渠道资金事实。
+// DedupKey 对同一订单和同一金额事实做幂等收敛；OccurrenceCount 保留渠道重试次数。
+type EpayPaymentAnomaly struct {
+	Id              int64  `json:"id" gorm:"primaryKey;autoIncrement"`
+	DedupKey        string `json:"dedup_key" gorm:"type:char(64);not null;uniqueIndex"`
+	AnomalyType     string `json:"anomaly_type" gorm:"type:varchar(32);not null;index"`
+	TradeNo         string `json:"trade_no" gorm:"type:varchar(255);not null;index"`
+	UserId          int    `json:"user_id" gorm:"not null;index"`
+	ExpectedCents   int64  `json:"expected_cents" gorm:"not null"`
+	NotifyCents     int64  `json:"notify_cents" gorm:"not null"`
+	CallerIp        string `json:"caller_ip" gorm:"type:varchar(64);not null;default:''"`
+	Status          string `json:"status" gorm:"type:varchar(16);not null;default:OPEN;index"`
+	OccurrenceCount int64  `json:"occurrence_count" gorm:"not null;default:1"`
+	FirstSeenAt     int64  `json:"first_seen_at" gorm:"not null"`
+	LastSeenAt      int64  `json:"last_seen_at" gorm:"not null"`
+}
+
 func (e *EpayMoneyMismatchError) Error() string {
 	return fmt.Sprintf("epay notify money mismatch: trade_no=%s expected_cents=%d notify_cents=%d", e.TradeNo, e.ExpectedCents, e.NotifyCents)
 }
@@ -70,27 +96,40 @@ func (e *EpayMoneyMismatchError) Is(target error) bool {
 	return target == ErrEpayMoneyMismatch
 }
 
-// RecordEpayMoneyMismatchAudit persists a signature-valid epay money mismatch
-// as a durable LogTypeManage audit record, independent of the rolled-back
-// credit transaction. The channel confirmed a fund fact the local credit
-// refused to honor; this record creates a queryable obligation for manual
-// reconciliation or refund, surviving even after the credit transaction's
-// volatile logs are lost. callerIp and epayTradeNo come from the notify
-// request context (r9 P2-4).
-func RecordEpayMoneyMismatchAudit(mmErr *EpayMoneyMismatchError, callerIp string, epayTradeNo string) {
+// UpsertEpayMoneyMismatchAnomaly 在到账事务回滚后独立持久化人工补账/退款义务。
+// 只有该写入提交后，调用方才可以 ACK 渠道并停止确定性失败的重复通知。
+func UpsertEpayMoneyMismatchAnomaly(mmErr *EpayMoneyMismatchError, callerIp string) error {
+	return upsertEpayMoneyMismatchAnomaly(DB, mmErr, callerIp)
+}
+
+func upsertEpayMoneyMismatchAnomaly(db *gorm.DB, mmErr *EpayMoneyMismatchError, callerIp string) error {
 	if mmErr == nil {
-		return
+		return errors.New("epay money mismatch error is nil")
 	}
-	params := map[string]interface{}{
-		"trade_no":       mmErr.TradeNo,
-		"expected_cents": mmErr.ExpectedCents,
-		"notify_cents":   mmErr.NotifyCents,
-		"user_id":        mmErr.UserId,
+	fact := fmt.Sprintf("epay|%s|%s|%d|%d", EpayAnomalyTypeMoneyMismatch, mmErr.TradeNo, mmErr.ExpectedCents, mmErr.NotifyCents)
+	sum := sha256.Sum256([]byte(fact))
+	now := common.GetTimestamp()
+	anomaly := &EpayPaymentAnomaly{
+		DedupKey:        hex.EncodeToString(sum[:]),
+		AnomalyType:     EpayAnomalyTypeMoneyMismatch,
+		TradeNo:         mmErr.TradeNo,
+		UserId:          mmErr.UserId,
+		ExpectedCents:   mmErr.ExpectedCents,
+		NotifyCents:     mmErr.NotifyCents,
+		CallerIp:        callerIp,
+		Status:          EpayAnomalyStatusOpen,
+		OccurrenceCount: 1,
+		FirstSeenAt:     now,
+		LastSeenAt:      now,
 	}
-	if epayTradeNo != "" && epayTradeNo != mmErr.TradeNo {
-		params["epay_trade_no"] = epayTradeNo
-	}
-	RecordOperationAuditLog(mmErr.UserId, mmErr.Error(), callerIp, "epay_money_mismatch", params, nil, nil)
+	return db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "dedup_key"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"caller_ip":        callerIp,
+			"last_seen_at":     now,
+			"occurrence_count": gorm.Expr("occurrence_count + 1"),
+		}),
+	}).Create(anomaly).Error
 }
 
 func (topUp *TopUp) Insert() error {
@@ -230,8 +269,8 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 // 金额（topUp.Money 经 common.FloatMoneyToCents 换算到分——与 notify 共用唯一定点换算
 // 路径）。不一致返回 *EpayMoneyMismatchError（errors.Is 命中 ErrEpayMoneyMismatch）触发
 // 事务回滚——签名有效但金额异常（渠道配置错误/协议漂移）时不能按本地订单全额到账
-// （r8 P1-1）。调用方应在此后事务外持久化 durable 审计（RecordEpayMoneyMismatchAudit），
-// 因为渠道已确认一笔资金事实，仅易失日志不足以保留人工补账/退款义务（r9 P2-4）。幂等路径
+// （r8 P1-1）。调用方应在此后事务外持久化 EpayPaymentAnomaly，因为渠道已确认一笔
+// 资金事实，仅易失日志不足以保留人工补账/退款义务（r9 P2-4）。幂等路径
 // （已 SUCCESS）跳过金额校验，因为首次到账已核对过金额且无法回滚。
 //
 // actualPaymentMethod 为渠道回调里的实际支付方式，与订单记录不同时同步到 PaymentMethod

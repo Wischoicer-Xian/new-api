@@ -149,7 +149,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 				DSN:                  dsn,
 				PreferSimpleProtocol: true, // disables implicit prepared statement usage
 			}), &gorm.Config{
-				PrepareStmt:     true, // precompile SQL
+				PrepareStmt:    true, // precompile SQL
 				TranslateError: true, // 翻译唯一约束等错误为 gorm.ErrDuplicatedKey，跨库统一检测
 			})
 			return db, common.DatabaseTypePostgreSQL, err
@@ -157,7 +157,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 		if strings.HasPrefix(dsn, "local") {
 			common.SysLog("SQL_DSN not set, using SQLite as database")
 			db, err := gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{
-				PrepareStmt:     true, // precompile SQL
+				PrepareStmt:    true, // precompile SQL
 				TranslateError: true,
 			})
 			return db, common.DatabaseTypeSQLite, err
@@ -173,7 +173,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 			}
 		}
 		db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-			PrepareStmt:     true, // precompile SQL
+			PrepareStmt:    true, // precompile SQL
 			TranslateError: true,
 		})
 		return db, common.DatabaseTypeMySQL, err
@@ -181,7 +181,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 	// Use SQLite
 	common.SysLog("SQL_DSN not set, using SQLite as database")
 	db, err := gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{
-		PrepareStmt:     true, // precompile SQL
+		PrepareStmt:    true, // precompile SQL
 		TranslateError: true,
 	})
 	return db, common.DatabaseTypeSQLite, err
@@ -309,6 +309,7 @@ func migrateDB() error {
 		&CasbinRule{},
 		&AuthzRole{},
 		&WischoicerRechargeCredit{},
+		&EpayPaymentAnomaly{},
 	)
 	if err != nil {
 		return err
@@ -362,6 +363,7 @@ func migrateDBFast() error {
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
 		{&WischoicerRechargeCredit{}, "WischoicerRechargeCredit"},
+		{&EpayPaymentAnomaly{}, "EpayPaymentAnomaly"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))

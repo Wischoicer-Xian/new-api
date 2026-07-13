@@ -424,12 +424,19 @@ func EpayNotify(c *gin.Context) {
 		return err
 	})
 	if txErr != nil {
-		// 签名有效但金额不一致：渠道已确认一笔资金事实，本地到账事务拒绝放行。事务已回滚，
-		// 在事务外持久化 durable 审计（LogTypeManage），形成可查询的人工补账/退款义务——
-		// 仅靠易失日志不足以在日志丢失后追溯义务（r9 P2-4）。
+		// 签名有效但金额不一致：到账事务已回滚。先在事务外持久化幂等资金异常；写入成功后
+		// ACK success，停止不会自行恢复的渠道重试。若异常事实写入失败则 ACK fail，避免资金
+		// 事实静默丢失。
 		var mmErr *model.EpayMoneyMismatchError
 		if errors.As(txErr, &mmErr) {
-			model.RecordEpayMoneyMismatchAudit(mmErr, c.ClientIP(), verifyInfo.ServiceTradeNo)
+			if err := model.UpsertEpayMoneyMismatchAnomaly(mmErr, c.ClientIP()); err != nil {
+				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 金额异常持久化失败，等待渠道重试 trade_no=%s user_id=%d client_ip=%s error=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), err.Error()))
+				_, _ = c.Writer.Write([]byte("fail"))
+				return
+			}
+			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 金额异常已持久化，订单保持待处理等待人工补账或退款 trade_no=%s user_id=%d client_ip=%s expected_cents=%d notify_cents=%d", mmErr.TradeNo, mmErr.UserId, c.ClientIP(), mmErr.ExpectedCents, mmErr.NotifyCents))
+			_, _ = c.Writer.Write([]byte("success"))
+			return
 		}
 		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 充值事务失败，订单保持待处理等待重试或人工介入 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, txErr.Error(), common.GetJsonString(topUp)))
 		_, _ = c.Writer.Write([]byte("fail"))

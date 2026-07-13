@@ -120,6 +120,7 @@ require (
 require (
 	github.com/Azure/go-ntlmssp v0.1.1
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.43.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
 )
 
 require (

@@ -1,7 +1,7 @@
 //go:build integration
 
 // These tests lift the wischoicer feature's money-critical invariants onto a
-// real mysql:8.0 (testcontainers) so that SELECT ... FOR UPDATE, InnoDB record
+// real MySQL/PostgreSQL (testcontainers) so that SELECT ... FOR UPDATE, record
 // locks, unique indexes, CAS and the int32 column width are actually exercised.
 //
 // The in-memory SQLite suite (wischoicer_recharge_test.go / topup_test.go)
@@ -17,7 +17,7 @@
 // Every assertion is made on durable DB state (final rows/columns/counts), not
 // on function return values alone — the "Coverage Illusion" fix from 第九轮
 // codex review P1-3. Each test starts a fresh container via
-// setupWischoicerMySQLDB, so there is no cross-test pollution and no truncation
+// setupWischoicerIntegrationDB, so there is no cross-test pollution and no truncation
 // helper is needed.
 package model
 
@@ -43,8 +43,8 @@ import (
 // OnConflict(DoNothing)→reread path (duplicate=true) or block on the user row
 // lock and then see the existing credit. SQLite's single-writer model cannot
 // prove the unique-index race or the lock serialization.
-func TestReserveExternalRecharge_MySQLConcurrentSameOrderOnlyOneReservation(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestReserveExternalRecharge_DatabaseConcurrentSameOrderOnlyOneReservation(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 	setWischoicerCapacity(t, 5000000)
 	seedWischoicerUser(t, 60001, 0)
 
@@ -105,8 +105,8 @@ func TestReserveExternalRecharge_MySQLConcurrentSameOrderOnlyOneReservation(t *t
 // the second re-reads the (now larger) reserved sum and is rejected with
 // QUOTA_CAPACITY_EXCEEDED. On SQLite this collapses to serial execution and
 // cannot prove the lock prevents oversell under real concurrency.
-func TestReserveExternalRecharge_MySQLConcurrentCapacityOversellPrevented(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestReserveExternalRecharge_DatabaseConcurrentCapacityOversellPrevented(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 	// Capacity fits exactly one 600k reservation; two would oversell.
 	setWischoicerCapacity(t, 1000000)
 	seedWischoicerUser(t, 60002, 0)
@@ -170,8 +170,8 @@ func TestReserveExternalRecharge_MySQLConcurrentCapacityOversellPrevented(t *tes
 // increase quota; the loser observes SUCCESS and returns duplicate. MySQL's real
 // row lock is what the billing→new-api credit path depends on for "quota only
 // increases once".
-func TestCreditExternalRecharge_MySQLConcurrentOnlyOneCredit(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestCreditExternalRecharge_DatabaseConcurrentOnlyOneCredit(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 	setWischoicerCapacity(t, 50000000)
 	seedWischoicerUser(t, 60003, 0)
 
@@ -241,8 +241,8 @@ func TestCreditExternalRecharge_MySQLConcurrentOnlyOneCredit(t *testing.T) {
 // back, so the CAS that flipped the credit RESERVED→SUCCESS is also undone.
 // SQLite stores int64 regardless of column type, so this boundary is invisible
 // there. This is the r5 overflow scenario lifted onto a real DB.
-func TestConsumeReservedQuota_MySQLInt32OverflowRollsBack(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestConsumeReservedQuota_DatabaseInt32OverflowRollsBack(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 	// Bypass the soft limit by seeding directly: user.quota near MaxInt32.
 	seedWischoicerUser(t, 60004, math.MaxInt32-5)
 	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
@@ -284,8 +284,8 @@ func TestConsumeReservedQuota_MySQLInt32OverflowRollsBack(t *testing.T) {
 // would overflow is rejected before the UPDATE. Two concurrent refunds that
 // would each overflow must both be rejected — the user-row FOR UPDATE lock
 // serializes them and neither writes. This is the r5 CAS subtraction guard.
-func TestRefundUserQuota_MySQLInt32OverflowWithReservationRejected(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestRefundUserQuota_DatabaseInt32OverflowWithReservationRejected(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 	setWischoicerCapacity(t, 1000000) // force CreditUserQuota to reject, exercising the fallback
 	// Seed user near MaxInt32 (bypassing the soft limit) plus an active RESERVED
 	// credit so reserved+current+delta overflows int32.
@@ -335,8 +335,8 @@ func TestRefundUserQuota_MySQLInt32OverflowWithReservationRejected(t *testing.T)
 // The invariant — "a soft-deleted user never retains an active RESERVED
 // reservation" — is what r3 flagged as a TOCTOU risk. SQLite's single-writer
 // model hides the race; MySQL's record lock is the real serialization point.
-func TestDeleteVsReserve_MySQLNoLostReservation(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestDeleteVsReserve_DatabaseNoLostReservation(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 	setWischoicerCapacity(t, 5000000)
 	seedWischoicerUser(t, 60006, 0)
 
@@ -387,8 +387,8 @@ func TestDeleteVsReserve_MySQLNoLostReservation(t *testing.T) {
 // release's contract (r6): a NotFound orderNo means "nothing to release" and
 // must return nil so the billing release worker does not retry forever on a
 // reserve-response-loss scenario. MySQL exercises the real First() miss path.
-func TestReleaseExternalRecharge_MySQLNotFoundIsIdempotent(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestReleaseExternalRecharge_DatabaseNotFoundIsIdempotent(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 
 	err := ReleaseExternalRecharge(nil, "ORDER_INT_NEVER_CREATED_007", "billing_release_fallback")
 	assert.NoError(t, err, "release of a non-existent orderNo must be idempotent (nil)")
@@ -409,8 +409,8 @@ func TestReleaseExternalRecharge_MySQLNotFoundIsIdempotent(t *testing.T) {
 // (credited=true); the loser sees SUCCESS and returns credited=false without
 // increasing quota. This is the r7 Epay atomic-transaction invariant. SQLite's
 // single-writer model cannot prove the row lock; MySQL's record lock can.
-func TestCompleteEpayTopUpTx_MySQLConcurrentSingleCredit(t *testing.T) {
-	setupWischoicerMySQLDB(t)
+func TestCompleteEpayTopUpTx_DatabaseConcurrentSingleCredit(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
 	setWischoicerCapacity(t, 5000000)
 	seedWischoicerUser(t, 60008, 0)
 
@@ -459,4 +459,32 @@ func TestCompleteEpayTopUpTx_MySQLConcurrentSingleCredit(t *testing.T) {
 	topUp := reloadTopUpByTradeNo(t, tradeNo)
 	assert.Equal(t, common.TopUpStatusSuccess, topUp.Status)
 	assert.Equal(t, quotaToAdd, reloadUserQuota(t, 60008), "quota must increase by exactly one credit")
+}
+
+func TestEpayMoneyMismatchAnomaly_DatabaseIdempotentObligation(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
+	mmErr := &EpayMoneyMismatchError{
+		TradeNo: "EPAY_DB_AUDIT_009", UserId: 60009, ExpectedCents: 1000, NotifyCents: 100,
+	}
+	const callbacks = 8
+	errs := make(chan error, callbacks)
+	var wg sync.WaitGroup
+	for i := 0; i < callbacks; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- UpsertEpayMoneyMismatchAnomaly(mmErr, "203.0.113.20")
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	var anomalies []EpayPaymentAnomaly
+	require.NoError(t, DB.Where("trade_no = ?", mmErr.TradeNo).Find(&anomalies).Error)
+	require.Len(t, anomalies, 1)
+	assert.EqualValues(t, callbacks, anomalies[0].OccurrenceCount)
+	assert.Equal(t, EpayAnomalyStatusOpen, anomalies[0].Status)
 }
