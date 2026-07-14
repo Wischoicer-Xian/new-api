@@ -443,25 +443,8 @@ func HardDeleteUserById(id int) error {
 	if id == 0 {
 		return errors.New("id 为空！")
 	}
-	// 锁 user 行后重查预留，与 DeleteUserById 一致地消除 TOCTOU；硬删除同样禁止，
-	// 因为物理删除后预留记录的 user 关联失效。
-	return DB.Transaction(func(tx *gorm.DB) error {
-		var user User
-		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
-			return err
-		}
-		hasReserved, err := hasActiveReservedQuotaTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if hasReserved {
-			return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
-		}
-		if err := deleteUserOAuthBindingsByUserId(tx, id); err != nil {
-			return err
-		}
-		return tx.Unscoped().Delete(&User{}, "id = ?", id).Error
-	})
+	user := User{Id: id}
+	return user.HardDelete()
 }
 
 func inviteUser(inviterId int) (err error) {
@@ -501,7 +484,7 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 
 	// 扣减 AffQuota 与累计历史额度
 	if err := tx.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]interface{}{
-		"aff_quota":  gorm.Expr("aff_quota - ?", quota),
+		"aff_quota":   gorm.Expr("aff_quota - ?", quota),
 		"aff_history": gorm.Expr("aff_history + ?", quota),
 	}).Error; err != nil {
 		return err
@@ -797,12 +780,55 @@ func (user *User) HardDelete() error {
 	if user.Id == 0 {
 		return errors.New("id 为空！")
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
-		if err := deleteUserOAuthBindingsByUserId(tx, user.Id); err != nil {
+	var tokens []Token
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		// 与充值预留使用相同的 users → credits 锁顺序，消除预留创建与硬删除之间的
+		// TOCTOU；物理删除后预留记录会失去入账目标，因此存在 RESERVED 时必须拒绝。
+		var lockedUser User
+		if err := lockForUpdate(tx).Where("id = ?", user.Id).First(&lockedUser).Error; err != nil {
 			return err
 		}
-		return tx.Unscoped().Delete(user).Error
+		hasReserved, err := hasActiveReservedQuotaTx(tx, user.Id)
+		if err != nil {
+			return err
+		}
+		if hasReserved {
+			return errors.New("该用户存在未完成的充值容量预留，请先释放后再删除")
+		}
+		if common.RedisEnabled {
+			if err := tx.Unscoped().Select("id", commonKeyCol).Where("user_id = ?", user.Id).Find(&tokens).Error; err != nil {
+				return err
+			}
+		}
+		if err := deleteUserAuthenticationData(tx, user.Id); err != nil {
+			return err
+		}
+		return tx.Unscoped().Delete(&lockedUser).Error
 	})
+	if err != nil {
+		return err
+	}
+	if err := invalidateTokensCache(tokens); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate token cache after hard deleting user %d: %v", user.Id, err))
+	}
+	if err := invalidateUserCache(user.Id); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate user cache after hard deleting user %d: %v", user.Id, err))
+	}
+	return nil
+}
+
+func deleteUserAuthenticationData(tx *gorm.DB, userId int) error {
+	for _, authenticationData := range []any{
+		&TwoFABackupCode{},
+		&TwoFA{},
+		&PasskeyCredential{},
+		&Token{},
+	} {
+		if err := tx.Unscoped().Where("user_id = ?", userId).Delete(authenticationData).Error; err != nil {
+			return err
+		}
+	}
+	return deleteUserOAuthBindingsByUserId(tx, userId)
 }
 
 // ValidateAndFill check password & user status
