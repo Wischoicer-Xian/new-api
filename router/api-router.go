@@ -419,5 +419,17 @@ func SetApiRouter(router *gin.Engine) {
 				wischoicerInternal.GET("/recharge-credits/:orderNo", controller.GetWischoicerRechargeCredit)
 			}
 		}
+
+		// Wischoicer 钱包充值 façade（浏览器 ↔ new-api，UserAuth；WIS-547 §1 / WIS-550）。
+		// 默认 WischoicerWalletRechargeEnabled=false：路由不挂载（fail-closed），浏览器完全不可达。
+		// 需在 Token A/B、billing S3 端点、ACL/mTLS、真实小额 E2E 与 T+1 对账证据齐全后，经 R3 批准才置 true。
+		if common.WischoicerWalletRechargeEnabled {
+			walletRoute := apiRouter.Group("/wallet", middleware.UserAuth())
+			{
+				walletRoute.GET("/recharges/options", controller.WischoicerWalletRechargeOptions)
+				walletRoute.POST("/recharges", middleware.CriticalRateLimit(), controller.CreateWischoicerWalletRecharge)
+				walletRoute.GET("/recharges/:orderNo", controller.GetWischoicerWalletRecharge)
+			}
+		}
 	}
 }
