@@ -27,6 +27,7 @@ func WischoicerBillingInternalAuth() gin.HandlerFunc {
 			common.SysError("wischoicer billing internal auth failed: client_ip=" + c.ClientIP())
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
+				"code":    "UNAUTHORIZED",
 				"message": "UNAUTHORIZED",
 			})
 			c.Abort()

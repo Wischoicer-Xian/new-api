@@ -111,6 +111,13 @@ func NewWischoicerBillingClient() WischoicerBillingClient {
 		token:   common.NewApiToBillingServiceToken,
 		httpClient: &http.Client{
 			Timeout: time.Duration(common.WischoicerBillingClientTimeoutSeconds) * time.Second,
+			// 安全边界（WIS-547 R2 复审 P1-1）：禁止跟随 HTTP redirect。Go 默认会跟随 30x
+			// 并转发自定义 header——X-Internal-Service-Token 不在自动剥离的 Authorization/Cookie
+			// 之列，会被带到 redirect 目标主机，造成 Token A 泄露。返回 ErrUseLastResponse
+			// 让 3xx 原样回传，由 doWithRetry 当作非可重试错误处理；redirect 目标永远不会收到请求。
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		maxRetries: 2,
 		backoff:    150 * time.Millisecond,
@@ -253,6 +260,17 @@ func (c *httpBillingClient) doWithRetry(ctx context.Context, retryable bool, met
 				return lastErr
 			}
 			continue
+		}
+
+		// 3xx redirect：CheckRedirect 已禁止跟随，redirect 目标主机永远不会收到请求，
+		// 因此 X-Internal-Service-Token 不会泄露到 billing 之外（WIS-547 R2 复审 P1-1）。
+		// 到这里说明 billing 返回了 redirect——视为配置/安全异常，非可重试，绝不解析或跟随。
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return &BillingRechargeError{
+				HTTPStatus: resp.StatusCode,
+				Retryable:  false,
+				Message:    "billing returned a redirect; token not forwarded",
+			}
 		}
 
 		// 解析包络。

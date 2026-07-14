@@ -15,12 +15,18 @@ import (
 )
 
 // newTestClient 构造一个直连 httptest server 的 client，backoff 极小以加速重试路径测试。
+// httpClient 镜像生产构造（含禁止 redirect 的 CheckRedirect），让测试覆盖真实行为。
 func newTestClient(t *testing.T, baseURL, token string) *httpBillingClient {
 	t.Helper()
 	return &httpBillingClient{
-		baseURL:    baseURL,
-		token:      token,
-		httpClient: &http.Client{Timeout: 2 * time.Second},
+		baseURL: baseURL,
+		token:   token,
+		httpClient: &http.Client{
+			Timeout: 2 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		maxRetries: 2,
 		backoff:    time.Millisecond,
 	}
@@ -269,4 +275,34 @@ func TestBillingClient_ListOrder_SendsOwnerAndLimit(t *testing.T) {
 	_, err = c.ListRechargeOrders(context.Background(), 42, "", 999)
 	require.NoError(t, err)
 	assert.Contains(t, seenQuery, "limit=20", "limit>50 must be clamped to default")
+}
+
+// P1-1（R2 复审）：billing 返回 3xx redirect 时，client 必须不跟随——redirect 目标主机
+// 永远收不到请求，X-Internal-Service-Token（Token A）绝不泄露到 billing 之外。
+func TestBillingClient_CreateOrder_RedirectNotFollowed_TokenNotLeaked(t *testing.T) {
+	var targetHits int32
+	var targetToken string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		targetToken = r.Header.Get(billingInternalTokenHeader)
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	}))
+	defer target.Close()
+
+	billing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound) // 302 → 外部主机
+	}))
+	defer billing.Close()
+
+	c := newTestClient(t, billing.URL, "token-A-secret")
+	_, err := c.CreateRechargeOrder(context.Background(), BillingCreateOrderRequest{
+		NewApiUserID: 1, ClientRequestID: "crid", AmountCents: 5000,
+	})
+	require.Error(t, err)
+	var berr *BillingRechargeError
+	require.ErrorAs(t, err, &berr)
+	assert.False(t, berr.Retryable, "redirect must not be retried")
+	// 核心断言：redirect 目标零命中，Token A 没有被带过去。
+	assert.Equal(t, int32(0), atomic.LoadInt32(&targetHits), "redirect target must receive NO request; Token A must not leak cross-host")
+	assert.Empty(t, targetToken)
 }
