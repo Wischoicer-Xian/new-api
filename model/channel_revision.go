@@ -30,13 +30,20 @@ type ChannelRevision struct {
 	ID             int64           `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
 	ChannelID      int             `json:"channel_id" gorm:"index;uniqueIndex:idx_channel_revision,priority:1"`
 	RevisionNumber int             `json:"revision_number" gorm:"uniqueIndex:idx_channel_revision,priority:2"`
-	Endpoint       string          `json:"endpoint" gorm:"type:varchar(512)"`
-	Proxy          string          `json:"proxy" gorm:"type:varchar(255)"`
-	Settings       json.RawMessage `json:"settings" gorm:"type:json"`
-	CredentialRef  string          `json:"credential_ref" gorm:"type:varchar(255)"`
-	AdapterVersion string          `json:"adapter_version" gorm:"type:varchar(64)"`
+	Endpoint       string          `json:"-" gorm:"type:varchar(512)"`
+	Proxy          string          `json:"-" gorm:"type:varchar(255)"`
+	Settings       json.RawMessage `json:"-" gorm:"type:json"`
+	CredentialRef  string          `json:"-" gorm:"type:varchar(255)"`
+	AdapterVersion string          `json:"-" gorm:"type:varchar(64)"`
 	CreatedAt      int64           `json:"created_at" gorm:"index"`
 }
+
+// ChannelRevision is a persistence/entity type. The frozen fields above carry
+// `json:"-"` so a generic marshal (encoding/json or common.Marshal) of the
+// entity can NEVER surface the snapshot, credential reference, endpoint or
+// proxy — these may contain secrets the admin placed in the live channel and
+// every frozen historical value. Any future external output must build a
+// dedicated, field-curated DTO; the entity itself is not a response shape.
 
 // ErrChannelRevisionInUse is returned when a revision cannot be deleted
 // because a non-terminal task still references it.

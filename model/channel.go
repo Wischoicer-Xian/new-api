@@ -770,6 +770,18 @@ func DisableChannelByTag(tag string) error {
 }
 
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
+	return EditChannelByTagWithImageRevision(tag, newTag, modelMapping, models, group, priority, weight, paramOverride, headerOverride, nil)
+}
+
+// EditChannelByTagWithImageRevision is the tag-bulk-edit path that also freezes
+// a new revision for every image-capable channel when a frozen field
+// (ModelMapping / ParamOverride / HeaderOverride) changes, so a later in-flight
+// image task still sees the pre-edit request semantics (§7.2 immutable
+// revision). The channel field update, ability re-create and revision creation
+// run in a single transaction; a revision build or persist failure rolls the
+// field update back (fail-closed) rather than leaving a channel whose frozen
+// fields changed without a matching revision.
+func EditChannelByTagWithImageRevision(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string, buildRevision ChannelRevisionBuilder) error {
 	updateData := Channel{}
 	shouldReCreateAbilities := false
 	updatedTag := tag
@@ -802,25 +814,58 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
-	if err != nil {
-		return err
-	}
-	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
-		if err == nil {
-			for _, channel := range channels {
-				err = channel.UpdateAbilities(nil)
+	frozenChanged := modelMapping != nil || paramOverride != nil || headerOverride != nil
+	freezeRevisions := frozenChanged && buildRevision != nil
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error; err != nil {
+			return err
+		}
+		if !shouldReCreateAbilities && !freezeRevisions {
+			return nil
+		}
+		// Load affected channels AFTER the bulk update (via the tx so the rows
+		// reflect the just-applied tag rename and field changes), then either
+		// re-create abilities or freeze a revision per image-capable channel.
+		var channels []Channel
+		if err := tx.Where("tag = ?", updatedTag).Find(&channels).Error; err != nil {
+			return err
+		}
+		for i := range channels {
+			channel := channels[i]
+			if shouldReCreateAbilities {
+				if err := channel.UpdateAbilities(tx); err != nil {
+					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error: %v", channel.Id, updatedTag, err))
+				}
+			}
+			if freezeRevisions {
+				revision, err := buildRevision(&channel)
 				if err != nil {
-					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error=%v", channel.Id, channel.GetTag(), err))
+					// fail-closed: a channel that now carries a non-empty image
+					// config against an unsupported adapter must not persist.
+					return err
+				}
+				if revision == nil {
+					continue
+				}
+				if err := validateRevisionSettings(revision.Settings); err != nil {
+					return err
+				}
+				if _, err := createChannelRevisionInTx(tx, *revision); err != nil {
+					return err
 				}
 			}
 		}
-	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
-		if err != nil {
-			return err
-		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Ability priority/weight update for the non-recreate path has no tx-aware
+	// variant and runs after the field/revision transaction, preserving prior
+	// semantics. It is only reached when models/group did not change.
+	if !shouldReCreateAbilities {
+		return UpdateAbilityByTag(tag, newTag, priority, weight)
 	}
 	return nil
 }

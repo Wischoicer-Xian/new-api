@@ -57,6 +57,7 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 	headerOverride := `{"X-Tenant":"t1"}`
 	org := "org-123"
 	modelMapping := `{"gpt-image-1":"dall-e-3"}`
+	statusCodeMapping := `{"429":"500"}`
 	ch := Channel{
 		Id:                   42,
 		Type:                 constant.ChannelTypeOpenAI,
@@ -67,6 +68,7 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 		HeaderOverride:       &headerOverride,
 		OpenAIOrganization:   &org,
 		ModelMapping:         &modelMapping,
+		StatusCodeMapping:    &statusCodeMapping,
 		OtherSettings:        `{"azure_api_version":"2024-02-15"}`,
 		Key:                  "secret-key-value",
 	}
@@ -95,6 +97,7 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 	assert.Equal(t, headerOverride, snapshot.HeaderOverride)
 	assert.Equal(t, org, snapshot.OpenAIOrganization)
 	assert.Equal(t, modelMapping, snapshot.ModelMapping)
+	assert.Equal(t, statusCodeMapping, snapshot.StatusCodeMapping)
 	assert.Equal(t, `{"azure_api_version":"2024-02-15"}`, snapshot.OtherSettings)
 
 	t.Run("omits empty provider settings", func(t *testing.T) {

@@ -42,11 +42,13 @@ func validateImageExecutionConfig(channel *model.Channel) error {
 
 // imageChannelRevisionBuilder returns a channelRevisionBuilder that freezes an
 // immutable revision for the channel when it is image-capable (a registered
-// adapter type with a non-empty image execution config). For non-image
-// channels the builder returns (nil, nil) so the transactional save skips
-// revision creation. An unknown channel type is a hard error (fail-closed)
-// rather than a silent skip, surfacing a save failure if config somehow
-// reached this point without validateImageExecutionConfig catching it.
+// adapter type with a non-empty image execution config). For channels with no
+// image config the builder returns (nil, nil) so the transactional save skips
+// revision creation. A non-empty config paired with an unknown channel type OR
+// an adapter that has not opted into the image task subsystem is a HARD error
+// (fail-closed): the save must fail rather than persist a channel carrying an
+// image config it cannot honor (which would later enter the candidate pool with
+// no executable adapter and no revision).
 func imageChannelRevisionBuilder() model.ChannelRevisionBuilder {
 	return func(channel *model.Channel) (*model.ChannelRevisionCreate, error) {
 		if len(channel.ImageExecutionConfigBytes()) == 0 {
@@ -57,7 +59,7 @@ func imageChannelRevisionBuilder() model.ChannelRevisionBuilder {
 			return nil, fmt.Errorf("图片执行配置[image_execution_config] 未知渠道类型 %d", channel.Type)
 		}
 		if _, ok := service.ImageAdapterCapabilities(apiType); !ok {
-			return nil, nil
+			return nil, fmt.Errorf("图片执行配置[image_execution_config] 该渠道类型不支持图片任务执行")
 		}
 		version, _ := service.ImageAdapterVersion(apiType)
 		input, err := channel.BuildImageChannelRevision(version)

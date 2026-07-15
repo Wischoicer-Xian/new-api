@@ -16,15 +16,18 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
-    // Pre-existing Node test-runner files (node:test + node:assert) live in the
-    // tree without a runner script; they are not vitest suites, so exclude them
-    // rather than report false failures. They remain runnable via `node --test`.
+    // Pre-existing Node/Bun test-runner files (node:test, bun:test) live in the
+    // tree without a vitest runner; they are not vitest suites, so exclude them
+    // rather than report false failures. They remain runnable via their own
+    // runners (`node --test`, `bun test`).
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
       'src/features/dashboard/lib/flow.test.ts',
       'src/features/dashboard/lib/flow-selection.test.ts',
       'src/components/ui/dropdown-menu.test.tsx',
+      'src/features/wallet/hooks/use-wischoicer-recharge.test.ts',
+      'src/features/wallet/lib/wischoicer-recharge.test.ts',
     ],
     css: false,
   },

@@ -42,6 +42,7 @@ type imageChannelRevisionSnapshot struct {
 	HeaderOverride     string `json:"header_override,omitempty"`     // request header overrides
 	OpenAIOrganization string `json:"openai_organization,omitempty"` // OpenAI org
 	ModelMapping       string `json:"model_mapping,omitempty"`       // model redirect mapping
+	StatusCodeMapping  string `json:"status_code_mapping,omitempty"` // error-class / retry mapping
 }
 
 // recalcMultiKeySize recomputes MultiKeySize (and trims stale per-key status)
@@ -154,6 +155,7 @@ func (channel *Channel) BuildImageChannelRevision(adapterVersion string) (Channe
 		HeaderOverride:     nonEmptyJSONString(channel.HeaderOverride),
 		OpenAIOrganization: trimmedStringPtr(channel.OpenAIOrganization),
 		ModelMapping:       nonEmptyJSONString(channel.ModelMapping),
+		StatusCodeMapping:  nonEmptyJSONString(channel.StatusCodeMapping),
 	}
 	settingsBytes, err := common.Marshal(snapshot)
 	if err != nil {

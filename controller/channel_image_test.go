@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateImageExecutionConfig(t *testing.T) {
@@ -90,4 +91,26 @@ func TestValidateImageExecutionConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestImageChannelRevisionBuilder_FailClosedOnConfigWithUnsupportedAdapter(t *testing.T) {
+	builder := imageChannelRevisionBuilder()
+	cfg := `{"defaults":{"generation":"sync"}}`
+
+	// non-empty config + supported adapter builds a revision
+	rev, err := builder(&model.Channel{Id: 1, Type: constant.ChannelTypeOpenAI, ImageExecutionConfig: &cfg})
+	require.NoError(t, err)
+	require.NotNil(t, rev)
+
+	// P1-1.3 fail-closed: non-empty config + unsupported adapter must ERROR,
+	// not return (nil, nil). This is what blocks a partial type patch that
+	// leaves a channel carrying a config it can no longer honor.
+	_, err = builder(&model.Channel{Id: 2, Type: constant.ChannelTypeAnthropic, ImageExecutionConfig: &cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "不支持图片任务执行")
+
+	// empty config + unsupported adapter -> no revision, no error (not image-capable)
+	rev, err = builder(&model.Channel{Id: 3, Type: constant.ChannelTypeAnthropic})
+	require.NoError(t, err)
+	assert.Nil(t, rev)
 }

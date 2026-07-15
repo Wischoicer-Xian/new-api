@@ -868,7 +868,7 @@ func EditTagChannels(c *gin.Context) {
 		}
 		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
 	}
-	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride)
+	err = model.EditChannelByTagWithImageRevision(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride, imageChannelRevisionBuilder())
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -973,6 +973,25 @@ func UpdateChannel(c *gin.Context) {
 
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
+
+	// Merge origin values for fields the patch omitted so validation and the
+	// revision builder see the FINAL persisted state, not the patch-only view.
+	// Without this, a partial patch (e.g. changing type while omitting
+	// image_execution_config) would bypass the image config check and the
+	// builder would see a nil config and skip revision creation.
+	if channel.Type == 0 {
+		channel.Type = originChannel.Type
+	}
+	if channel.ImageExecutionConfig == nil {
+		channel.ImageExecutionConfig = originChannel.ImageExecutionConfig
+	}
+	if err := validateImageExecutionConfig(&channel.Channel); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
 
 	if channelHasSensitiveChanges(&channel, originChannel, requestData) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
