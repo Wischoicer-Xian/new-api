@@ -127,7 +127,16 @@ func setupWischoicerIntegrationDB(t *testing.T) {
 	// Migrate only the tables the wischoicer capacity/credit/Epay paths touch.
 	// AutoMigrate respects each model's gorm tags (type:int for the 32-bit quota
 	// column, uniqueIndex on order_no / trade_no / external_transaction_id).
-	if err := db.AutoMigrate(&User{}, &TopUp{}, &WischoicerRechargeCredit{}, &EpayPaymentAnomaly{}); err != nil {
+	if err := db.AutoMigrate(
+		&User{},
+		&TopUp{},
+		&WischoicerRechargeCredit{},
+		&EpayPaymentAnomaly{},
+		&Channel{},
+		&ImageTaskExecution{},
+		&TaskBillingLedger{},
+		&ChannelRevision{},
+	); err != nil {
 		t.Fatalf("auto-migrate %s schema: %v", database, err)
 	}
 

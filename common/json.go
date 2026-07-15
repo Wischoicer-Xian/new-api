@@ -3,11 +3,47 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 )
 
 func Unmarshal(data []byte, v any) error {
 	return json.Unmarshal(data, v)
+}
+
+// UnmarshalUseNumber decodes JSON without converting numbers through float64.
+// It is intended for canonicalization and other paths where distinct large
+// integer values must remain distinguishable.
+func UnmarshalUseNumber(data []byte, v any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+// UnmarshalStrict rejects unknown object fields in addition to malformed JSON.
+// Map keys remain caller-defined and must be validated by the owning domain.
+func UnmarshalStrict(data []byte, v any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func UnmarshalJsonStr(data string, v any) error {

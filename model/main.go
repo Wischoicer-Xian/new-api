@@ -310,6 +310,9 @@ func migrateDB() error {
 		&AuthzRole{},
 		&WischoicerRechargeCredit{},
 		&EpayPaymentAnomaly{},
+		&ImageTaskExecution{},
+		&TaskBillingLedger{},
+		&ChannelRevision{},
 	)
 	if err != nil {
 		return err
