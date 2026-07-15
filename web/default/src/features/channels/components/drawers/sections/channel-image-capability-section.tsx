@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { ImageIcon, Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { UseFormReturn } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 
@@ -144,6 +144,39 @@ export function ChannelImageCapabilitySection({
   const [newModel, setNewModel] = useState('')
   const [newOperation, setNewOperation] = useState<ImageOperation>('generation')
   const [newMode, setNewMode] = useState<ImageMode>('sync')
+
+  // P1-4: switching to a non-image-capable channel type must not leave a stale
+  // image_execution_config in the submitted payload. When the resolved preview
+  // reports the current type as not image-capable (or the type is unknown),
+  // clear the field so nothing stale is saved.
+  useEffect(() => {
+    if (
+      previewQuery.data &&
+      !previewQuery.data.data?.image_capable &&
+      configRaw.trim() !== ''
+    ) {
+      form.setValue('image_execution_config', '', {
+        shouldDirty: true,
+        shouldValidate: true,
+      })
+    }
+  }, [previewQuery.data, configRaw, form])
+
+  // Converge the override mode picker when the chosen operation or channel
+  // support set changes so it never holds a mode the adapter does not support.
+  // Depends on the react-query `data` (referentially stable between renders)
+  // rather than the derived `support` map, which is recomputed every render.
+  useEffect(() => {
+    if (!data) {
+      return
+    }
+    const allowed = (data.support?.[newOperation] ?? []).filter(
+      isImageMode
+    ) as ImageMode[]
+    if (allowed.length > 0 && !allowed.includes(newMode)) {
+      setNewMode(allowed[0])
+    }
+  }, [newOperation, data, newMode])
 
   // Non-image-capable channel types have no image execution controls to show;
   // the section collapses to nothing so the drawer looks unchanged for them.
@@ -321,8 +354,11 @@ export function ChannelImageCapabilitySection({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value='sync'>sync</SelectItem>
-                <SelectItem value='async_task'>async_task</SelectItem>
+                {supportFor(newOperation).map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {mode}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <Button
