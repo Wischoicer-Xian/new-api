@@ -16,10 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-// Hook-level tests for useWischoicerRecharge — the wiring the pure-logic tests
-// cannot reach: that createOrder persists the intent BEFORE the POST and reuses
-// the same clientRequestId across a lost-response retry, and that a SUCCESS
-// learned from mount recovery fires onRechargeSuccess exactly once.
+// Hook-level tests for useWischoicerRecharge — the wiring pure-logic tests
+// cannot reach: idempotent reuse across a lost-response retry, terminal routing
+// of an immediate SUCCESS on create/retry, mount-recovery balance refresh, and
+// the A→B cross-user guard that stops one user's intent being re-POSTed under
+// another user's session.
 //
 // Run with: cd web/default && bun test src/features/wallet/hooks/use-wischoicer-recharge.test.ts
 import { resolve } from 'node:path'
@@ -35,6 +36,7 @@ GlobalRegistrator.register()
   true
 
 const PENDING_KEY = 'wischoicer_wallet_pending_recharge'
+const UID_KEY = 'uid'
 const apiPath = resolve(import.meta.dir, '../api.ts')
 
 // Mock the wallet api module the hook imports. Each test configures the returns.
@@ -83,8 +85,14 @@ function readPending(): Record<string, unknown> | null {
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : null
 }
 
+function setUid(uid: string) {
+  globalThis.localStorage.setItem(UID_KEY, uid)
+}
+
+// Default to an authenticated user; tests that need a different user override.
 beforeEach(() => {
   globalThis.localStorage.clear()
+  setUid('U1')
   api.create.mockClear()
   api.get.mockClear()
   api.available.mockClear()
@@ -97,7 +105,6 @@ afterEach(() => {
 describe('useWischoicerRecharge — idempotency wiring', () => {
   it('persists the intent before the POST and reuses the id on a lost-response retry', async () => {
     api.available.mockResolvedValue(true)
-    // First create: response drops (network reject). Second: succeeds.
     api.create.mockRejectedValueOnce(new Error('network down'))
     api.create.mockResolvedValue({
       success: true,
@@ -113,8 +120,6 @@ describe('useWischoicerRecharge — idempotency wiring', () => {
     const onSuccess = mock()
     const { result, unmount } = renderHook(() => useWischoicerRecharge(onSuccess))
 
-    // First attempt fails — but the intent MUST already be persisted so a retry
-    // recovers instead of creating a duplicate order.
     let ok = true
     await act(async () => {
       ok = await result.current.createOrder(5000)
@@ -123,10 +128,9 @@ describe('useWischoicerRecharge — idempotency wiring', () => {
     const afterFail = readPending()
     expect(afterFail).not.toBeNull()
     expect(afterFail?.amountCents).toBe(5000)
-    expect(typeof afterFail?.clientRequestId).toBe('string')
+    expect(afterFail?.uid).toBe('U1')
     const firstId = afterFail?.clientRequestId
 
-    // Retry: same intent must reuse the SAME clientRequestId (no duplicate).
     await act(async () => {
       ok = await result.current.createOrder(5000)
     })
@@ -136,17 +140,54 @@ describe('useWischoicerRecharge — idempotency wiring', () => {
 
     unmount()
   })
+
+  it('fires onRechargeSuccess exactly once when a create/retry returns an immediate SUCCESS', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    // A prior create dropped (no orderNo); retrying with the same id gets back an
+    // order that has already been paid/credited.
+    globalThis.localStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({ clientRequestId: 'rc-immediate', amountCents: 5000, uid: 'U1' })
+    )
+    api.available.mockResolvedValue(true)
+    api.create.mockResolvedValue({
+      success: true,
+      data: {
+        orderNo: 'ORD-PAID',
+        amountCents: 5000,
+        currency: 'CNY',
+        status: 'SUCCESS',
+        paidTime: now,
+      },
+    })
+
+    const onSuccess = mock()
+    const { result, unmount } = renderHook(() => useWischoicerRecharge(onSuccess))
+
+    let ok = false
+    await act(async () => {
+      ok = await result.current.createOrder(5000)
+    })
+    expect(ok).toBe(true)
+    // Reused the persisted id (no duplicate order), and terminal routing fired.
+    const req = api.create.mock.calls[0][0] as { clientRequestId: string }
+    expect(req.clientRequestId).toBe('rc-immediate')
+    expect(onSuccess).toHaveBeenCalledTimes(1)
+    expect(readPending()).toBeNull()
+
+    unmount()
+  })
 })
 
-describe('useWischoicerRecharge — recovery balance refresh', () => {
+describe('useWischoicerRecharge — recovery & cross-user ownership', () => {
   it('fires onRechargeSuccess exactly once when mount recovery finds SUCCESS', async () => {
     const now = Math.floor(Date.now() / 1000)
-    // Seed a resolved order so recovery GETs it on mount.
     globalThis.localStorage.setItem(
       PENDING_KEY,
       JSON.stringify({
         clientRequestId: 'rc-recovered',
         amountCents: 5000,
+        uid: 'U1',
         orderNo: 'ORD-S',
         expireTime: now + 100,
       })
@@ -166,13 +207,36 @@ describe('useWischoicerRecharge — recovery balance refresh', () => {
     const onSuccess = mock()
     const { unmount } = renderHook(() => useWischoicerRecharge(onSuccess))
 
-    // Recovery runs async on mount; let it settle.
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50))
     })
 
     expect(onSuccess).toHaveBeenCalledTimes(1)
-    // The intent is cleared on terminal success.
+    expect(readPending()).toBeNull()
+    unmount()
+  })
+
+  it('never re-POSTs another user leftover intent on an A→B switch', async () => {
+    // User B is now logged in on the same browser, but the intent belongs to A.
+    setUid('B')
+    globalThis.localStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({ clientRequestId: 'rc-A', amountCents: 5000, uid: 'A' })
+    )
+    api.available.mockResolvedValue(true)
+
+    const onSuccess = mock()
+    const { unmount } = renderHook(() => useWischoicerRecharge(onSuccess))
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    // A's intent must NOT be recovered — neither re-POSTed nor GETted under B.
+    expect(api.create).not.toHaveBeenCalled()
+    expect(api.get).not.toHaveBeenCalled()
+    expect(onSuccess).not.toHaveBeenCalled()
+    // The foreign intent is discarded so it can't bite a later recovery either.
     expect(readPending()).toBeNull()
 
     unmount()

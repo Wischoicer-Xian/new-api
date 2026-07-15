@@ -126,6 +126,11 @@ export const WISCHOICER_PENDING_RECHARGE_KEY = 'wischoicer_wallet_pending_rechar
 export interface PersistedPendingRecharge {
   clientRequestId: string
   amountCents: number
+  /** The authenticated user this intent belongs to (same value the app sends as
+   * the `New-Api-User` header). Recovery MUST NOT re-POST an intent whose uid
+   * does not match the current user, or user A's leftover intent would be
+   * turned into user B's order under B's session. */
+  uid?: string
   /** Filled once the create-order response arrives. Absent while the response
    * is in flight — in that case mount recovery re-POSTs by clientRequestId
    * (idempotent re-fetch) instead of GETting an unknown orderNo. */
@@ -189,6 +194,9 @@ export function readPendingRecharge(): PersistedPendingRecharge | null {
         clientRequestId: parsed.clientRequestId,
         amountCents: parsed.amountCents,
       }
+      if (typeof parsed.uid === 'string' && parsed.uid.length > 0) {
+        out.uid = parsed.uid
+      }
       if (typeof parsed.orderNo === 'string' && parsed.orderNo.length > 0) {
         out.orderNo = parsed.orderNo
       }
@@ -214,6 +222,9 @@ export function writePendingRecharge(order: PersistedPendingRecharge): void {
     const payload: Record<string, unknown> = {
       clientRequestId: order.clientRequestId,
       amountCents: order.amountCents,
+    }
+    if (order.uid) {
+      payload.uid = order.uid
     }
     if (order.orderNo) {
       payload.orderNo = order.orderNo
@@ -241,6 +252,34 @@ export function clearPendingRecharge(): void {
 // ---------------------------------------------------------------------------
 // Intent decisions (pure) — the core idempotency / recovery invariants
 // ---------------------------------------------------------------------------
+
+/** localStorage key the app stores the authenticated user id under — the same
+ * value sent as the `New-Api-User` request header, so it matches the identity
+ * the wallet façade derives from UserAuth. */
+const WISCHOICER_USER_ID_STORAGE_KEY = 'uid'
+
+/** Read the current authenticated user id, or null if absent/unreadable. */
+export function getCurrentWischoicerUserId(): string | null {
+  const ls = safeLocalStorage()
+  if (!ls) return null
+  try {
+    const uid = ls.getItem(WISCHOICER_USER_ID_STORAGE_KEY)
+    return uid && uid.length > 0 ? uid : null
+  } catch {
+    return null
+  }
+}
+
+/** Whether a persisted intent belongs to the given user. An intent with no
+ * recorded uid (e.g. written before this guard existed) or a null current uid
+ * never matches — so a stale or foreign intent is never reused or re-POSTed. */
+export function isIntentForUser(
+  intent: PersistedPendingRecharge | null,
+  uid: string | null
+): boolean {
+  if (!intent || !uid) return false
+  return intent.uid === uid
+}
 
 export interface CreateIntentDecision {
   clientRequestId: string

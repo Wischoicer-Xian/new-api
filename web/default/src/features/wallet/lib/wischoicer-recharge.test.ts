@@ -35,6 +35,7 @@ import {
   getWischoicerRechargePhase,
   isWischoicerRechargeTerminal,
   isWischoicerRechargeTier,
+  isIntentForUser,
   newClientRequestId,
   readPendingRecharge,
   resolveCreateIntent,
@@ -286,6 +287,33 @@ describe('wischoicer recharge — intent decisions (pure)', () => {
         orderNo: 'ORD1',
       })
     ).toBe('get')
+  })
+
+  it('isIntentForUser only matches an intent attributed to the current user', () => {
+    expect(
+      isIntentForUser(
+        { clientRequestId: 'rc', amountCents: 5000, uid: 'A' },
+        'A'
+      )
+    ).toBe(true)
+    // Mismatched user, missing uid, or null current uid must never match — so a
+    // foreign / stale intent is never reused or re-POSTed.
+    expect(
+      isIntentForUser(
+        { clientRequestId: 'rc', amountCents: 5000, uid: 'A' },
+        'B'
+      )
+    ).toBe(false)
+    expect(
+      isIntentForUser({ clientRequestId: 'rc', amountCents: 5000 }, 'A')
+    ).toBe(false)
+    expect(
+      isIntentForUser(
+        { clientRequestId: 'rc', amountCents: 5000, uid: 'A' },
+        null
+      )
+    ).toBe(false)
+    expect(isIntentForUser(null, 'A')).toBe(false)
   })
 })
 
