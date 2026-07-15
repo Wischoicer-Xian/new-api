@@ -58,6 +58,13 @@ type Channel struct {
 	// GORM default tag so migrations remain stable across all supported dialects.
 	ImageRevisionNumber int `json:"-" gorm:"column:image_revision_number"`
 
+	// ImageExecutionConfig holds the per-channel image task execution
+	// configuration JSON (see service.ImageChannelExecutionConfig). A nil or
+	// empty value means the channel is not configured for image tasks and is
+	// excluded from the image task candidate pool. Additive column with no
+	// GORM default tag, so the migration is dialect-neutral.
+	ImageExecutionConfig *string `json:"image_execution_config,omitempty" gorm:"type:text"`
+
 	// cache info
 	Keys []string `json:"-" gorm:"-"`
 }

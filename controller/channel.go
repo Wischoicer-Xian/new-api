@@ -470,6 +470,11 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
 	}
 
+	// 图片任务执行配置：未知字段或不被 adapter 支持的模式 fail closed，避免错误渠道进入图片任务候选池。
+	if err := validateImageExecutionConfig(channel); err != nil {
+		return err
+	}
+
 	// 如果是添加操作，检查 channel 和 key 是否为空
 	if isAdd {
 		if channel == nil || channel.Key == "" {
@@ -1053,6 +1058,8 @@ func UpdateChannel(c *gin.Context) {
 	}
 	model.InitChannelCache()
 	service.ResetProxyClientCache()
+	// 图片能力渠道：配置更新后冻结一条不可变 revision（§7.2）；非图片渠道为空操作。
+	ensureImageChannelRevision(&channel.Channel)
 	// 记录变更的字段名（语言无关的字段标识），密钥仅记录"已更换"绝不记录内容。
 	changedFields := make([]string, 0)
 	if channel.Models != originChannel.Models {
