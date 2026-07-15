@@ -87,9 +87,9 @@ func TestInitWischoicerRechargeConfig_WalletEnabledRequiresTokenAAndBaseURL(t *t
 	save := snapshotWischoicerConfig(t)
 	t.Cleanup(save)
 
-	// 两者齐备 → 钱包挂载。
+	// 两者齐备 → 钱包挂载（测试环境同机 loopback 明文，符合 P1-1b 拓扑）。
 	require.NoError(t, os.Setenv(EnvNewApiToBillingServiceToken, "token-A"))
-	require.NoError(t, os.Setenv(EnvWischoicerBillingBaseURL, "http://billing.svc:8080"))
+	require.NoError(t, os.Setenv(EnvWischoicerBillingBaseURL, "http://127.0.0.1:8080"))
 	t.Cleanup(func() {
 		_ = os.Unsetenv(EnvNewApiToBillingServiceToken)
 		_ = os.Unsetenv(EnvWischoicerBillingBaseURL)
@@ -137,6 +137,7 @@ func TestParseWischoicerRechargeTestUserIDs(t *testing.T) {
 func snapshotWischoicerConfig(t *testing.T) func() {
 	t.Helper()
 	origTokenB := WischoicerBillingInternalServiceToken
+	origTokenBNext := WischoicerBillingInternalServiceTokenNext
 	origEnabled := WischoicerBillingInternalEnabled
 	origTokenA := NewApiToBillingServiceToken
 	origBaseURL := WischoicerBillingBaseURL
@@ -144,10 +145,79 @@ func snapshotWischoicerConfig(t *testing.T) func() {
 	origTest := WischoicerRechargeTestUserIDs
 	return func() {
 		WischoicerBillingInternalServiceToken = origTokenB
+		WischoicerBillingInternalServiceTokenNext = origTokenBNext
 		WischoicerBillingInternalEnabled = origEnabled
 		NewApiToBillingServiceToken = origTokenA
 		WischoicerBillingBaseURL = origBaseURL
 		WischoicerWalletRechargeEnabled = origWallet
 		WischoicerRechargeTestUserIDs = origTest
 	}
+}
+
+// P1-1b（WIS-547 R3 拍板）：http 明文仅允许 loopback；非 loopback 必须 https。
+func TestValidateWischoicerBillingBaseURL_LoopbackHTTPAllowed(t *testing.T) {
+	for _, u := range []string{
+		"http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080",
+		"http://127.1.2.3", "http://127.0.0.1",
+	} {
+		assert.NoError(t, validateWischoicerBillingBaseURL(u), "%s should be allowed (loopback http)", u)
+	}
+}
+
+func TestValidateWischoicerBillingBaseURL_NonLoopbackHTTPRejected(t *testing.T) {
+	for _, u := range []string{
+		"http://10.0.0.5:8080", "http://192.168.1.1", "http://billing.svc:8080",
+		"http://10.0.0.5", "http://billing.internal",
+	} {
+		assert.Error(t, validateWischoicerBillingBaseURL(u), "%s should be rejected (non-loopback plaintext)", u)
+	}
+}
+
+func TestValidateWischoicerBillingBaseURL_HTTPSAnyHostAllowed(t *testing.T) {
+	for _, u := range []string{
+		"https://billing.svc:443", "https://10.0.0.5", "https://billing.internal",
+		"https://127.0.0.1",
+	} {
+		assert.NoError(t, validateWischoicerBillingBaseURL(u), "%s should be allowed (https)", u)
+	}
+}
+
+// 非 loopback http 必须 fail-closed：启动报错 + 钱包不挂载（develop 不留 http://10.* 明文）。
+func TestInitWischoicerRechargeConfig_WalletFailClosedOnNonLoopbackHTTP(t *testing.T) {
+	save := snapshotWischoicerConfig(t)
+	t.Cleanup(save)
+
+	require.NoError(t, os.Setenv(EnvNewApiToBillingServiceToken, "token-A"))
+	require.NoError(t, os.Setenv(EnvWischoicerBillingBaseURL, "http://10.0.0.5:8080"))
+	t.Cleanup(func() {
+		_ = os.Unsetenv(EnvNewApiToBillingServiceToken)
+		_ = os.Unsetenv(EnvWischoicerBillingBaseURL)
+	})
+
+	err := initWischoicerRechargeConfig()
+	require.Error(t, err, "non-loopback plaintext http must fail-closed at startup")
+	assert.False(t, WischoicerWalletRechargeEnabled, "wallet must NOT mount on invalid base URL")
+}
+
+// Token B next 槽：current 为权威，next 可空。
+func TestInitWischoicerRechargeConfig_TokenBNextSlot(t *testing.T) {
+	save := snapshotWischoicerConfig(t)
+	t.Cleanup(save)
+
+	require.NoError(t, os.Setenv(EnvBillingToNewApiServiceToken, "cur"))
+	require.NoError(t, os.Setenv(EnvBillingToNewApiServiceTokenNext, "nxt"))
+	t.Cleanup(func() {
+		_ = os.Unsetenv(EnvBillingToNewApiServiceToken)
+		_ = os.Unsetenv(EnvBillingToNewApiServiceTokenNext)
+	})
+
+	require.NoError(t, initWischoicerRechargeConfig())
+	assert.Equal(t, "cur", WischoicerBillingInternalServiceToken)
+	assert.Equal(t, "nxt", WischoicerBillingInternalServiceTokenNext)
+	assert.True(t, WischoicerBillingInternalEnabled)
+
+	// 只有 next、current 为空 → fail-closed 不挂载（current 权威）。
+	require.NoError(t, os.Unsetenv(EnvBillingToNewApiServiceToken))
+	require.NoError(t, initWischoicerRechargeConfig())
+	assert.False(t, WischoicerBillingInternalEnabled, "current empty but next set must NOT mount")
 }

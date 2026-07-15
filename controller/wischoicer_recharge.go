@@ -66,11 +66,11 @@ func PutWischoicerRechargeReservation(c *gin.Context) {
 	}
 
 	wischoicerBillingAudit(c, "wischoicer.recharge.reserve", req.NewApiUserId, map[string]interface{}{
-		"order_no":        orderNo,
-		"quota":           req.Quota,
-		"amount_cents":    req.AmountCents,
-		"reserved":        result.Reserved,
-		"duplicate":       result.Duplicate,
+		"order_no":     orderNo,
+		"quota":        req.Quota,
+		"amount_cents": req.AmountCents,
+		"reserved":     result.Reserved,
+		"duplicate":    result.Duplicate,
 	})
 
 	c.JSON(http.StatusOK, gin.H{
@@ -86,6 +86,20 @@ type releaseRechargeRequest struct {
 	Reason string `json:"reason"`
 }
 
+// wischoicerValidReleaseReasons 是 release reason 的受控枚举（WIS-547 §2）。
+// 依据 billing develop actual enum（当前仅发 "closed"）+ 契约显式枚举（closed/expired/prepay_failed）
+// 收口；新增 reason 必须先扩此集合，禁止任意字符串（R2 复审 P2）。
+var wischoicerValidReleaseReasons = map[string]struct{}{
+	"closed":        {},
+	"expired":       {},
+	"prepay_failed": {},
+}
+
+func isWischoicerValidReleaseReason(reason string) bool {
+	_, ok := wischoicerValidReleaseReasons[reason]
+	return ok
+}
+
 // PostWischoicerRechargeReservationRelease — POST /api/internal/wischoicer/recharge-reservations/{orderNo}/release
 func PostWischoicerRechargeReservationRelease(c *gin.Context) {
 	orderNo := c.Param("orderNo")
@@ -95,8 +109,15 @@ func PostWischoicerRechargeReservationRelease(c *gin.Context) {
 	}
 
 	var req releaseRechargeRequest
-	// body 可选；忽略绑定错误（reason 可空）。
-	_ = c.ShouldBindJSON(&req)
+	// body 必填（契约 §2：{reason}）；绑定失败或 reason 不在受控枚举 → 400 INVALID_ARGUMENT。
+	if err := c.ShouldBindJSON(&req); err != nil {
+		wischoicerCreditErrorResponse(c, http.StatusBadRequest, "INVALID_ARGUMENT")
+		return
+	}
+	if !isWischoicerValidReleaseReason(req.Reason) {
+		wischoicerCreditErrorResponse(c, http.StatusBadRequest, "INVALID_ARGUMENT")
+		return
+	}
 
 	if err := model.ReleaseExternalRecharge(c.Request.Context(), orderNo, req.Reason); err != nil {
 		wischoicerCreditErrorResponse(c, wischoicerHTTPStatusForError(err), err.Error())
@@ -155,12 +176,12 @@ func PostWischoicerRechargeCredit(c *gin.Context) {
 	}
 
 	wischoicerBillingAudit(c, "wischoicer.recharge.credit", req.NewApiUserId, map[string]interface{}{
-		"order_no":      req.OrderNo,
-		"quota":         req.Quota,
-		"amount_cents":  req.AmountCents,
+		"order_no":       req.OrderNo,
+		"quota":          req.Quota,
+		"amount_cents":   req.AmountCents,
 		"transaction_id": req.TransactionId,
-		"credited":      result.Credited,
-		"duplicate":     result.Duplicate,
+		"credited":       result.Credited,
+		"duplicate":      result.Duplicate,
 	})
 
 	c.JSON(http.StatusOK, gin.H{
