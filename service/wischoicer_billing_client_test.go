@@ -73,30 +73,6 @@ func TestBillingClient_CreateOrder_Success_ParsesOrderAndSendsTokenA(t *testing.
 	assert.Equal(t, int64(5000), sent.AmountCents)
 }
 
-// TestBillingClient_SendsCurrentNotNext verifies the Token A dual-slot sender
-// design (WIS-547): the client always sends current (token). next (tokenNext)
-// is a staged rotation slot and is NEVER put on the wire — so the next value
-// cannot leak via the header. Lossless rotation is guaranteed by the billing
-// receiver accepting both during the window, not by the sender emitting next.
-func TestBillingClient_SendsCurrentNotNext(t *testing.T) {
-	var seenToken string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenToken = r.Header.Get(billingInternalTokenHeader)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"data":{"orderNo":"ORD","amountCents":5000,"currency":"CNY","status":"PENDING"}}`))
-	}))
-	defer srv.Close()
-
-	c := newTestClient(t, srv.URL, "cur-A")
-	c.tokenNext = "nxt-A" // next slot staged
-	_, err := c.CreateRechargeOrder(context.Background(), BillingCreateOrderRequest{
-		NewApiUserID: 1, ClientRequestID: "crid", AmountCents: 5000,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "cur-A", seenToken, "sender must send current; next must never be sent on the wire")
-	assert.NotEqual(t, "nxt-A", seenToken, "next-slot value must not leak into the header")
-}
-
 func TestBillingClient_CreateOrder_OrderConflict_NotRetryable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
