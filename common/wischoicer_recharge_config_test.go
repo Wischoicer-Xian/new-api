@@ -154,49 +154,54 @@ func snapshotWischoicerConfig(t *testing.T) func() {
 	}
 }
 
-// P1-1b（WIS-547 R3 拍板）：http 明文仅允许 loopback；非 loopback 必须 https。
-func TestValidateWischoicerBillingBaseURL_LoopbackHTTPAllowed(t *testing.T) {
+// A方案（WIS-547 R3 拍板，sidecar-only）：应用层只允许 loopback baseURL（http 或 https）。
+func TestValidateWischoicerBillingBaseURL_LoopbackAllowed(t *testing.T) {
 	for _, u := range []string{
 		"http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080",
-		"http://127.1.2.3", "http://127.0.0.1",
+		"http://127.1.2.3", "http://127.0.0.1", "http://127.255.255.255",
+		"https://127.0.0.1", "https://localhost", "https://[::1]:8080",
 	} {
-		assert.NoError(t, validateWischoicerBillingBaseURL(u), "%s should be allowed (loopback http)", u)
+		assert.NoError(t, validateWischoicerBillingBaseURL(u), "%s should be allowed (loopback)", u)
 	}
 }
 
-func TestValidateWischoicerBillingBaseURL_NonLoopbackHTTPRejected(t *testing.T) {
+// 非 loopback 一律 fail-closed——不论 http 还是 https（A方案：跨机交给 sidecar，应用不直连）。
+func TestValidateWischoicerBillingBaseURL_NonLoopbackBannedAnyScheme(t *testing.T) {
 	for _, u := range []string{
-		"http://10.0.0.5:8080", "http://192.168.1.1", "http://billing.svc:8080",
-		"http://10.0.0.5", "http://billing.internal",
+		"http://10.0.0.5:8080", "http://192.168.1.1", "http://billing.svc:8080", "http://billing.internal",
+		"https://10.0.0.5", "https://billing.svc:443", "https://billing.internal",
 	} {
-		assert.Error(t, validateWischoicerBillingBaseURL(u), "%s should be rejected (non-loopback plaintext)", u)
+		assert.Error(t, validateWischoicerBillingBaseURL(u), "%s should be rejected (non-loopback, any scheme)", u)
 	}
 }
 
-func TestValidateWischoicerBillingBaseURL_HTTPSAnyHostAllowed(t *testing.T) {
+// P1-1 回归（R2 复审）：禁止用字符串前缀判 loopback——以 "127." 开头的外部域名必须被拒。
+func TestValidateWischoicerBillingBaseURL_LoopbackPrefixBypassRejected(t *testing.T) {
 	for _, u := range []string{
-		"https://billing.svc:443", "https://10.0.0.5", "https://billing.internal",
-		"https://127.0.0.1",
+		"http://127.evil.example:8080", "http://127.0.0.1.evil.example:8080",
+		"http://127.evil.example", "https://127.0.0.1.evil.example",
 	} {
-		assert.NoError(t, validateWischoicerBillingBaseURL(u), "%s should be allowed (https)", u)
+		assert.Error(t, validateWischoicerBillingBaseURL(u), "%s must be rejected (prefix bypass)", u)
 	}
 }
 
-// 非 loopback http 必须 fail-closed：启动报错 + 钱包不挂载（develop 不留 http://10.* 明文）。
-func TestInitWischoicerRechargeConfig_WalletFailClosedOnNonLoopbackHTTP(t *testing.T) {
+// 非 loopback（含 https）必须 fail-closed：启动报错 + 钱包不挂载（A方案收紧，非放宽）。
+func TestInitWischoicerRechargeConfig_WalletFailClosedOnNonLoopback(t *testing.T) {
 	save := snapshotWischoicerConfig(t)
 	t.Cleanup(save)
 
 	require.NoError(t, os.Setenv(EnvNewApiToBillingServiceToken, "token-A"))
-	require.NoError(t, os.Setenv(EnvWischoicerBillingBaseURL, "http://10.0.0.5:8080"))
 	t.Cleanup(func() {
 		_ = os.Unsetenv(EnvNewApiToBillingServiceToken)
 		_ = os.Unsetenv(EnvWischoicerBillingBaseURL)
 	})
 
-	err := initWischoicerRechargeConfig()
-	require.Error(t, err, "non-loopback plaintext http must fail-closed at startup")
-	assert.False(t, WischoicerWalletRechargeEnabled, "wallet must NOT mount on invalid base URL")
+	for _, baseURL := range []string{"http://10.0.0.5:8080", "https://billing.svc:443"} {
+		require.NoError(t, os.Setenv(EnvWischoicerBillingBaseURL, baseURL))
+		err := initWischoicerRechargeConfig()
+		require.Error(t, err, "non-loopback %s must fail-closed at startup (A方案)", baseURL)
+		assert.False(t, WischoicerWalletRechargeEnabled, "wallet must NOT mount on non-loopback base URL")
+	}
 }
 
 // Token B next 槽：current 为权威，next 可空。

@@ -143,3 +143,48 @@ func TestWischoicerBillingInternalAuth_RotationSwitchThenRevoke(t *testing.T) {
 	assert.Equal(t, 200, doReq("new"))
 	assert.Equal(t, 401, doReq("old"), "revoked old token must be rejected after next cleared")
 }
+
+// P2（R2 复审恒时紧固）：current/next 长度不等时仍必须正确判定命中——SHA-256 到 32B
+// 定宽后比较，长度差不再触发 subtle.ConstantTimeCompare 的提前返回，也消除据时序区分槽位。
+func TestWischoicerTokenMatchesAnySlot_UnequalLength(t *testing.T) {
+	// current 32 字节、next 8 字节（极端长度差）。
+	cur := "0123456789abcdef0123456789abcdef" // 32
+	nxt := "short8ch"                         // 8
+
+	assert.True(t, wischoicerTokenMatchesAnySlot(cur, cur, nxt), "provided == current (len 32) must match")
+	assert.True(t, wischoicerTokenMatchesAnySlot(nxt, cur, nxt), "provided == next (len 8) must match despite length diff")
+	assert.False(t, wischoicerTokenMatchesAnySlot(cur[:16], cur, nxt), "prefix of current must NOT match")
+	assert.False(t, wischoicerTokenMatchesAnySlot("neither-cur-nor-next-value", cur, nxt), "neither slot must NOT match")
+	// 长度与 current 相同但内容不同：必须不命中（防等长伪造）。
+	assert.False(t, wischoicerTokenMatchesAnySlot("ffffffffffffffffffffffffffffffff", cur, nxt))
+}
+
+// 端到端：current/next 不等长，双槽仍各自接受、其它拒绝。
+func TestWischoicerBillingInternalAuth_DualSlotUnequalLength(t *testing.T) {
+	origCur := common.WischoicerBillingInternalServiceToken
+	origNext := common.WischoicerBillingInternalServiceTokenNext
+	t.Cleanup(func() {
+		common.WischoicerBillingInternalServiceToken = origCur
+		common.WischoicerBillingInternalServiceTokenNext = origNext
+	})
+	setTokenB(t, "0123456789abcdef0123456789abcdef", "short8ch")
+
+	doReq := func(provided string) int {
+		gin.SetMode(gin.TestMode)
+		w := httptest.NewRecorder()
+		_, r := gin.CreateTestContext(w)
+		r.GET("/x", WischoicerBillingInternalAuth(), func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+		req := httptest.NewRequest("GET", "/x", nil)
+		if provided != "" {
+			req.Header.Set(HeaderWischoicerBillingToken, provided)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	assert.Equal(t, 200, doReq("0123456789abcdef0123456789abcdef"), "long current must match")
+	assert.Equal(t, 200, doReq("short8ch"), "short next must match despite length diff")
+	assert.Equal(t, 401, doReq("0123456789abcdef"), "current prefix must be rejected")
+	assert.Equal(t, 401, doReq("short8"), "next prefix must be rejected")
+	assert.Equal(t, 401, doReq("totally-different-token"), "neither must be rejected")
+}

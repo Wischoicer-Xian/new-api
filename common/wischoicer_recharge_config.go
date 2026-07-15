@@ -162,11 +162,17 @@ func initWischoicerRechargeConfig() error {
 	return nil
 }
 
-// validateWischoicerBillingBaseURL 只做最小结构校验 + 明文边界（WIS-547 R3 拍板 P1-1b）。
-// 规则：http 明文仅允许 loopback（同机 billing + new-api，测试 / 生产同机拓扑）；
-// 非 loopback 必须 https（跨机信任由 mTLS 承载，部署期 sidecar 终止或直连，本 PR 不锁 A/B）。
+// validateWischoicerBillingBaseURL 校验 billing 基址（WIS-547 R3 拍板，A方案 sidecar-only）。
+//
+// 应用层只允许 loopback baseURL（localhost / 127.0.0.0/8 / ::1）：测试环境 billing +
+// new-api 同机 loopback；生产由本机 sidecar 终止跨机 mTLS，应用只连本机 sidecar。
+// 跨机地址（不论 http 还是 https）一律 fail-closed（启动拒绝 → 钱包路由不挂载）。
+//
+// 不拿 scheme==https 当 mTLS 证据：http.Client 没有 client cert / private CA /
+// TLSClientConfig，https 只代表服务端 TLS，不满足双向身份；真 mTLS 由 sidecar 在部署
+// 门禁完成并留证。这是把 R3 边界收紧（跨机一律 fail-closed），不是放宽。
+//
 // 不做 SSRF/私网过滤：billing 是受信内部服务，跨机私网可达性 + ACL 由部署侧负责（契约 §5）。
-// 非法值 fail-closed（启动拒绝 → 钱包路由不挂载），绝不留 http://10.* 明文私网。
 func validateWischoicerBillingBaseURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -175,29 +181,27 @@ func validateWischoicerBillingBaseURL(raw string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("scheme must be http or https, got %q", u.Scheme)
 	}
-	if u.Host == "" {
+	host := u.Hostname() // 纯 hostname，已剥端口与 IPv6 方括号
+	if host == "" {
 		return fmt.Errorf("host must not be empty")
 	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Host) {
-		return fmt.Errorf("plaintext http allowed only for loopback; non-loopback must use https (mTLS): host=%q", u.Host)
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("only loopback baseURL allowed (sidecar-only); cross-machine address must fail-closed: host=%q", host)
 	}
 	return nil
 }
 
-// isLoopbackHost 判定 URL host 是否为 loopback（localhost / 127.0.0.0/8 / ::1），
-// 兼容带端口与 IPv6 方括号写法。
+// isLoopbackHost 判定纯 hostname（无端口）是否为 loopback。只精确匹配 "localhost"，
+// IP 走 net.ParseIP + IsLoopback——禁止用字符串前缀判断，避免 "127.evil.example" 这类
+// 以 "127." 开头的外部 DNS 主机被误判为本机（R2 复审 P1-1）。
 func isLoopbackHost(host string) bool {
-	h := host
-	if hp, _, err := net.SplitHostPort(host); err == nil {
-		h = hp
-	}
-	h = strings.TrimSpace(h)
-	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
-	switch h {
-	case "localhost", "127.0.0.1", "::1":
+	if host == "localhost" {
 		return true
 	}
-	return strings.HasPrefix(h, "127.")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // parseWischoicerRechargeTestUserIDs 解析逗号分隔的用户 ID 白名单。非法项被跳过
