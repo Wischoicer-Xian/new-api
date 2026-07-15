@@ -3,6 +3,7 @@ package common
 import (
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"sort"
@@ -26,6 +27,12 @@ var (
 	// 两个名字不得同时指向不同 secret；过渡期只允许显式 alias，不允许两向复用同一 secret。
 	// 为空时 4 个内部账务路由不挂载（fail-closed）。
 	WischoicerBillingInternalServiceToken = ""
+
+	// WischoicerBillingInternalServiceTokenNext 是 Token B 的 next 槽（WIS-547 R3 已锁
+	// 24h current/next 无损轮换）。接收端对 current 与 next 都做 constant-time 校验、
+	// 不短路；轮换窗口内两个同方向 token 都被接受，撤销后旧 token 立即失效。next 可空
+	//（未轮换时只认 current）。current 为空时路由不挂载（fail-closed），即便 next 非空。
+	WischoicerBillingInternalServiceTokenNext = ""
 
 	// WischoicerBillingInternalEnabled 标记 Token B 账务路由是否挂载（Token B 非空时 true）。
 	WischoicerBillingInternalEnabled = false
@@ -61,8 +68,9 @@ var (
 
 const (
 	// Token B（billing → new-api）方向语义主名 + 兼容别名。
-	EnvBillingToNewApiServiceToken    = "BILLING_TO_NEWAPI_SERVICE_TOKEN"
-	EnvWischoicerBillingInternalToken = "WISCHOICER_BILLING_INTERNAL_SERVICE_TOKEN"
+	EnvBillingToNewApiServiceToken     = "BILLING_TO_NEWAPI_SERVICE_TOKEN"
+	EnvBillingToNewApiServiceTokenNext = "BILLING_TO_NEWAPI_SERVICE_TOKEN_NEXT"
+	EnvWischoicerBillingInternalToken  = "WISCHOICER_BILLING_INTERNAL_SERVICE_TOKEN"
 	// Token A（new-api → billing）方向语义主名。
 	EnvNewApiToBillingServiceToken      = "NEWAPI_TO_BILLING_SERVICE_TOKEN"
 	EnvWischoicerBillingBaseURL         = "WISCHOICER_BILLING_BASE_URL"
@@ -117,6 +125,10 @@ func initWischoicerRechargeConfig() error {
 	// 方案 §14 渐进上线要求 new-api 先能正常启动。
 	WischoicerBillingInternalEnabled = WischoicerBillingInternalServiceToken != ""
 
+	// Token B next 槽（current/next 双槽轮换结构，WIS-547 R3 已锁）。current 为权威：
+	// current 为空时即便 next 非空也不挂载（fail-closed，避免只配半边）。
+	WischoicerBillingInternalServiceTokenNext = os.Getenv(EnvBillingToNewApiServiceTokenNext)
+
 	// Token A（new-api → billing）+ billing 基址：解析后决定钱包 façade 是否挂载。
 	NewApiToBillingServiceToken = os.Getenv(EnvNewApiToBillingServiceToken)
 	WischoicerBillingBaseURL = strings.TrimRight(os.Getenv(EnvWischoicerBillingBaseURL), "/")
@@ -150,9 +162,17 @@ func initWischoicerRechargeConfig() error {
 	return nil
 }
 
-// validateWischoicerBillingBaseURL 只做最小结构校验（scheme + host）。
-// 不做 SSRF/私网过滤：billing 是受信内部服务，跨机私网可达性 + ACL 由部署侧负责
-// （WIS-547 契约 §5）。这里拒绝明显非法值，避免拼出错误 URL 后泄露到日志或前端。
+// validateWischoicerBillingBaseURL 校验 billing 基址（WIS-547 R3 拍板，A方案 sidecar-only）。
+//
+// 应用层只允许 loopback baseURL（localhost / 127.0.0.0/8 / ::1）：测试环境 billing +
+// new-api 同机 loopback；生产由本机 sidecar 终止跨机 mTLS，应用只连本机 sidecar。
+// 跨机地址（不论 http 还是 https）一律 fail-closed（启动拒绝 → 钱包路由不挂载）。
+//
+// 不拿 scheme==https 当 mTLS 证据：http.Client 没有 client cert / private CA /
+// TLSClientConfig，https 只代表服务端 TLS，不满足双向身份；真 mTLS 由 sidecar 在部署
+// 门禁完成并留证。这是把 R3 边界收紧（跨机一律 fail-closed），不是放宽。
+//
+// 不做 SSRF/私网过滤：billing 是受信内部服务，跨机私网可达性 + ACL 由部署侧负责（契约 §5）。
 func validateWischoicerBillingBaseURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -161,10 +181,27 @@ func validateWischoicerBillingBaseURL(raw string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("scheme must be http or https, got %q", u.Scheme)
 	}
-	if u.Host == "" {
+	host := u.Hostname() // 纯 hostname，已剥端口与 IPv6 方括号
+	if host == "" {
 		return fmt.Errorf("host must not be empty")
 	}
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("only loopback baseURL allowed (sidecar-only); cross-machine address must fail-closed: host=%q", host)
+	}
 	return nil
+}
+
+// isLoopbackHost 判定纯 hostname（无端口）是否为 loopback。只精确匹配 "localhost"，
+// IP 走 net.ParseIP + IsLoopback——禁止用字符串前缀判断，避免 "127.evil.example" 这类
+// 以 "127." 开头的外部 DNS 主机被误判为本机（R2 复审 P1-1）。
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // parseWischoicerRechargeTestUserIDs 解析逗号分隔的用户 ID 白名单。非法项被跳过
