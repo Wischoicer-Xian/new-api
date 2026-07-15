@@ -71,6 +71,7 @@ export const channelSchema = z.object({
     multi_key_mode: 'random',
   }),
   settings: z.string().default('{}'), // other_settings JSON
+  image_execution_config: z.string().nullish(), // image task execution config JSON
 })
 
 export type Channel = z.infer<typeof channelSchema>
