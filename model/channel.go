@@ -54,6 +54,9 @@ type Channel struct {
 	ChannelInfo ChannelInfo `json:"channel_info" gorm:"type:json"`
 
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
+	// ImageRevisionNumber allocates immutable image channel revisions. It has no
+	// GORM default tag so migrations remain stable across all supported dialects.
+	ImageRevisionNumber int `json:"-" gorm:"column:image_revision_number"`
 
 	// cache info
 	Keys []string `json:"-" gorm:"-"`

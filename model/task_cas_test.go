@@ -56,11 +56,30 @@ func TestMain(m *testing.M) {
 		&SystemTaskLock{},
 		&WischoicerRechargeCredit{},
 		&EpayPaymentAnomaly{},
+		&ImageTaskExecution{},
+		&TaskBillingLedger{},
+		&ChannelRevision{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
 
 	os.Exit(m.Run())
+}
+
+func useConcurrentSQLiteDB(t *testing.T, name string, models ...any) {
+	t.Helper()
+	originalDB := DB
+	db, err := gorm.Open(sqlite.Open("file:"+name+"?mode=memory&cache=shared&_pragma=busy_timeout(5000)"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(16)
+	require.NoError(t, db.AutoMigrate(models...))
+	DB = db
+	t.Cleanup(func() {
+		DB = originalDB
+		require.NoError(t, sqlDB.Close())
+	})
 }
 
 func truncateTables(t *testing.T) {
