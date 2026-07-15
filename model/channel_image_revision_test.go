@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -141,4 +142,102 @@ func TestUpdateChannelWithImageRevision_BuilderErrorRollsBackUpdate(t *testing.T
 	require.NoError(t, DB.First(&db, ch.Id).Error)
 	assert.Equal(t, originalName, db.Name, "update must roll back when revision creation fails")
 	assert.Equal(t, countRevisions(t, ch.Id), int64(1), "no extra revision after rollback")
+}
+
+func TestImageRevision_FreezesRuntimeProviderFields(t *testing.T) {
+	truncateChannelRevisions(t)
+	cfg := `{"defaults":{"generation":"sync","edit":"sync"}}`
+	paramBefore := `{"quality":"standard"}`
+	headerBefore := `{"X-Tenant":"t1"}`
+	ch := Channel{
+		Type:                 1,
+		Key:                  "k",
+		Name:                 "freeze",
+		Group:                "default",
+		Models:               "m1",
+		ImageExecutionConfig: &cfg,
+		ParamOverride:        &paramBefore,
+		HeaderOverride:       &headerBefore,
+	}
+	require.NoError(t, InsertChannelWithImageRevision(&ch, imageRevisionBuilderForTest("v1")))
+
+	var firstRevs []ChannelRevision
+	require.NoError(t, DB.Where("channel_id = ?", ch.Id).Find(&firstRevs).Error)
+	require.Len(t, firstRevs, 1)
+	firstSettings := firstRevs[0].Settings
+
+	// Mutate runtime-consumed provider fields and save a new revision.
+	paramAfter := `{"quality":"hd"}`
+	ch.ParamOverride = &paramAfter
+	require.NoError(t, UpdateChannelWithImageRevision(&ch, imageRevisionBuilderForTest("v1")))
+
+	var allRevs []ChannelRevision
+	require.NoError(t, DB.Where("channel_id = ?", ch.Id).Order("revision_number").Find(&allRevs).Error)
+	require.Len(t, allRevs, 2)
+
+	// Immutable: the first revision's snapshot is byte-identical after the edit.
+	assert.Equal(t, firstSettings, allRevs[0].Settings)
+
+	// The old revision still freezes the pre-edit values; the new one the new.
+	var snapOld imageChannelRevisionSnapshot
+	require.NoError(t, common.Unmarshal(allRevs[0].Settings, &snapOld))
+	assert.Equal(t, paramBefore, snapOld.ParamOverride)
+	assert.Equal(t, headerBefore, snapOld.HeaderOverride)
+	var snapNew imageChannelRevisionSnapshot
+	require.NoError(t, common.Unmarshal(allRevs[1].Settings, &snapNew))
+	assert.Equal(t, paramAfter, snapNew.ParamOverride)
+}
+
+func TestBatchInsertChannelsWithImageRevision_AllSucceed(t *testing.T) {
+	truncateChannelRevisions(t)
+	cfg := `{"defaults":{"generation":"sync"}}`
+	channels := []Channel{
+		{Type: 1, Key: "k1", Name: "ok1", Group: "default", Models: "m", ImageExecutionConfig: &cfg},
+		{Type: 1, Key: "k2", Name: "ok2", Group: "default", Models: "m", ImageExecutionConfig: &cfg},
+	}
+	require.NoError(t, BatchInsertChannelsWithImageRevision(channels, imageRevisionBuilderForTest("v1")))
+
+	var channelCount int64
+	require.NoError(t, DB.Model(&Channel{}).Where("name IN ?", []string{"ok1", "ok2"}).Count(&channelCount).Error)
+	assert.Equal(t, int64(2), channelCount)
+
+	var revCount int64
+	require.NoError(t, DB.Model(&ChannelRevision{}).Count(&revCount).Error)
+	assert.Equal(t, int64(2), revCount, "one revision per channel")
+}
+
+func TestBatchInsertChannelsWithImageRevision_NthFailureRollsBackWholeBatch(t *testing.T) {
+	truncateChannelRevisions(t)
+	cfg := `{"defaults":{"generation":"sync"}}`
+	channels := []Channel{
+		{Type: 1, Key: "k1", Name: "b1", Group: "default", Models: "m", ImageExecutionConfig: &cfg},
+		{Type: 1, Key: "k2", Name: "b2", Group: "default", Models: "m", ImageExecutionConfig: &cfg},
+		{Type: 1, Key: "k3", Name: "b3", Group: "default", Models: "m", ImageExecutionConfig: &cfg},
+	}
+	// Builder fails on the 2nd channel, after the 1st is already created in tx.
+	calls := 0
+	failingBuilder := ChannelRevisionBuilder(func(c *Channel) (*ChannelRevisionCreate, error) {
+		calls++
+		if calls == 2 {
+			return nil, errors.New("batch boom")
+		}
+		input, err := c.BuildImageChannelRevision("v1")
+		if err != nil {
+			return nil, err
+		}
+		return &input, nil
+	})
+
+	err := BatchInsertChannelsWithImageRevision(channels, failingBuilder)
+	require.Error(t, err)
+
+	// All-or-nothing: the entire batch (channels + abilities + revisions) is
+	// rolled back so a retry never produces a partial or duplicated batch.
+	var channelCount int64
+	require.NoError(t, DB.Model(&Channel{}).Where("name IN ?", []string{"b1", "b2", "b3"}).Count(&channelCount).Error)
+	assert.Zero(t, channelCount, "entire batch must roll back on Nth failure")
+
+	var revCount int64
+	require.NoError(t, DB.Model(&ChannelRevision{}).Count(&revCount).Error)
+	assert.Zero(t, revCount)
 }

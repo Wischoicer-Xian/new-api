@@ -53,12 +53,22 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 	custom := "https://my-proxy.example/v1"
 	cfg := `{"defaults":{"generation":"sync","edit":"sync"}}`
 	setting := `{"proxy":"http://corp-proxy:7890","system_prompt":"x"}`
+	paramOverride := `{"quality":"hd"}`
+	headerOverride := `{"X-Tenant":"t1"}`
+	org := "org-123"
+	modelMapping := `{"gpt-image-1":"dall-e-3"}`
 	ch := Channel{
 		Id:                   42,
 		Type:                 constant.ChannelTypeOpenAI,
 		BaseURL:              &custom,
 		Setting:              &setting,
 		ImageExecutionConfig: &cfg,
+		ParamOverride:        &paramOverride,
+		HeaderOverride:       &headerOverride,
+		OpenAIOrganization:   &org,
+		ModelMapping:         &modelMapping,
+		OtherSettings:        `{"azure_api_version":"2024-02-15"}`,
+		Key:                  "secret-key-value",
 	}
 
 	input, err := ch.BuildImageChannelRevision("openai-image-adapter/v1")
@@ -72,18 +82,20 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 	assert.Equal(t, "channel:42", input.CredentialRef)
 	assert.Equal(t, "openai-image-adapter/v1", input.AdapterVersion)
 
-	// Settings is a versioned snapshot DTO carrying execution config + the
-	// non-secret provider settings; the secret key is never present.
+	// Settings is a versioned snapshot carrying every runtime-consumed provider
+	// field. The secret Key must never appear in the snapshot.
 	require.NotNil(t, input.Settings)
+	assert.NotContains(t, string(input.Settings), "secret-key-value")
 	var snapshot imageChannelRevisionSnapshot
 	require.NoError(t, common.Unmarshal(input.Settings, &snapshot))
 	assert.Equal(t, imageRevisionSnapshotSchemaVersion, snapshot.SchemaVersion)
-	require.NotNil(t, snapshot.ExecutionConfig)
-	assert.Equal(t, cfg, string(snapshot.ExecutionConfig))
-	require.NotNil(t, snapshot.ProviderSettings)
-	var provider map[string]any
-	require.NoError(t, common.Unmarshal(snapshot.ProviderSettings, &provider))
-	assert.Equal(t, "http://corp-proxy:7890", provider["proxy"])
+	assert.Equal(t, cfg, snapshot.ExecutionConfig)
+	assert.Equal(t, setting, snapshot.ProviderSettings)
+	assert.Equal(t, paramOverride, snapshot.ParamOverride)
+	assert.Equal(t, headerOverride, snapshot.HeaderOverride)
+	assert.Equal(t, org, snapshot.OpenAIOrganization)
+	assert.Equal(t, modelMapping, snapshot.ModelMapping)
+	assert.Equal(t, `{"azure_api_version":"2024-02-15"}`, snapshot.OtherSettings)
 
 	t.Run("omits empty provider settings", func(t *testing.T) {
 		ch := Channel{Id: 1, Type: constant.ChannelTypeOpenAI, BaseURL: &custom, ImageExecutionConfig: &cfg}
@@ -91,7 +103,8 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 		require.NoError(t, err)
 		var snapshot imageChannelRevisionSnapshot
 		require.NoError(t, common.Unmarshal(input.Settings, &snapshot))
-		assert.Nil(t, snapshot.ProviderSettings)
+		assert.Empty(t, snapshot.ProviderSettings)
+		assert.Empty(t, snapshot.ParamOverride)
 	})
 
 	t.Run("nil BaseURL freezes type default endpoint", func(t *testing.T) {

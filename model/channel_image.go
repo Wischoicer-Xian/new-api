@@ -16,16 +16,32 @@ import (
 // against and the processor can migrate or reject older snapshots deliberately.
 const imageRevisionSnapshotSchemaVersion = 1
 
-// imageChannelRevisionSnapshot is the immutable, non-secret snapshot of the
-// channel configuration an image task freezes against at revision creation
-// time. The secret key is never stored (the credential lives as a reference in
-// ChannelRevision.CredentialRef and is resolved to the channel's current key at
-// runtime); only the connection parameters and execution-relevant provider
-// settings needed to reproduce the task's provider call are captured.
+// imageChannelRevisionSnapshot is the immutable snapshot of the channel
+// configuration an image task freezes against at revision creation time, so a
+// later channel edit/disable/delete cannot change how an in-flight task shapes
+// its provider call. It captures every field the runtime request path consumes
+// (middleware/distributor.go + relay/image_handler.go): the image execution
+// config, the structured provider settings, the type-specific other settings,
+// param/header overrides, the OpenAI organization, and the model mapping.
+//
+// The channel's secret Key is NEVER stored here. Per §7.2 the credential is a
+// reference (ChannelRevision.CredentialRef = "channel:<id>") resolved to the
+// channel's current key at runtime, so a key rotation takes effect immediately
+// without re-freezing every revision. The overrides are frozen as provider
+// settings because they shape the request immutably; if a future product
+// decision wants override-embedded secrets to also rotate, the snapshot shape
+// (schema_version) is the bump point. The snapshot is processor-internal: it
+// lives in ChannelRevision.Settings, is never returned by the preview/read
+// endpoints, and never enters logs or SSE.
 type imageChannelRevisionSnapshot struct {
-	SchemaVersion    int             `json:"schema_version"`
-	ExecutionConfig  json.RawMessage `json:"execution_config,omitempty"`
-	ProviderSettings json.RawMessage `json:"provider_settings,omitempty"`
+	SchemaVersion      int    `json:"schema_version"`
+	ExecutionConfig    string `json:"execution_config,omitempty"`
+	ProviderSettings   string `json:"provider_settings,omitempty"`   // Channel.Setting (proxy/extras)
+	OtherSettings      string `json:"other_settings,omitempty"`      // Channel.OtherSettings (type-specific)
+	ParamOverride      string `json:"param_override,omitempty"`      // request param overrides
+	HeaderOverride     string `json:"header_override,omitempty"`     // request header overrides
+	OpenAIOrganization string `json:"openai_organization,omitempty"` // OpenAI org
+	ModelMapping       string `json:"model_mapping,omitempty"`       // model redirect mapping
 }
 
 // recalcMultiKeySize recomputes MultiKeySize (and trims stale per-key status)
@@ -99,25 +115,45 @@ func (channel *Channel) ImageExecutionConfigBytes() []byte {
 	return []byte(trimmed)
 }
 
+// trimmedStringPtr returns the trimmed value of a *string field, or "".
+func trimmedStringPtr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(*p)
+}
+
+// nonEmptyJSONString returns the trimmed value of a *string JSON field, or ""
+// when it is empty or an insignificant "{}" so the snapshot omits no-op config.
+func nonEmptyJSONString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(*p)
+	if trimmed == "" || trimmed == "{}" {
+		return ""
+	}
+	return trimmed
+}
+
 // BuildImageChannelRevision constructs the immutable revision snapshot for an
 // image-capable channel. Endpoint is the resolved (custom or type-default)
-// URL; Proxy is the channel's configured proxy; Settings is a versioned,
-// non-secret snapshot DTO carrying the image execution config and the
-// adapter's provider settings (the secret key is never included — only the
-// channel reference is, in CredentialRef, resolved to the live key at
-// runtime). adapterVersion is the adapter implementation version supplied by
-// the caller (service layer), not an API-type alias.
+// URL; Proxy is the channel's configured proxy; Settings is a versioned
+// snapshot carrying every runtime-consumed provider-settings field (the secret
+// key is never included — only the channel reference is, in CredentialRef,
+// resolved to the live key at runtime per §7.2). adapterVersion is the adapter
+// implementation version supplied by the caller (service layer), not an
+// API-type alias.
 func (channel *Channel) BuildImageChannelRevision(adapterVersion string) (ChannelRevisionCreate, error) {
 	snapshot := imageChannelRevisionSnapshot{
-		SchemaVersion: imageRevisionSnapshotSchemaVersion,
-	}
-	if configBytes := channel.ImageExecutionConfigBytes(); len(configBytes) > 0 {
-		snapshot.ExecutionConfig = append(snapshot.ExecutionConfig, configBytes...)
-	}
-	if channel.Setting != nil {
-		if setting := strings.TrimSpace(*channel.Setting); setting != "" && setting != "{}" {
-			snapshot.ProviderSettings = append(snapshot.ProviderSettings, []byte(setting)...)
-		}
+		SchemaVersion:      imageRevisionSnapshotSchemaVersion,
+		ExecutionConfig:    string(channel.ImageExecutionConfigBytes()),
+		ProviderSettings:   nonEmptyJSONString(channel.Setting),
+		OtherSettings:      strings.TrimSpace(channel.OtherSettings),
+		ParamOverride:      nonEmptyJSONString(channel.ParamOverride),
+		HeaderOverride:     nonEmptyJSONString(channel.HeaderOverride),
+		OpenAIOrganization: trimmedStringPtr(channel.OpenAIOrganization),
+		ModelMapping:       nonEmptyJSONString(channel.ModelMapping),
 	}
 	settingsBytes, err := common.Marshal(snapshot)
 	if err != nil {
@@ -204,5 +240,46 @@ func UpdateChannelWithImageRevision(channel *Channel, buildRevision ChannelRevis
 		}
 		_, err = createChannelRevisionInTx(tx, *revision)
 		return err
+	})
+}
+
+// BatchInsertChannelsWithImageRevision inserts every channel in the batch, its
+// abilities, and (via buildRevision) its immutable revision inside a SINGLE
+// transaction. This preserves the all-or-nothing semantics of BatchInsertChannels
+// for image-capable batches: if any channel's ability write or revision build or
+// persist fails, the whole batch rolls back so a retry never produces a partial
+// or duplicated batch. buildRevision runs per channel after its Create so the
+// channel id is backfilled before the snapshot/credential reference is built.
+func BatchInsertChannelsWithImageRevision(channels []Channel, buildRevision ChannelRevisionBuilder) error {
+	if len(channels) == 0 {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		for i := range channels {
+			channel := &channels[i]
+			if err := tx.Create(channel).Error; err != nil {
+				return err
+			}
+			if err := channel.AddAbilities(tx); err != nil {
+				return err
+			}
+			if buildRevision == nil {
+				continue
+			}
+			revision, err := buildRevision(channel)
+			if err != nil {
+				return err
+			}
+			if revision == nil {
+				continue
+			}
+			if err := validateRevisionSettings(revision.Settings); err != nil {
+				return err
+			}
+			if _, err := createChannelRevisionInTx(tx, *revision); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }

@@ -693,11 +693,11 @@ func AddChannel(c *gin.Context) {
 		common.ApiError(c, probeErr)
 		return
 	} else if probe != nil {
-		for i := range channels {
-			if err := model.InsertChannelWithImageRevision(&channels[i], imageRevisionBuilder); err != nil {
-				common.ApiError(c, err)
-				return
-			}
+		// 图片能力批次：整批 channel + abilities + revisions 共用一个事务，
+		// 任一条失败整批回滚，保留 BatchInsertChannels 的 all-or-nothing 语义。
+		if err := model.BatchInsertChannelsWithImageRevision(channels, imageRevisionBuilder); err != nil {
+			common.ApiError(c, err)
+			return
 		}
 	} else {
 		if err := model.BatchInsertChannels(channels); err != nil {
