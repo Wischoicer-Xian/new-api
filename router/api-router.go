@@ -77,6 +77,19 @@ func SetApiRouter(router *gin.Engine) {
 		// Universal secure verification routes
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.UniversalVerify)
 
+		// Wischoicer 钱包 UserAuth façade（WIS-545 S2）：浏览器 ↔ new-api 钱包。
+		// 仅在 Token A + billing 基址配置齐全时挂载（fail-closed）；UserAuth 保护，
+		// numeric user ID 只从登录上下文派生；金额档位服务端门禁。浏览器永远拿不到
+		// billing 地址/token/quota/内部错误码（详见 controller/wischoicer_wallet.go）。
+		if common.WischoicerWalletRechargeEnabled {
+			walletRoute := apiRouter.Group("/wallet", middleware.UserAuth())
+			{
+				walletRoute.POST("/recharges", middleware.CriticalRateLimit(), controller.CreateWischoicerWalletRecharge)
+				walletRoute.GET("/recharges", controller.ListWischoicerWalletRecharges)
+				walletRoute.GET("/recharges/:orderNo", controller.GetWischoicerWalletRecharge)
+			}
+		}
+
 		userRoute := apiRouter.Group("/user")
 		{
 			userRoute.POST("/register", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Register)
