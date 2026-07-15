@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/service"
@@ -26,13 +27,26 @@ import (
 //     前端无法改金额/quota/用户归属，绕过前端直接构造越界金额一律被拒。
 //   - billing 内部错误码一律映射为用户文案，不透传 code/HTTP/quota/token。
 
-// wischoicerBillingClientInstance 是钱包 façade 使用的 billing Token A client。
-// 包级变量便于测试注入 mock（E2E 依赖 S3 端点就绪）。首次请求时惰性初始化。
+// wischoicerBillingClientInstance 是钱包 façade 使用的 billing Token A client
+// （包级单例，E2E 依赖 S3 端点就绪；测试可经 injectMockBillingClient 注入）。
+// wischoicerBillingClientMu 保护它的惰性初始化与测试注入：生产并发首次调用只创建
+// 一次，读用 RLock、写（初始化 / 注入）用 Lock，杜绝读/写竞争（WIS-550 R3 race 返修）。
 var (
+	wischoicerBillingClientMu       sync.RWMutex
 	wischoicerBillingClientInstance service.WischoicerBillingClient
 )
 
 func getWischoicerBillingClient() service.WischoicerBillingClient {
+	wischoicerBillingClientMu.RLock()
+	c := wischoicerBillingClientInstance
+	wischoicerBillingClientMu.RUnlock()
+	if c != nil {
+		return c
+	}
+
+	wischoicerBillingClientMu.Lock()
+	defer wischoicerBillingClientMu.Unlock()
+	// 拿到写锁后必须复查：等待期间可能已有别的 goroutine 完成初始化。
 	if wischoicerBillingClientInstance != nil {
 		return wischoicerBillingClientInstance
 	}

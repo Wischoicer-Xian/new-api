@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -45,9 +46,46 @@ func (m *mockBillingClient) ListRechargeOrders(ctx context.Context, newApiUserID
 
 func injectMockBillingClient(t *testing.T, m service.WischoicerBillingClient) {
 	t.Helper()
+	// 注入与恢复都走写锁：与生产惰性初始化共用同一把锁，不留并发读写口子。
+	wischoicerBillingClientMu.Lock()
 	original := wischoicerBillingClientInstance
 	wischoicerBillingClientInstance = m
-	t.Cleanup(func() { wischoicerBillingClientInstance = original })
+	wischoicerBillingClientMu.Unlock()
+	t.Cleanup(func() {
+		wischoicerBillingClientMu.Lock()
+		wischoicerBillingClientInstance = original
+		wischoicerBillingClientMu.Unlock()
+	})
+}
+
+// TestWalletBillingClient_ConcurrentGetterIsRaceFree 回归 WIS-550 R3：并发首次调用
+// getWischoicerBillingClient 必须只创建一个实例、无数据竞争（go test -race 必须通过）。
+// 原实现对包级 interface 做无同步惰性初始化，64 并发即触发 :36 读 / :39 写竞争。
+func TestWalletBillingClient_ConcurrentGetterIsRaceFree(t *testing.T) {
+	// 从 nil 开始，强制走惰性初始化路径（正是原 bug 命中的并发读写处）。
+	injectMockBillingClient(t, nil)
+
+	const n = 64
+	results := make([]service.WischoicerBillingClient, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i] = getWischoicerBillingClient()
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// 所有并发调用者观察到同一个非 nil 实例（只初始化一次）。
+	require.NotNil(t, results[0])
+	for i := 1; i < n; i++ {
+		require.Same(t, results[0], results[i], "goroutine %d observed a different client", i)
+	}
 }
 
 func callCreate(t *testing.T, userID int, body string) *httptest.ResponseRecorder {
