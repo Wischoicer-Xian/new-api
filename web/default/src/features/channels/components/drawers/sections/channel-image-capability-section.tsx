@@ -38,87 +38,17 @@ import {
 
 import { previewImageCapability } from '../../../api'
 import type { ChannelFormValues } from '../../../lib/channel-form'
-
-type ImageOperation = 'generation' | 'edit'
-type ImageMode = 'sync' | 'async_task'
-type ImageOverride = {
-  model: string
-  operation: ImageOperation
-  mode: ImageMode
-}
-
-const OPERATIONS: ImageOperation[] = ['generation', 'edit']
-
-function isImageMode(value: unknown): value is ImageMode {
-  return value === 'sync' || value === 'async_task'
-}
-
-// parseImageConfig derives a structured view from the persisted
-// image_execution_config JSON string. Unknown or malformed values are dropped
-// rather than carried forward, so the form field is the single source of truth
-// and the editor never silently preserves an invalid shape.
-function parseImageConfig(raw: string | undefined | null): {
-  generation: string
-  edit: string
-  overrides: ImageOverride[]
-} {
-  const base = { generation: '', edit: '', overrides: [] as ImageOverride[] }
-  if (!raw || !raw.trim()) return base
-  try {
-    const obj = JSON.parse(raw) as {
-      defaults?: Record<string, unknown>
-      models?: Record<string, Record<string, unknown>>
-    }
-    const generation = obj.defaults?.generation
-    const edit = obj.defaults?.edit
-    const overrides: ImageOverride[] = []
-    if (obj.models) {
-      for (const [model, ops] of Object.entries(obj.models)) {
-        if (!ops || typeof ops !== 'object') continue
-        for (const [op, mode] of Object.entries(ops)) {
-          if ((op === 'generation' || op === 'edit') && isImageMode(mode)) {
-            overrides.push({
-              model,
-              operation: op,
-              mode: mode as ImageMode,
-            })
-          }
-        }
-      }
-    }
-    return {
-      generation: isImageMode(generation) ? (generation as ImageMode) : '',
-      edit: isImageMode(edit) ? (edit as ImageMode) : '',
-      overrides,
-    }
-  } catch {
-    return base
-  }
-}
-
-// serializeImageConfig rebuilds the image_execution_config JSON from the
-// structured editor state. Returns an empty string when nothing is configured
-// so an untouched channel stays out of the image task candidate pool.
-function serializeImageConfig(
-  generation: string,
-  edit: string,
-  overrides: ImageOverride[]
-): string {
-  const defaults: Record<string, ImageMode> = {}
-  if (isImageMode(generation)) defaults.generation = generation
-  if (isImageMode(edit)) defaults.edit = edit
-  const models: Record<string, Record<string, ImageMode>> = {}
-  for (const override of overrides) {
-    const model = override.model.trim()
-    if (!model) continue
-    if (!models[model]) models[model] = {}
-    models[model][override.operation] = override.mode
-  }
-  const obj: Record<string, unknown> = {}
-  if (Object.keys(defaults).length > 0) obj.defaults = defaults
-  if (Object.keys(models).length > 0) obj.models = models
-  return Object.keys(obj).length > 0 ? JSON.stringify(obj) : ''
-}
+import {
+  canAddOverride,
+  IMAGE_OPERATIONS,
+  isImageMode,
+  parseImageConfig,
+  serializeImageConfig,
+  shouldClearImageConfig,
+  type ImageMode,
+  type ImageOperation,
+  type ImageOverride,
+} from '../../../lib/image-config'
 
 type ChannelImageCapabilitySectionProps = {
   form: UseFormReturn<ChannelFormValues>
@@ -138,6 +68,11 @@ export function ChannelImageCapabilitySection({
   })
 
   const data = previewQuery.data?.data
+  const previewSuccess = previewQuery.data?.success === true
+  const previewErrorMessage =
+    previewQuery.data && previewQuery.data.success === false
+      ? previewQuery.data.message
+      : undefined
   const support = data?.support ?? {}
   const view = parseImageConfig(configRaw)
 
@@ -145,22 +80,21 @@ export function ChannelImageCapabilitySection({
   const [newOperation, setNewOperation] = useState<ImageOperation>('generation')
   const [newMode, setNewMode] = useState<ImageMode>('sync')
 
-  // P1-4: switching to a non-image-capable channel type must not leave a stale
-  // image_execution_config in the submitted payload. When the resolved preview
-  // reports the current type as not image-capable (or the type is unknown),
-  // clear the field so nothing stale is saved.
+  // P1-4 A: only clear a stale image_execution_config when the preview SUCCEEDED
+  // and explicitly reported image_capable === false (a registered adapter that
+  // the current type maps to). A preview business error ({success:false}, e.g.
+  // an unknown type or malformed config) must NOT silently wipe the field — the
+  // input is preserved and the error surfaced below so the admin can fix it.
   useEffect(() => {
     if (
-      previewQuery.data &&
-      !previewQuery.data.data?.image_capable &&
-      configRaw.trim() !== ''
+      shouldClearImageConfig(previewSuccess, data?.image_capable, configRaw)
     ) {
       form.setValue('image_execution_config', '', {
         shouldDirty: true,
         shouldValidate: true,
       })
     }
-  }, [previewQuery.data, configRaw, form])
+  }, [previewSuccess, data, configRaw, form])
 
   // Converge the override mode picker when the chosen operation or channel
   // support set changes so it never holds a mode the adapter does not support.
@@ -178,8 +112,31 @@ export function ChannelImageCapabilitySection({
     }
   }, [newOperation, data, newMode])
 
-  // Non-image-capable channel types have no image execution controls to show;
-  // the section collapses to nothing so the drawer looks unchanged for them.
+  // Loading / not yet resolved: render nothing.
+  if (!previewQuery.data) {
+    return null
+  }
+  // P1-4 A: a preview business error (HTTP 200 {success:false}, e.g. unknown
+  // channel type or malformed config) must preserve the field and surface the
+  // error rather than silently clearing it.
+  if (!previewSuccess) {
+    return (
+      <SideDrawerSection>
+        <SideDrawerSectionHeader
+          title={t('Image Task Execution')}
+          description={t(
+            'How single-image tasks run on this channel. Unsupported modes are disabled.'
+          )}
+          icon={<ImageIcon className='h-4 w-4' aria-hidden='true' />}
+        />
+        <p className='text-xs text-red-500'>
+          {previewErrorMessage ?? t('Failed to resolve image capability')}
+        </p>
+      </SideDrawerSection>
+    )
+  }
+  // Preview succeeded but the channel type is not image-capable: the controls
+  // are irrelevant. The cleanup effect has already cleared any stale config.
   if (!data || !data.image_capable) {
     return null
   }
@@ -242,7 +199,7 @@ export function ChannelImageCapabilitySection({
       />
 
       <div className='flex flex-col gap-4'>
-        {OPERATIONS.map((op) => {
+        {IMAGE_OPERATIONS.map((op) => {
           const current = op === 'generation' ? view.generation : view.edit
           const options = supportFor(op)
           return (
@@ -337,7 +294,7 @@ export function ChannelImageCapabilitySection({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {OPERATIONS.map((op) => (
+                {IMAGE_OPERATIONS.map((op) => (
                   <SelectItem key={op} value={op}>
                     {op}
                   </SelectItem>
@@ -366,7 +323,9 @@ export function ChannelImageCapabilitySection({
               variant='outline'
               size='sm'
               onClick={addOverride}
-              disabled={!newModel.trim()}
+              disabled={
+                !canAddOverride(newModel, newMode, supportFor(newOperation))
+              }
             >
               <Plus className='h-3.5 w-3.5' aria-hidden='true' />
               {t('Add')}
