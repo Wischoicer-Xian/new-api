@@ -122,3 +122,24 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 		assert.Equal(t, float64(imageRevisionSnapshotSchemaVersion), raw["schema_version"])
 	})
 }
+
+func TestImageRevision_FreezesOverrideSecretAtRestParity(t *testing.T) {
+	// At-rest parity (P1-1 scheme A): a secret placed in the live channel's
+	// HeaderOverride is frozen verbatim into the revision snapshot, exactly as
+	// the live channel stores it (plaintext). This proves the snapshot is parity
+	// with the live channel, not a downgrade. The frozen secret lives only in
+	// ChannelRevision.Settings (DB, processor-internal); it is never returned by
+	// any API — see TestImageCapabilityPreview_ResponseExcludesSnapshotFields.
+	secret := "AKIA-SECRET-DO-NOT-LEAK"
+	header := `{"Authorization":"Bearer ` + secret + `"}`
+	cfg := `{"defaults":{"generation":"sync"}}`
+	ch := Channel{
+		Id:                   7,
+		Type:                 constant.ChannelTypeOpenAI,
+		ImageExecutionConfig: &cfg,
+		HeaderOverride:       &header,
+	}
+	input, err := ch.BuildImageChannelRevision("openai-image-adapter/v1")
+	require.NoError(t, err)
+	assert.Contains(t, string(input.Settings), secret)
+}

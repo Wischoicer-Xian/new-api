@@ -87,3 +87,40 @@ func TestImageCapabilityPreview(t *testing.T) {
 		assert.True(t, data["image_capable"].(bool))
 	})
 }
+
+func TestImageCapabilityPreview_ResponseExcludesSnapshotFields(t *testing.T) {
+	// NO-LEAK guard: the preview endpoint resolves execution modes only. It must
+	// never surface ChannelRevision snapshot content (provider settings, overrides,
+	// endpoint, proxy) — those are processor-internal and may carry secrets. The
+	// response carries only the resolved-mode contract.
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := `{"type":1,"image_execution_config":"{\"defaults\":{\"generation\":\"sync\",\"edit\":\"sync\"}}"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	ImageCapabilityPreview(c)
+
+	var m map[string]any
+	require.NoError(t, common.Unmarshal(w.Body.Bytes(), &m))
+	require.True(t, m["success"].(bool))
+	data := m["data"].(map[string]any)
+
+	allowed := map[string]struct{}{
+		"image_capable":   {},
+		"adapter_version": {},
+		"support":         {},
+		"preview":         {},
+	}
+	for key := range data {
+		assert.Contains(t, allowed, key, "preview response must not expose non-contract key %q", key)
+	}
+	// Explicitly forbidden snapshot fields, both as parsed keys and raw body text.
+	for _, forbidden := range []string{
+		"settings", "provider_settings", "header_override", "param_override",
+		"endpoint", "proxy", "model_mapping", "other_settings",
+	} {
+		assert.NotContains(t, data, forbidden)
+		assert.NotContains(t, w.Body.String(), "\""+forbidden+"\"")
+	}
+}

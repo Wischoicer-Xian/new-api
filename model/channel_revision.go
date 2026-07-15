@@ -16,6 +16,16 @@ import (
 // The credential is stored as a reference resolved to the channel's current
 // value at runtime, so a key rotation takes effect immediately without
 // re-freezing every revision.
+//
+// NO-LEAK INVARIANT: ChannelRevision (and Settings in particular) is
+// processor-internal. It is written only by the image channel save path and
+// read only by the future image task processor (P3). No HTTP handler, SSE
+// event, or log line may serialize it into a response: the frozen overrides
+// can carry secrets the admin placed in the live channel, and exposing a
+// revision would surface every frozen historical value. The at-rest treatment
+// matches the live channel (plaintext columns, no field encryption), so the
+// snapshot is parity, not a downgrade — but it must never cross the API trust
+// boundary.
 type ChannelRevision struct {
 	ID             int64           `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
 	ChannelID      int             `json:"channel_id" gorm:"index;uniqueIndex:idx_channel_revision,priority:1"`
