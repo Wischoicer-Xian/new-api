@@ -37,6 +37,7 @@ import { listWischoicerRecharges } from '../../api'
 import {
   formatCentsAsYuan,
   getWischoicerRechargePhase,
+  toSafeRechargeList,
   type WischoicerWalletRechargeView,
 } from '../../lib/wischoicer-recharge'
 import { getWischoicerPhaseStatus } from '../../lib/wischoicer-recharge-ui'
@@ -67,7 +68,9 @@ export function WischoicerRechargeHistoryDialog(
     try {
       const res = await listWischoicerRecharges({ limit: PAGE_SIZE })
       if (res?.success && res.data) {
-        setItems(res.data.items ?? [])
+        // Project every item through the safe view before it hits state, so the
+        // list path gets the same no-leak guarantee as create/get.
+        setItems(toSafeRechargeList(res.data.items ?? []))
         setNextCursor(res.data.nextCursor)
       } else {
         setError(res?.message || t('Failed to load history'))
@@ -97,7 +100,7 @@ export function WischoicerRechargeHistoryDialog(
       })
       if (res?.success && res.data) {
         const data = res.data
-        setItems((prev) => [...prev, ...(data.items ?? [])])
+        setItems((prev) => [...prev, ...toSafeRechargeList(data.items ?? [])])
         setNextCursor(data.nextCursor)
       }
     } catch {
@@ -147,7 +150,21 @@ export function WischoicerRechargeHistoryDialog(
             getWischoicerRechargePhase(item.status),
             t
           )
-          const when = formatTimestampToDate(item.paidTime ?? item.expireTime)
+          // Label the timestamp by what it actually is — never pass the QR
+          // expiry off as a create/pay time. paidTime wins when the façade
+          // exposes it (PR#19); otherwise show the order's validity window.
+          let timeLabel: { label: string; value: string } | null = null
+          if (item.paidTime) {
+            timeLabel = {
+              label: t('Payment time'),
+              value: formatTimestampToDate(item.paidTime),
+            }
+          } else if (item.expireTime) {
+            timeLabel = {
+              label: t('Valid until'),
+              value: formatTimestampToDate(item.expireTime),
+            }
+          }
           return (
             <div key={item.orderNo} className='rounded-lg border p-3'>
               <div className='flex items-start justify-between gap-2'>
@@ -178,9 +195,11 @@ export function WischoicerRechargeHistoryDialog(
                   copyable={false}
                 />
               </div>
-              <div className='text-muted-foreground mt-1 text-xs'>
-                {t('Time')}: {when}
-              </div>
+              {timeLabel ? (
+                <div className='text-muted-foreground mt-1 text-xs'>
+                  {timeLabel.label}: {timeLabel.value}
+                </div>
+              ) : null}
             </div>
           )
         })}

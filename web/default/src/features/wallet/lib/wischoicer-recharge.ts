@@ -124,11 +124,14 @@ export function formatCentsAsYuan(cents: number): string {
 export const WISCHOICER_PENDING_RECHARGE_KEY = 'wischoicer_wallet_pending_recharge'
 
 export interface PersistedPendingRecharge {
-  orderNo: string
   clientRequestId: string
   amountCents: number
-  /** Unix seconds — copied from the create-order response's expireTime. */
-  expireTime: number
+  /** Filled once the create-order response arrives. Absent while the response
+   * is in flight — in that case mount recovery re-POSTs by clientRequestId
+   * (idempotent re-fetch) instead of GETting an unknown orderNo. */
+  orderNo?: string
+  /** Unix seconds — filled from the create-order response's expireTime. */
+  expireTime?: number
 }
 
 /** Mint a fresh idempotency key (1–64 chars, the server's limit). One per order
@@ -148,16 +151,23 @@ export function newClientRequestId(): string {
 
 function safeLocalStorage(): Storage | null {
   try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      return window.localStorage
+    const g = globalThis as {
+      localStorage?: Storage
+      window?: { localStorage?: Storage }
     }
+    // Prefer the global (the standard browser location, and an assignable slot
+    // under test runners); fall back to window.localStorage for completeness.
+    if (g.localStorage) return g.localStorage
+    if (g.window?.localStorage) return g.window.localStorage
   } catch {
     /* localStorage may throw in private mode / sandboxed contexts */
   }
   return null
 }
 
-/** Read the persisted in-flight pending order, or null if none / corrupt. */
+/** Read the persisted in-flight intent, or null if none / corrupt. Only
+ * `clientRequestId` + `amountCents` are required; `orderNo` / `expireTime` are
+ * absent until the create-order response arrives. */
 export function readPendingRecharge(): PersistedPendingRecharge | null {
   const ls = safeLocalStorage()
   if (!ls) return null
@@ -171,17 +181,21 @@ export function readPendingRecharge(): PersistedPendingRecharge | null {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     if (
-      typeof parsed.orderNo === 'string' &&
       typeof parsed.clientRequestId === 'string' &&
-      typeof parsed.amountCents === 'number' &&
-      typeof parsed.expireTime === 'number'
+      parsed.clientRequestId.length > 0 &&
+      typeof parsed.amountCents === 'number'
     ) {
-      return {
-        orderNo: parsed.orderNo,
+      const out: PersistedPendingRecharge = {
         clientRequestId: parsed.clientRequestId,
         amountCents: parsed.amountCents,
-        expireTime: parsed.expireTime,
       }
+      if (typeof parsed.orderNo === 'string' && parsed.orderNo.length > 0) {
+        out.orderNo = parsed.orderNo
+      }
+      if (typeof parsed.expireTime === 'number') {
+        out.expireTime = parsed.expireTime
+      }
+      return out
     }
   } catch {
     /* corrupt JSON — treat as absent */
@@ -189,27 +203,31 @@ export function readPendingRecharge(): PersistedPendingRecharge | null {
   return null
 }
 
-/** Persist the in-flight pending order so refresh can recover it. Silent on
- * failure (storage unavailable) — the order is still recoverable via history. */
+/** Persist the in-flight intent so refresh/retry can recover it. The intent is
+ * written BEFORE the create POST (with just clientRequestId + amountCents) and
+ * upgraded with orderNo / expireTime once the response arrives. Silent on
+ * failure (storage unavailable). */
 export function writePendingRecharge(order: PersistedPendingRecharge): void {
   const ls = safeLocalStorage()
   if (!ls) return
   try {
-    ls.setItem(
-      WISCHOICER_PENDING_RECHARGE_KEY,
-      JSON.stringify({
-        orderNo: order.orderNo,
-        clientRequestId: order.clientRequestId,
-        amountCents: order.amountCents,
-        expireTime: order.expireTime,
-      })
-    )
+    const payload: Record<string, unknown> = {
+      clientRequestId: order.clientRequestId,
+      amountCents: order.amountCents,
+    }
+    if (order.orderNo) {
+      payload.orderNo = order.orderNo
+    }
+    if (typeof order.expireTime === 'number') {
+      payload.expireTime = order.expireTime
+    }
+    ls.setItem(WISCHOICER_PENDING_RECHARGE_KEY, JSON.stringify(payload))
   } catch {
     /* ignore quota / private mode */
   }
 }
 
-/** Clear the persisted in-flight pending order (on success / close / cancel). */
+/** Clear the persisted in-flight intent (on terminal success / close / cancel). */
 export function clearPendingRecharge(): void {
   const ls = safeLocalStorage()
   if (!ls) return
@@ -218,6 +236,46 @@ export function clearPendingRecharge(): void {
   } catch {
     /* ignore */
   }
+}
+
+// ---------------------------------------------------------------------------
+// Intent decisions (pure) — the core idempotency / recovery invariants
+// ---------------------------------------------------------------------------
+
+export interface CreateIntentDecision {
+  clientRequestId: string
+  /** true when an in-flight intent for the SAME amount is being reused, so the
+   * server returns the original order instead of creating a duplicate (the
+   * invariant that survives a dropped create response). */
+  reused: boolean
+}
+
+/** Decide which clientRequestId to use for a create attempt. The same intent
+ * (same amount, result unknown) MUST reuse the persisted idempotency key — that
+ * is what stops a retry / page refresh from creating a duplicate order when the
+ * first response was lost. A different amount (or no prior intent) starts a
+ * fresh key. Pure on purpose: this decision is the thing the tests lock down. */
+export function resolveCreateIntent(
+  persisted: PersistedPendingRecharge | null,
+  amountCents: number
+): CreateIntentDecision {
+  if (persisted && persisted.amountCents === amountCents) {
+    return { clientRequestId: persisted.clientRequestId, reused: true }
+  }
+  return { clientRequestId: newClientRequestId(), reused: false }
+}
+
+export type RecoveryAction = 'none' | 'get' | 'repost'
+
+/** Decide how to recover an in-flight intent on mount. With the orderNo known,
+ * GET it; without it (create response was lost), re-POST idempotently with the
+ * same clientRequestId to re-fetch the original order rather than abandon it. */
+export function resolveRecoveryAction(
+  persisted: PersistedPendingRecharge | null
+): RecoveryAction {
+  if (!persisted) return 'none'
+  if (persisted.orderNo) return 'get'
+  return 'repost'
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +347,14 @@ export function toSafeRechargeView(raw: unknown): WischoicerWalletRechargeView {
     view.paidTime = o.paidTime
   }
   return view
+}
+
+/** Project a whole history page through `toSafeRechargeView`, so the list path
+ * gets the same defense in depth as the create/get path — a leaked quota / token
+ * / internal field in any item is dropped before it reaches state. */
+export function toSafeRechargeList(items: unknown): WischoicerWalletRechargeView[] {
+  if (!Array.isArray(items)) return []
+  return items.map((item) => toSafeRechargeView(item))
 }
 
 /** Known safe keys — used by tests to assert no internal field ever leaks. */

@@ -37,13 +37,23 @@ import {
   isWischoicerRechargeTier,
   newClientRequestId,
   readPendingRecharge,
+  resolveCreateIntent,
+  resolveRecoveryAction,
   SAFE_RECHARGE_VIEW_KEYS,
+  toSafeRechargeList,
   toSafeRechargeView,
   writePendingRecharge,
 } from './wischoicer-recharge'
 
-// Minimal localStorage shim so the persistence helpers can be exercised under Bun.
+// Ensure a localStorage is present for the persistence helpers. If a real one
+// already exists (e.g. happy-dom registered globally by a sibling test file in
+// the same process), reuse + clear it; otherwise install an in-memory shim.
 function installFakeLocalStorage() {
+  const existing = (globalThis as { localStorage?: Storage }).localStorage
+  if (existing) {
+    existing.clear()
+    return
+  }
   const store = new Map<string, string>()
   const ls: Storage = {
     get length() {
@@ -59,8 +69,6 @@ function installFakeLocalStorage() {
       store.set(k, String(v))
     },
   }
-  ;(globalThis as { window?: unknown }).window = globalThis.window ?? {}
-  ;(globalThis as { window: Record<string, unknown> }).window.localStorage = ls
   ;(globalThis as { localStorage?: Storage }).localStorage = ls
 }
 
@@ -158,6 +166,18 @@ describe('wischoicer recharge — clientRequestId idempotency & recovery', () =>
     expect(readPendingRecharge()).toEqual(order)
   })
 
+  it('persists the intent BEFORE the orderNo is known (lost-response shape)', () => {
+    // createOrder writes {clientRequestId, amountCents} before the POST; if the
+    // response drops, the row has no orderNo and must still round-trip.
+    expect(readPendingRecharge()).toBeNull()
+    writePendingRecharge({ clientRequestId: 'rc-pre', amountCents: 5000 })
+    const read = readPendingRecharge()
+    expect(read).not.toBeNull()
+    expect(read).toEqual({ clientRequestId: 'rc-pre', amountCents: 5000 })
+    expect(read?.orderNo).toBeUndefined()
+    expect(read?.expireTime).toBeUndefined()
+  })
+
   it('clears the persisted order on terminal resolution', () => {
     writePendingRecharge({
       orderNo: 'ORD456',
@@ -171,8 +191,7 @@ describe('wischoicer recharge — clientRequestId idempotency & recovery', () =>
   })
 
   it('ignores corrupt persisted data instead of crashing', () => {
-    const ls = (globalThis as { window: { localStorage: Storage } }).window
-      .localStorage
+    const ls = (globalThis as { localStorage: Storage }).localStorage
     ls.setItem(WISCHOICER_PENDING_RECHARGE_KEY, '{not json')
     expect(readPendingRecharge()).toBeNull()
     ls.setItem(
@@ -180,6 +199,19 @@ describe('wischoicer recharge — clientRequestId idempotency & recovery', () =>
       JSON.stringify({ orderNo: 123, clientRequestId: 'x' })
     )
     expect(readPendingRecharge()).toBeNull()
+  })
+
+  it('survives a lost create response without producing a duplicate order', () => {
+    // R2 P1 scenario: server created the order but the response dropped.
+    // 1) createOrder persisted the intent BEFORE the POST (no orderNo yet).
+    writePendingRecharge({ clientRequestId: 'rc-lost', amountCents: 5000 })
+    // 2) On retry the SAME amount MUST reuse the SAME key (idempotent re-fetch),
+    //    never mint a new one that would create a second pending order.
+    const retry = resolveCreateIntent(readPendingRecharge(), 5000)
+    expect(retry).toEqual({ clientRequestId: 'rc-lost', reused: true })
+    // 3) On refresh the orderNo is still unknown, so recovery re-POSTs with the
+    //    same key instead of abandoning the order the server already created.
+    expect(resolveRecoveryAction(readPendingRecharge())).toBe('repost')
   })
 })
 
@@ -213,6 +245,47 @@ describe('wischoicer recharge — countdown / expiry', () => {
     expect(formatCountdown(59)).toBe('00:59')
     expect(formatCountdown(0)).toBe('00:00')
     expect(formatCountdown(-5)).toBe('00:00')
+  })
+})
+
+describe('wischoicer recharge — intent decisions (pure)', () => {
+  it('resolveCreateIntent reuses the same key for an in-flight same-amount intent', () => {
+    const decision = resolveCreateIntent(
+      { clientRequestId: 'rc-same', amountCents: 5000 },
+      5000
+    )
+    expect(decision.reused).toBe(true)
+    expect(decision.clientRequestId).toBe('rc-same')
+  })
+
+  it('resolveCreateIntent mints a fresh key for a different amount (new intent)', () => {
+    const decision = resolveCreateIntent(
+      { clientRequestId: 'rc-same', amountCents: 5000 },
+      10000
+    )
+    expect(decision.reused).toBe(false)
+    expect(decision.clientRequestId).not.toBe('rc-same')
+    expect(decision.clientRequestId.length).toBeGreaterThan(0)
+  })
+
+  it('resolveCreateIntent mints a fresh key when there is no prior intent', () => {
+    const decision = resolveCreateIntent(null, 20000)
+    expect(decision.reused).toBe(false)
+    expect(decision.clientRequestId.length).toBeGreaterThan(0)
+  })
+
+  it('resolveRecoveryAction routes by whether the orderNo is known', () => {
+    expect(resolveRecoveryAction(null)).toBe('none')
+    expect(
+      resolveRecoveryAction({ clientRequestId: 'rc', amountCents: 5000 })
+    ).toBe('repost')
+    expect(
+      resolveRecoveryAction({
+        clientRequestId: 'rc',
+        amountCents: 5000,
+        orderNo: 'ORD1',
+      })
+    ).toBe('get')
   })
 })
 
@@ -274,5 +347,48 @@ describe('wischoicer recharge — no-leak projection', () => {
     expect(view.codeUrl).toBeUndefined()
     expect(toSafeRechargeView(null).status).toBe('')
     expect(toSafeRechargeView(undefined).currency).toBe('CNY')
+  })
+
+  it('projects paidTime through (forward-compatible with the PR#19 façade)', () => {
+    expect(
+      toSafeRechargeView({
+        orderNo: 'ORD3',
+        amountCents: 5000,
+        currency: 'CNY',
+        status: 'SUCCESS',
+        paidTime: 1_700_000_200,
+      }).paidTime
+    ).toBe(1_700_000_200)
+  })
+
+  it('toSafeRechargeList projects every item and strips internals on the list path', () => {
+    const items = toSafeRechargeList([
+      {
+        orderNo: 'A',
+        amountCents: 5000,
+        currency: 'CNY',
+        status: 'SUCCESS',
+        paidTime: 1,
+        quota: 987654321,
+        token: 't',
+      },
+      {
+        orderNo: 'B',
+        amountCents: 10000,
+        currency: 'CNY',
+        status: 'PENDING_PAYMENT',
+        internalTrace: '0xaf',
+      },
+    ])
+    expect(items).toHaveLength(2)
+    expect(items[0].orderNo).toBe('A')
+    expect(items[0].paidTime).toBe(1)
+    expect(items[0]).not.toHaveProperty('quota')
+    expect(items[0]).not.toHaveProperty('token')
+    expect(items[1]).not.toHaveProperty('internalTrace')
+    // Non-array inputs collapse to an empty list, never throw.
+    expect(toSafeRechargeList(null)).toEqual([])
+    expect(toSafeRechargeList('nope')).toEqual([])
+    expect(toSafeRechargeList(undefined)).toEqual([])
   })
 })

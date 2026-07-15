@@ -5208,6 +5208,8 @@
     "Payment was received but crediting failed. Please contact support.": "Payment was received but crediting failed. Please contact support.",
     "Updating order status, please wait": "Updating order status, please wait",
     "Processing": "Processing",
-    "History": "History"
+    "History": "History",
+    "Payment time": "Payment time",
+    "Valid until": "Valid until"
   }
 }

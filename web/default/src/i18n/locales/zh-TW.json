@@ -5208,6 +5208,8 @@
     "Payment was received but crediting failed. Please contact support.": "已收到付款但入帳失敗，請聯繫客服",
     "Updating order status, please wait": "正在更新訂單狀態，請稍候",
     "Processing": "處理中",
-    "History": "充值記錄"
+    "History": "充值記錄",
+    "Payment time": "付款時間",
+    "Valid until": "有效期限"
   }
 }

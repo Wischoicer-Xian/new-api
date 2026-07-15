@@ -31,8 +31,9 @@ import {
   getWischoicerRechargePhase,
   isWischoicerRechargeTerminal,
   isWischoicerRechargeTier,
-  newClientRequestId,
   readPendingRecharge,
+  resolveCreateIntent,
+  resolveRecoveryAction,
   toSafeRechargeView,
   writePendingRecharge,
   type WischoicerRechargePhase,
@@ -41,6 +42,8 @@ import {
 
 // Poll the order status this often while waiting for payment / crediting.
 const POLL_INTERVAL_MS = 3000
+
+const nowSeconds = () => Math.floor(Date.now() / 1000)
 
 export interface UseWischoicerRechargeResult {
   /** null while probing; true once the wallet façade is mounted, false otherwise. */
@@ -64,10 +67,19 @@ export interface UseWischoicerRechargeResult {
 
 /**
  * Drives the WeChat Native wallet recharge lifecycle against the new-api wallet
- * façade. Handles idempotent create (stable per-order clientRequestId), page
- * refresh recovery, QR countdown/expiry, status polling across every backend
- * phase, and balance refresh on success. Never surfaces quota / token / internal
- * codes — the server already maps those to safe messages, and `toSafeRechargeView`
+ * façade.
+ *
+ * Idempotency invariant: one recharge intent reuses a single clientRequestId
+ * across its first POST, any result-unknown retry, and page-refresh recovery —
+ * so a create response that was lost (server created the order, client never saw
+ * it) never turns into a duplicate order. The intent is persisted to localStorage
+ * BEFORE the POST, and only rotated when the user starts a genuinely new intent.
+ * On mount, an intent without an orderNo is recovered by re-POSTing with the
+ * same key (billing returns the original order); one with an orderNo is GETted.
+ *
+ * Balance refresh fires exactly once on SUCCESS, whether the success is learned
+ * from polling or from mount recovery. Never surfaces quota / token / internal
+ * codes — the server maps those to safe messages, and `toSafeRechargeView`
  * strips anything else.
  */
 export function useWischoicerRecharge(
@@ -83,9 +95,8 @@ export function useWischoicerRecharge(
 
   // Latest order without re-subscribing the polling effect on every poll tick.
   const orderRef = useRef<WischoicerWalletRechargeView | null>(null)
-  // clientRequestId for the current order intent: reused across retries of the
-  // same intent, regenerated only when the user starts a new intent.
-  const clientRequestIdRef = useRef<string>(newClientRequestId())
+  // clientRequestId for the current intent; rotated only on a new intent.
+  const clientRequestIdRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
   const successFiredRef = useRef(false)
 
@@ -106,15 +117,34 @@ export function useWischoicerRecharge(
     return { safe, nextPhase }
   }, [])
 
-  const tickCountdown = useCallback((nowSeconds: number) => {
+  const tickCountdown = useCallback((now: number) => {
     const current = orderRef.current
     if (!current?.expireTime) {
       return
     }
-    const cd = getCountdown(current.expireTime, nowSeconds)
+    const cd = getCountdown(current.expireTime, now)
     setRemainingSeconds(cd.remainingSeconds)
     setExpired(cd.expired)
   }, [])
+
+  // Shared terminal handling: SUCCESS clears the intent and refreshes the
+  // balance exactly once (whether reached by poll or by mount recovery); other
+  // terminal phases just clear the intent.
+  const handleTerminalPhase = useCallback(
+    (nextPhase: WischoicerRechargePhase) => {
+      if (nextPhase === 'success') {
+        clearPendingRecharge()
+        if (!successFiredRef.current) {
+          successFiredRef.current = true
+          onRechargeSuccess?.()
+          toast.success(i18next.t('Recharge successful'))
+        }
+      } else if (isWischoicerRechargeTerminal(nextPhase)) {
+        clearPendingRecharge()
+      }
+    },
+    [onRechargeSuccess]
+  )
 
   const pollOnce = useCallback(
     async (orderNo: string) => {
@@ -124,25 +154,18 @@ export function useWischoicerRecharge(
         if (!res?.success || !res.data) return
 
         const { nextPhase } = applyOrder(res.data)
-        tickCountdown(Math.floor(Date.now() / 1000))
-        if (nextPhase === 'success') {
-          clearPendingRecharge()
-          if (!successFiredRef.current) {
-            successFiredRef.current = true
-            onRechargeSuccess?.()
-            toast.success(i18next.t('Recharge successful'))
-          }
-        } else if (isWischoicerRechargeTerminal(nextPhase)) {
-          clearPendingRecharge()
-        }
+        tickCountdown(nowSeconds())
+        handleTerminalPhase(nextPhase)
       } catch {
         // Transient fetch failure — keep polling; never surface internal details.
       }
     },
-    [applyOrder, onRechargeSuccess, tickCountdown]
+    [applyOrder, handleTerminalPhase, tickCountdown]
   )
 
-  // Mount: probe availability + recover an in-flight pending order.
+  // Mount: probe availability + recover an in-flight intent (re-POST if its
+  // response was lost, GET if we already have the orderNo). A transient failure
+  // here KEEPS the intent so the next mount/retry can still recover it.
   useEffect(() => {
     let cancelled = false
     void (async () => {
@@ -153,29 +176,49 @@ export function useWischoicerRecharge(
 
       const pending = readPendingRecharge()
       if (!pending) return
+      const action = resolveRecoveryAction(pending)
+      if (action === 'none') return
+
       try {
-        const res = await getWischoicerRecharge(pending.orderNo)
-        if (cancelled || !mountedRef.current) return
-        if (res?.success && res.data) {
-          const { nextPhase } = applyOrder(res.data)
-          // Resume only a still-live order; otherwise drop the stale row.
-          if (isWischoicerRechargeTerminal(nextPhase)) {
-            clearPendingRecharge()
-          } else {
-            clientRequestIdRef.current = pending.clientRequestId
-            tickCountdown(Math.floor(Date.now() / 1000))
-          }
+        let data: WischoicerWalletRechargeView | null = null
+        if (action === 'get' && pending.orderNo) {
+          const res = await getWischoicerRecharge(pending.orderNo)
+          if (res?.success && res.data) data = res.data
         } else {
-          clearPendingRecharge()
+          // repost: idempotent re-fetch of an order whose create response dropped
+          const res = await createWischoicerRecharge({
+            clientRequestId: pending.clientRequestId,
+            amountCents: pending.amountCents,
+          })
+          if (res?.success && res.data) data = res.data
         }
+        if (cancelled || !mountedRef.current) return
+
+        if (!data) {
+          // Definitive non-success (not found / conflict / ...): drop stale intent.
+          clearPendingRecharge()
+          return
+        }
+
+        const { safe, nextPhase } = applyOrder(data)
+        // Now that we have the orderNo / expireTime, upgrade the persisted intent.
+        writePendingRecharge({
+          clientRequestId: pending.clientRequestId,
+          amountCents: pending.amountCents,
+          orderNo: safe.orderNo,
+          expireTime: safe.expireTime,
+        })
+        clientRequestIdRef.current = pending.clientRequestId
+        tickCountdown(nowSeconds())
+        handleTerminalPhase(nextPhase)
       } catch {
-        clearPendingRecharge()
+        // Transient failure — leave the intent persisted for the next recovery.
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [applyOrder, tickCountdown])
+  }, [applyOrder, handleTerminalPhase, tickCountdown])
 
   // Polling + 1s countdown clock while an order is live and non-terminal.
   // Depends on orderNo + phase only, so it does not tear down on every poll.
@@ -187,7 +230,7 @@ export function useWischoicerRecharge(
     let cancelled = false
     const clock = setInterval(() => {
       if (!cancelled && mountedRef.current) {
-        tickCountdown(Math.floor(Date.now() / 1000))
+        tickCountdown(nowSeconds())
       }
     }, 1000)
     const poll = setInterval(() => {
@@ -215,9 +258,18 @@ export function useWischoicerRecharge(
         return false
       }
 
-      // New intent -> fresh idempotency key; drop any prior in-flight order.
-      clientRequestIdRef.current = newClientRequestId()
-      clearPendingRecharge()
+      // Same intent (same amount, result unknown) reuses the persisted
+      // clientRequestId; a different amount / first attempt mints a fresh one.
+      const { clientRequestId } = resolveCreateIntent(
+        readPendingRecharge(),
+        amountCents
+      )
+      clientRequestIdRef.current = clientRequestId
+
+      // Persist the intent BEFORE the POST so a lost response is recoverable:
+      // mount recovery will re-POST with this same key and get the original order.
+      writePendingRecharge({ clientRequestId, amountCents })
+
       orderRef.current = null
       setOrder(null)
       setPhase('pending_payment')
@@ -228,13 +280,14 @@ export function useWischoicerRecharge(
       setCreating(true)
       try {
         const res = await createWischoicerRecharge({
-          clientRequestId: clientRequestIdRef.current,
+          clientRequestId,
           amountCents,
         })
         if (!mountedRef.current) return false
 
         if (!res?.success || !res.data) {
-          // Server already mapped any internal code to a safe message.
+          // Server already mapped any internal code to a safe message. Keep the
+          // persisted intent — a retry MUST reuse the same clientRequestId.
           const msg =
             res?.message || i18next.t('Recharge failed, please try again')
           setError(msg)
@@ -243,18 +296,19 @@ export function useWischoicerRecharge(
         }
 
         const { safe } = applyOrder(res.data)
-        if (safe.expireTime) {
-          writePendingRecharge({
-            orderNo: safe.orderNo,
-            clientRequestId: clientRequestIdRef.current,
-            amountCents,
-            expireTime: safe.expireTime,
-          })
-        }
-        tickCountdown(Math.floor(Date.now() / 1000))
+        // Upgrade the persisted intent with the orderNo + expireTime.
+        writePendingRecharge({
+          clientRequestId,
+          amountCents,
+          orderNo: safe.orderNo,
+          expireTime: safe.expireTime,
+        })
+        tickCountdown(nowSeconds())
         return true
       } catch {
         if (!mountedRef.current) return false
+        // Lost response is the key case: the intent stays persisted with this
+        // clientRequestId, so the next click / refresh recovers instead of dupes.
         const msg = i18next.t('Recharge failed, please try again')
         setError(msg)
         toast.error(msg)
@@ -268,7 +322,7 @@ export function useWischoicerRecharge(
 
   const reset = useCallback(() => {
     clearPendingRecharge()
-    clientRequestIdRef.current = newClientRequestId()
+    clientRequestIdRef.current = null
     successFiredRef.current = false
     orderRef.current = null
     setOrder(null)
