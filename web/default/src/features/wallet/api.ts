@@ -39,6 +39,9 @@ import type {
   WaffoPaymentResponse,
   WaffoPancakePaymentRequest,
   WaffoPancakePaymentResponse,
+  WischoicerCreateRechargeRequest,
+  WischoicerRechargeResponse,
+  WischoicerRechargeListResponse,
 } from './types'
 
 // ============================================================================
@@ -233,4 +236,80 @@ export async function completeOrder(
 ): Promise<ApiResponse> {
   const res = await api.post('/api/user/topup/complete', request)
   return res.data
+}
+
+// ============================================================================
+// Wischoicer WeChat Native wallet recharge (WIS-545 S5)
+//
+// These call new-api's OWN wallet UserAuth façade (`/api/wallet/recharges*`,
+// WIS-550 PR#19), authenticated by the session — they never reach billing
+// directly. `skipBusinessError` is set so the hook can map the server's
+// already-safe user messages; polling/recovery requests pass
+// `disableDuplicate` to bypass GET de-duplication.
+// ============================================================================
+
+/**
+ * Create (or idempotently re-fetch) a WeChat Native recharge order.
+ */
+export async function createWischoicerRecharge(
+  request: WischoicerCreateRechargeRequest
+): Promise<WischoicerRechargeResponse> {
+  const res = await api.post('/api/wallet/recharges', request, {
+    skipBusinessError: true,
+  } as Record<string, unknown>)
+  return res.data
+}
+
+/**
+ * Get a single recharge order by orderNo (ownership is enforced server-side).
+ */
+export async function getWischoicerRecharge(
+  orderNo: string
+): Promise<WischoicerRechargeResponse> {
+  const res = await api.get(
+    `/api/wallet/recharges/${encodeURIComponent(orderNo)}`,
+    {
+      skipBusinessError: true,
+      disableDuplicate: true,
+    } as Record<string, unknown>
+  )
+  return res.data
+}
+
+/**
+ * List recharge order history with cursor pagination.
+ */
+export async function listWischoicerRecharges(opts: {
+  cursor?: string
+  limit?: number
+} = {}): Promise<WischoicerRechargeListResponse> {
+  const params = new URLSearchParams()
+  if (opts.cursor) {
+    params.set('cursor', opts.cursor)
+  }
+  params.set('limit', String(opts.limit ?? 20))
+  const res = await api.get(`/api/wallet/recharges?${params.toString()}`, {
+    skipBusinessError: true,
+    disableDuplicate: true,
+  } as Record<string, unknown>)
+  return res.data
+}
+
+/**
+ * Probe whether the wallet recharge façade is mounted. The route is registered
+ * only when Token A + the billing base URL are configured (fail-closed), so a
+ * 404 here means the bridge is not yet enabled in this environment. Used to
+ * gate the WeChat Native section so it never renders a broken UI; never toasts.
+ */
+export async function isWischoicerRechargeAvailable(): Promise<boolean> {
+  try {
+    const res = await api.get('/api/wallet/recharges?limit=1', {
+      skipErrorHandler: true,
+      skipBusinessError: true,
+      disableDuplicate: true,
+    } as Record<string, unknown>)
+    return Boolean(res?.data?.success)
+  } catch {
+    return false
+  }
 }

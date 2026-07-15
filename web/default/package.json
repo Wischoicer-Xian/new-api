@@ -80,6 +80,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.10.6",
     "@rsbuild/core": "catalog:",
     "@rsbuild/plugin-react": "catalog:",
     "@rsbuild/plugin-tailwindcss": "catalog:",
@@ -95,6 +96,7 @@
     "@typescript/native-preview": "^7.0.0-dev.20260702.3",
     "@xyflow/react": "^12.11.1",
     "embla-carousel-react": "^8.6.0",
+    "happy-dom": "^20.10.6",
     "jsdom": "^29.1.1",
     "knip": "^6.24.0",
     "oxfmt": "catalog:",
