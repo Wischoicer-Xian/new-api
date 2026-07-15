@@ -686,10 +686,24 @@ func AddChannel(c *gin.Context) {
 		}
 		channels = append(channels, *localChannel)
 	}
-	err = model.BatchInsertChannels(channels)
-	if err != nil {
-		common.ApiError(c, err)
+	// 图片能力渠道：单条事务插入（Create + ability + revision 原子，ID 回填后建 revision）；
+	// 非图片渠道沿用批量插入。先 probe 模板判定路径。
+	imageRevisionBuilder := imageChannelRevisionBuilder()
+	if probe, probeErr := imageRevisionBuilder(addChannelRequest.Channel); probeErr != nil {
+		common.ApiError(c, probeErr)
 		return
+	} else if probe != nil {
+		for i := range channels {
+			if err := model.InsertChannelWithImageRevision(&channels[i], imageRevisionBuilder); err != nil {
+				common.ApiError(c, err)
+				return
+			}
+		}
+	} else {
+		if err := model.BatchInsertChannels(channels); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	service.ResetProxyClientCache()
 	recordManageAudit(c, "channel.create", map[string]interface{}{
@@ -1051,15 +1065,13 @@ func UpdateChannel(c *gin.Context) {
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
 		}
 	}
-	err = channel.Update()
-	if err != nil {
+	// 渠道写 + ability + 图片 revision 同事务（§7.2 原子性）；revision 创建失败整笔回滚，保存明确失败。
+	if err := model.UpdateChannelWithImageRevision(&channel.Channel, imageChannelRevisionBuilder()); err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
 	service.ResetProxyClientCache()
-	// 图片能力渠道：配置更新后冻结一条不可变 revision（§7.2）；非图片渠道为空操作。
-	ensureImageChannelRevision(&channel.Channel)
 	// 记录变更的字段名（语言无关的字段标识），密钥仅记录"已更换"绝不记录内容。
 	changedFields := make([]string, 0)
 	if channel.Models != originChannel.Models {

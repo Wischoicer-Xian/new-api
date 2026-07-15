@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -59,7 +60,15 @@ func ImageCapabilityPreview(c *gin.Context) {
 		return
 	}
 
-	apiType, _ := common.ChannelType2APIType(req.Type)
+	apiType, okType := common.ChannelType2APIType(req.Type)
+	if !okType {
+		// Unknown channel type: fail closed instead of degrading to OpenAI.
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("未知渠道类型 %d", req.Type),
+		})
+		return
+	}
 	caps, ok := service.ImageAdapterCapabilities(apiType)
 	if !ok {
 		// Not image-capable: empty support, no preview. The UI uses this to
@@ -87,12 +96,13 @@ func ImageCapabilityPreview(c *gin.Context) {
 		models = append(models, model)
 	}
 	sort.Strings(models)
+	adapterVersion, _ := service.ImageAdapterVersion(apiType)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": ImageCapabilityPreviewResponse{
 			ImageCapable:   true,
-			AdapterVersion: service.ImageAdapterVersion(apiType),
+			AdapterVersion: adapterVersion,
 			Support: imageCapabilitySupport{
 				Generation: execModesToStrings(caps.ImageTaskExecutionSupport(service.ImageOperationGeneration)),
 				Edit:       execModesToStrings(caps.ImageTaskExecutionSupport(service.ImageOperationEdit)),

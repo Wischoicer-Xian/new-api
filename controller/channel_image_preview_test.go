@@ -2,11 +2,11 @@ package controller
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,7 +27,7 @@ func TestImageCapabilityPreview(t *testing.T) {
 	parse := func(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 		t.Helper()
 		var m map[string]any
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &m))
+		require.NoError(t, common.Unmarshal(w.Body.Bytes(), &m))
 		return m
 	}
 
@@ -37,7 +37,7 @@ func TestImageCapabilityPreview(t *testing.T) {
 		require.True(t, m["success"].(bool))
 		data := m["data"].(map[string]any)
 		assert.True(t, data["image_capable"].(bool))
-		assert.Equal(t, "apitype:0", data["adapter_version"])
+		assert.Equal(t, "openai-image-adapter/v1", data["adapter_version"])
 		sup := data["support"].(map[string]any)
 		assert.Equal(t, []any{"sync"}, sup["generation"])
 		assert.Equal(t, []any{"sync"}, sup["edit"])
@@ -51,6 +51,15 @@ func TestImageCapabilityPreview(t *testing.T) {
 		require.True(t, m["success"].(bool))
 		data := m["data"].(map[string]any)
 		assert.False(t, data["image_capable"].(bool))
+	})
+
+	t.Run("unknown type rejected not degraded to openai", func(t *testing.T) {
+		// P1-2: ChannelType2APIType mapping bool is honored; an unknown type is
+		// not silently treated as OpenAI sync.
+		w := doPost(`{"type":99999,"image_execution_config":"{\"defaults\":{\"generation\":\"sync\"}}"}`)
+		m := parse(t, w)
+		assert.False(t, m["success"].(bool))
+		require.Contains(t, m["message"].(string), "未知渠道类型")
 	})
 
 	t.Run("invalid config returns success false", func(t *testing.T) {

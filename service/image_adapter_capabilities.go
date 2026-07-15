@@ -1,8 +1,6 @@
 package service
 
 import (
-	"strconv"
-
 	"github.com/QuantumNous/new-api/constant"
 )
 
@@ -25,6 +23,16 @@ func (s staticImageAdapterCaps) ImageTaskDefaultExecution(op ImageOperation) (Im
 	return mode, ok
 }
 
+// imageAdapterEntry pairs an adapter's capability boundary with a stable
+// implementation version label. The version identifies the adapter
+// implementation (not the channel API type) so a frozen revision can detect
+// that it runs against the implementation it was created under; it is bumped
+// only when the adapter's image execution behavior changes incompatibly.
+type imageAdapterEntry struct {
+	caps    staticImageAdapterCaps
+	version string
+}
+
 // imageAdapterRegistry is the closed set of channel adapters that opt into the
 // image task subsystem. An apiType absent from this map is treated as not
 // supporting image tasks at all: channels of that type cannot be configured
@@ -36,17 +44,20 @@ func (s staticImageAdapterCaps) ImageTaskDefaultExecution(op ImageOperation) (Im
 // registered, and each declares the hard boundary the channel configuration is
 // validated against. ApiNebula's async_task support is added here when its
 // adapter lands.
-var imageAdapterRegistry = map[int]staticImageAdapterCaps{
+var imageAdapterRegistry = map[int]imageAdapterEntry{
 	// OpenAI-compatible adapter: both generation and edit are synchronous.
 	constant.APITypeOpenAI: {
-		support: map[ImageOperation][]ImageExecutionMode{
-			ImageOperationGeneration: {ImageExecutionSync},
-			ImageOperationEdit:       {ImageExecutionSync},
+		caps: staticImageAdapterCaps{
+			support: map[ImageOperation][]ImageExecutionMode{
+				ImageOperationGeneration: {ImageExecutionSync},
+				ImageOperationEdit:       {ImageExecutionSync},
+			},
+			defaults: map[ImageOperation]ImageExecutionMode{
+				ImageOperationGeneration: ImageExecutionSync,
+				ImageOperationEdit:       ImageExecutionSync,
+			},
 		},
-		defaults: map[ImageOperation]ImageExecutionMode{
-			ImageOperationGeneration: ImageExecutionSync,
-			ImageOperationEdit:       ImageExecutionSync,
-		},
+		version: "openai-image-adapter/v1",
 	},
 }
 
@@ -55,19 +66,24 @@ var imageAdapterRegistry = map[int]staticImageAdapterCaps{
 // image task subsystem; callers must treat such channels as ineligible rather
 // than guessing a default mode.
 func ImageAdapterCapabilities(apiType int) (ImageTaskAdapterCapabilities, bool) {
-	caps, ok := imageAdapterRegistry[apiType]
+	entry, ok := imageAdapterRegistry[apiType]
 	if !ok {
 		return nil, false
 	}
-	return caps, true
+	return entry.caps, true
 }
 
-// ImageAdapterVersion returns a stable version label for the adapter serving
-// apiType. It is frozen into channel revisions so a frozen image task can
-// detect whether it runs against the adapter implementation it was created
-// under. The label is intentionally opaque and string-stable across builds.
-func ImageAdapterVersion(apiType int) string {
-	return "apitype:" + strconv.Itoa(apiType)
+// ImageAdapterVersion returns the stable implementation version label for the
+// adapter serving apiType, frozen into channel revisions so a frozen image task
+// can detect whether it runs against the adapter implementation it was created
+// under. The bool is false for adapters that have not opted into the image task
+// subsystem; callers must not fabricate a version for unregistered types.
+func ImageAdapterVersion(apiType int) (string, bool) {
+	entry, ok := imageAdapterRegistry[apiType]
+	if !ok {
+		return "", false
+	}
+	return entry.version, true
 }
 
 // ImageCapabilityPreviewEntry is one resolved operation+model on a channel,

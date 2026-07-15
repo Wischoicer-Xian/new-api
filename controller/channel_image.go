@@ -11,23 +11,28 @@ import (
 // validateImageExecutionConfig parses and validates the channel's image task
 // execution configuration against the adapter support set for the channel's
 // API type. A channel with no configuration is valid: it is simply not an
-// image task candidate. A channel whose API type has not opted into the image
-// task subsystem, or whose configured mode lies outside the adapter support
-// set, is rejected so it can never silently enter the candidate pool. This is
-// the fail-closed gate shared by AddChannel and UpdateChannel.
+// image task candidate. An unknown channel type, an adapter that has not opted
+// into the image task subsystem, or a configured mode outside the adapter
+// support set is rejected so it can never silently enter the candidate pool.
+// This is the fail-closed gate shared by AddChannel and UpdateChannel; the
+// ChannelType2APIType mapping bool is checked first so an unknown type is
+// never degraded to OpenAI.
 func validateImageExecutionConfig(channel *model.Channel) error {
 	raw := channel.ImageExecutionConfigBytes()
 	if len(raw) == 0 {
 		return nil
 	}
-	cfg, err := service.ParseImageChannelExecutionConfig(raw)
-	if err != nil {
-		return fmt.Errorf("图片执行配置[image_execution_config] 格式错误：%s", err.Error())
+	apiType, ok := common.ChannelType2APIType(channel.Type)
+	if !ok {
+		return fmt.Errorf("图片执行配置[image_execution_config] 未知渠道类型 %d", channel.Type)
 	}
-	apiType, _ := common.ChannelType2APIType(channel.Type)
 	caps, ok := service.ImageAdapterCapabilities(apiType)
 	if !ok {
 		return fmt.Errorf("图片执行配置[image_execution_config] 该渠道类型不支持图片任务执行")
+	}
+	cfg, err := service.ParseImageChannelExecutionConfig(raw)
+	if err != nil {
+		return fmt.Errorf("图片执行配置[image_execution_config] 格式错误：%s", err.Error())
 	}
 	if err := service.ValidateImageChannelExecutionConfig(caps, cfg); err != nil {
 		return fmt.Errorf("图片执行配置[image_execution_config] 无效：%s", err.Error())
@@ -35,32 +40,30 @@ func validateImageExecutionConfig(channel *model.Channel) error {
 	return nil
 }
 
-// imageChannelAdapterVersion resolves the adapter version label for a channel,
-// reporting whether the channel's API type is image-capable. Non-image-capable
-// channels get an empty label and a false result.
-func imageChannelAdapterVersion(channel *model.Channel) (string, bool) {
-	apiType, _ := common.ChannelType2APIType(channel.Type)
-	if _, ok := service.ImageAdapterCapabilities(apiType); !ok {
-		return "", false
-	}
-	return service.ImageAdapterVersion(apiType), true
-}
-
-// ensureImageChannelRevision freezes an immutable revision for an image-capable
-// channel after a successful config update, per the design's "渠道配置更新创建新
-// revision" contract. Non-image channels are a no-op. A revision creation
-// failure does not roll back the already-durable channel write; it is logged so
-// an operator can reconcile, and the image task processor fail-closes for the
-// channel until a revision exists.
-func ensureImageChannelRevision(channel *model.Channel) {
-	if len(channel.ImageExecutionConfigBytes()) == 0 {
-		return
-	}
-	adapterVersion, ok := imageChannelAdapterVersion(channel)
-	if !ok {
-		return
-	}
-	if _, err := model.CreateChannelRevision(channel.BuildImageChannelRevisionInput(adapterVersion)); err != nil {
-		common.SysError(fmt.Sprintf("为渠道 %d 创建图片 channel revision 失败：%s", channel.Id, err.Error()))
+// imageChannelRevisionBuilder returns a channelRevisionBuilder that freezes an
+// immutable revision for the channel when it is image-capable (a registered
+// adapter type with a non-empty image execution config). For non-image
+// channels the builder returns (nil, nil) so the transactional save skips
+// revision creation. An unknown channel type is a hard error (fail-closed)
+// rather than a silent skip, surfacing a save failure if config somehow
+// reached this point without validateImageExecutionConfig catching it.
+func imageChannelRevisionBuilder() model.ChannelRevisionBuilder {
+	return func(channel *model.Channel) (*model.ChannelRevisionCreate, error) {
+		if len(channel.ImageExecutionConfigBytes()) == 0 {
+			return nil, nil
+		}
+		apiType, ok := common.ChannelType2APIType(channel.Type)
+		if !ok {
+			return nil, fmt.Errorf("图片执行配置[image_execution_config] 未知渠道类型 %d", channel.Type)
+		}
+		if _, ok := service.ImageAdapterCapabilities(apiType); !ok {
+			return nil, nil
+		}
+		version, _ := service.ImageAdapterVersion(apiType)
+		input, err := channel.BuildImageChannelRevision(version)
+		if err != nil {
+			return nil, err
+		}
+		return &input, nil
 	}
 }

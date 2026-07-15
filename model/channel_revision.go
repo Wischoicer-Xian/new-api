@@ -52,41 +52,69 @@ type ChannelRevisionCreate struct {
 // inside the transaction so concurrent creators serialize on the unique
 // (channel_id, revision_number) index.
 func CreateChannelRevision(input ChannelRevisionCreate) (*ChannelRevision, error) {
-	if len(input.Settings) != 0 {
-		var decoded any
-		if err := common.Unmarshal(input.Settings, &decoded); err != nil {
-			return nil, fmt.Errorf("create channel revision: invalid settings JSON: %w", err)
-		}
+	if err := validateRevisionSettings(input.Settings); err != nil {
+		return nil, err
 	}
 	var rev ChannelRevision
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		// The atomic UPDATE is the allocation lock. COALESCE handles channels
-		// created before the additive counter column existed without a dialect-
-		// specific migration default.
-		result := tx.Model(&Channel{}).Where("id = ?", input.ChannelID).
-			UpdateColumn("image_revision_number", gorm.Expr("COALESCE(image_revision_number, 0) + 1"))
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return gorm.ErrRecordNotFound
-		}
-		var channel Channel
-		if err := tx.Select("image_revision_number").First(&channel, input.ChannelID).Error; err != nil {
+		created, err := createChannelRevisionInTx(tx, input)
+		if err != nil {
 			return err
 		}
-		rev = ChannelRevision{
-			ChannelID:      input.ChannelID,
-			RevisionNumber: channel.ImageRevisionNumber,
-			Endpoint:       input.Endpoint,
-			Proxy:          input.Proxy,
-			Settings:       input.Settings,
-			CredentialRef:  input.CredentialRef,
-			AdapterVersion: input.AdapterVersion,
-		}
-		return tx.Create(&rev).Error
+		rev = *created
+		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	return &rev, nil
+}
+
+// validateRevisionSettings rejects malformed snapshot JSON before any database
+// work so a caller driving a transactional save can fail before the channel
+// write rather than halfway through it.
+func validateRevisionSettings(settings json.RawMessage) error {
+	if len(settings) == 0 {
+		return nil
+	}
+	var decoded any
+	if err := common.Unmarshal(settings, &decoded); err != nil {
+		return fmt.Errorf("create channel revision: invalid settings JSON: %w", err)
+	}
+	return nil
+}
+
+// createChannelRevisionInTx allocates and persists a new immutable revision
+// within the caller's transaction. It is shared by the standalone
+// CreateChannelRevision and the transactional channel-save paths so the same
+// atomic allocation (counter bump under the channel write fence, then the
+// unique (channel_id, revision_number) insert) runs whether or not the revision
+// is created alongside the channel write. The COALESCE handles channels created
+// before the additive counter column existed without a dialect-specific
+// migration default.
+func createChannelRevisionInTx(tx *gorm.DB, input ChannelRevisionCreate) (*ChannelRevision, error) {
+	result := tx.Model(&Channel{}).Where("id = ?", input.ChannelID).
+		UpdateColumn("image_revision_number", gorm.Expr("COALESCE(image_revision_number, 0) + 1"))
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var channel Channel
+	if err := tx.Select("image_revision_number").First(&channel, input.ChannelID).Error; err != nil {
+		return nil, err
+	}
+	rev := ChannelRevision{
+		ChannelID:      input.ChannelID,
+		RevisionNumber: channel.ImageRevisionNumber,
+		Endpoint:       input.Endpoint,
+		Proxy:          input.Proxy,
+		Settings:       input.Settings,
+		CredentialRef:  input.CredentialRef,
+		AdapterVersion: input.AdapterVersion,
+	}
+	if err := tx.Create(&rev).Error; err != nil {
 		return nil, err
 	}
 	return &rev, nil

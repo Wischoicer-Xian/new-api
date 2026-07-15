@@ -45,9 +45,16 @@ func TestImageAdapterCapabilities_FailClosed(t *testing.T) {
 	}
 }
 
-func TestImageAdapterVersion_StableLabel(t *testing.T) {
-	assert.Equal(t, "apitype:0", ImageAdapterVersion(constant.APITypeOpenAI))
-	assert.Equal(t, "apitype:99", ImageAdapterVersion(99))
+func TestImageAdapterVersion_ImplementationLabel(t *testing.T) {
+	// Version is the adapter implementation label (not an API-type alias) and
+	// is only defined for registered image adapters; unregistered types get
+	// (("",false)) so callers never fabricate a version.
+	version, ok := ImageAdapterVersion(constant.APITypeOpenAI)
+	require.True(t, ok)
+	assert.Equal(t, "openai-image-adapter/v1", version)
+	version, ok = ImageAdapterVersion(constant.APITypeAnthropic)
+	require.False(t, ok)
+	assert.Equal(t, "", version)
 }
 
 func findImagePreview(preview []ImageCapabilityPreviewEntry, op ImageOperation, model string) *ImageCapabilityPreviewEntry {

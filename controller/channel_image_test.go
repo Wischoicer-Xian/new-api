@@ -43,6 +43,16 @@ func TestValidateImageExecutionConfig(t *testing.T) {
 			wantErr: "不支持图片任务执行",
 		},
 		{
+			// P1-2: an unknown channel type must not be degraded to OpenAI; the
+			// ChannelType2APIType mapping bool is honored and the type rejected.
+			name: "unknown channel type rejected not degraded to openai",
+			channel: &model.Channel{
+				Type:                 99999,
+				ImageExecutionConfig: cfg(`{"defaults":{"generation":"sync"}}`),
+			},
+			wantErr: "未知渠道类型",
+		},
+		{
 			name: "unsupported mode fail closed",
 			channel: &model.Channel{
 				Type:                 constant.ChannelTypeOpenAI,
