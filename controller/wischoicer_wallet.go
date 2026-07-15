@@ -49,6 +49,9 @@ type walletRechargeView struct {
 	Status      string `json:"status"`
 	CodeURL     string `json:"codeUrl,omitempty"`
 	ExpireTime  int64  `json:"expireTime,omitempty"`
+	// PaidTime 是订单支付时间（Unix 秒），billing 已支付订单才带；契约 §1 允许的安全
+	// 字段，供钱包前端展示「支付时间」。未支付为 0，omitempty 自动省略。
+	PaidTime int64 `json:"paidTime,omitempty"`
 }
 
 func projectWalletRechargeView(o *service.BillingRechargeOrder) walletRechargeView {
@@ -62,6 +65,7 @@ func projectWalletRechargeView(o *service.BillingRechargeOrder) walletRechargeVi
 		Status:      o.Status,
 		CodeURL:     o.CodeURL,
 		ExpireTime:  o.ExpireTime,
+		PaidTime:    o.PaidTime,
 	}
 }
 

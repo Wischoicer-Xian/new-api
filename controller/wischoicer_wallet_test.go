@@ -82,7 +82,7 @@ func TestWalletCreate_NewApiUserIDOnlyFromContext_BodyForgedIDIgnored(t *testing
 // 安全投影：响应只含安全字段，绝不含 quota/内部 code/token。
 func TestWalletCreate_ProjectsOnlySafeFields(t *testing.T) {
 	mock := &mockBillingClient{order: &service.BillingRechargeOrder{
-		OrderNo: "ORD1", AmountCents: 5000, Currency: "CNY", Status: "PENDING", CodeURL: "weixin://x", ExpireTime: 1700000000,
+		OrderNo: "ORD1", AmountCents: 5000, Currency: "CNY", Status: "PENDING", CodeURL: "weixin://x", ExpireTime: 1700000000, PaidTime: 1700000500,
 	}}
 	injectMockBillingClient(t, mock)
 
@@ -98,6 +98,7 @@ func TestWalletCreate_ProjectsOnlySafeFields(t *testing.T) {
 			Status      string `json:"status"`
 			CodeURL     string `json:"codeUrl"`
 			ExpireTime  int64  `json:"expireTime"`
+			PaidTime    int64  `json:"paidTime"`
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
@@ -105,6 +106,8 @@ func TestWalletCreate_ProjectsOnlySafeFields(t *testing.T) {
 	assert.Equal(t, "ORD1", resp.Data.OrderNo)
 	assert.Equal(t, int64(5000), resp.Data.AmountCents)
 	assert.Equal(t, "weixin://x", resp.Data.CodeURL)
+	// paidTime 按契约 §1 透传给浏览器（支付时间）。
+	assert.Equal(t, int64(1700000500), resp.Data.PaidTime)
 
 	// 绝不出现 quota / token / 服务名 / 内部错误码。
 	lower := strings.ToLower(w.Body.String())
