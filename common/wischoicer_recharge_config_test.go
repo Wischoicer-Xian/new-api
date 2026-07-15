@@ -140,6 +140,7 @@ func snapshotWischoicerConfig(t *testing.T) func() {
 	origTokenBNext := WischoicerBillingInternalServiceTokenNext
 	origEnabled := WischoicerBillingInternalEnabled
 	origTokenA := NewApiToBillingServiceToken
+	origTokenANext := NewApiToBillingServiceTokenNext
 	origBaseURL := WischoicerBillingBaseURL
 	origWallet := WischoicerWalletRechargeEnabled
 	origTest := WischoicerRechargeTestUserIDs
@@ -148,6 +149,7 @@ func snapshotWischoicerConfig(t *testing.T) func() {
 		WischoicerBillingInternalServiceTokenNext = origTokenBNext
 		WischoicerBillingInternalEnabled = origEnabled
 		NewApiToBillingServiceToken = origTokenA
+		NewApiToBillingServiceTokenNext = origTokenANext
 		WischoicerBillingBaseURL = origBaseURL
 		WischoicerWalletRechargeEnabled = origWallet
 		WischoicerRechargeTestUserIDs = origTest
@@ -225,4 +227,37 @@ func TestInitWischoicerRechargeConfig_TokenBNextSlot(t *testing.T) {
 	require.NoError(t, os.Unsetenv(EnvBillingToNewApiServiceToken))
 	require.NoError(t, initWischoicerRechargeConfig())
 	assert.False(t, WischoicerBillingInternalEnabled, "current empty but next set must NOT mount")
+}
+
+// Token A（new-api → billing 发送端）next 槽：current 为权威，next 可空。发送端始终发
+// current；next 是轮换暂存槽。与 Token B current/next 规则一致（WIS-547 无损轮换）。
+func TestInitWischoicerRechargeConfig_TokenANextSlot(t *testing.T) {
+	save := snapshotWischoicerConfig(t)
+	t.Cleanup(save)
+
+	require.NoError(t, os.Setenv(EnvNewApiToBillingServiceToken, "cur-A"))
+	require.NoError(t, os.Setenv(EnvNewApiToBillingServiceTokenNext, "nxt-A"))
+	require.NoError(t, os.Setenv(EnvWischoicerBillingBaseURL, "http://127.0.0.1:8080"))
+	t.Cleanup(func() {
+		_ = os.Unsetenv(EnvNewApiToBillingServiceToken)
+		_ = os.Unsetenv(EnvNewApiToBillingServiceTokenNext)
+		_ = os.Unsetenv(EnvWischoicerBillingBaseURL)
+	})
+
+	require.NoError(t, initWischoicerRechargeConfig())
+	assert.Equal(t, "cur-A", NewApiToBillingServiceToken)
+	assert.Equal(t, "nxt-A", NewApiToBillingServiceTokenNext)
+	assert.True(t, WischoicerWalletRechargeEnabled, "current + baseURL => wallet mounted (next is staged, not required)")
+
+	// next 未配置（未轮换）→ 仅 current，仍挂载。
+	require.NoError(t, os.Unsetenv(EnvNewApiToBillingServiceTokenNext))
+	require.NoError(t, initWischoicerRechargeConfig())
+	assert.Equal(t, "", NewApiToBillingServiceTokenNext, "next empty when unset")
+	assert.True(t, WischoicerWalletRechargeEnabled, "current alone still mounts wallet")
+
+	// 只有 next、current 为空 → fail-closed 不挂载（current 权威，避免只配半边）。
+	require.NoError(t, os.Unsetenv(EnvNewApiToBillingServiceToken))
+	require.NoError(t, os.Setenv(EnvNewApiToBillingServiceTokenNext, "nxt-A"))
+	require.NoError(t, initWischoicerRechargeConfig())
+	assert.False(t, WischoicerWalletRechargeEnabled, "current empty but next set must NOT mount wallet")
 }

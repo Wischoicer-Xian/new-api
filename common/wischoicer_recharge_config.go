@@ -37,10 +37,18 @@ var (
 	// WischoicerBillingInternalEnabled 标记 Token B 账务路由是否挂载（Token B 非空时 true）。
 	WischoicerBillingInternalEnabled = false
 
-	// NewApiToBillingServiceToken 持有解析后的 Token A（new-api → billing：
+	// NewApiToBillingServiceToken 持有解析后的 Token A current（new-api → billing：
 	// /internal/new-api/v1/recharge-orders* 内部订单接口）。方向语义明确：仅 new-api
 	// 持有并发送，billing 仅用于验证 internal order 路由。为空时钱包 façade 不挂载（fail-closed）。
 	NewApiToBillingServiceToken = ""
+
+	// NewApiToBillingServiceTokenNext 是 Token A 的 next 槽（WIS-547 R3 锁定的 current/next
+	// 无损轮换，与 billing 侧 Token A 接收端 NewApiTrust 双槽对齐）。new-api 作为发送端始终
+	// 发送 current；next 是轮换暂存槽：billing 接收端在轮换窗口内同时接受 current 与 next，
+	// 故可先把 next 配到两端、再在发送端把 current 提升为原 next 值，全程不中断。next 可空
+	//（未轮换时只发 current）；current 为权威：current 为空时即便 next 非空，钱包 façade 也不
+	// 挂载（fail-closed，避免只配半边），与 Token B current/next 规则一致。
+	NewApiToBillingServiceTokenNext = ""
 
 	// WischoicerBillingBaseURL 是 billing 内部订单 API 的基址（如
 	// http://billing-internal.svc.cluster.local:8080）。仅供 new-api 服务身份调用，
@@ -71,8 +79,9 @@ const (
 	EnvBillingToNewApiServiceToken     = "BILLING_TO_NEWAPI_SERVICE_TOKEN"
 	EnvBillingToNewApiServiceTokenNext = "BILLING_TO_NEWAPI_SERVICE_TOKEN_NEXT"
 	EnvWischoicerBillingInternalToken  = "WISCHOICER_BILLING_INTERNAL_SERVICE_TOKEN"
-	// Token A（new-api → billing）方向语义主名。
+	// Token A（new-api → billing）方向语义主名 + next 槽。
 	EnvNewApiToBillingServiceToken      = "NEWAPI_TO_BILLING_SERVICE_TOKEN"
+	EnvNewApiToBillingServiceTokenNext  = "NEWAPI_TO_BILLING_SERVICE_TOKEN_NEXT"
 	EnvWischoicerBillingBaseURL         = "WISCHOICER_BILLING_BASE_URL"
 	EnvWischoicerRechargeTestUserIDs    = "WISCHOICER_RECHARGE_TEST_USER_IDS"
 	EnvWischoicerBillingClientTimeout   = "WISCHOICER_BILLING_CLIENT_TIMEOUT_SECONDS"
@@ -131,6 +140,9 @@ func initWischoicerRechargeConfig() error {
 
 	// Token A（new-api → billing）+ billing 基址：解析后决定钱包 façade 是否挂载。
 	NewApiToBillingServiceToken = os.Getenv(EnvNewApiToBillingServiceToken)
+	// Token A next 槽（current/next 双槽轮换结构，WIS-547 R3 已锁）。current 为权威：
+	// current 为空时即便 next 非空，钱包 façade 也不挂载（fail-closed，见下），与 Token B 规则一致。
+	NewApiToBillingServiceTokenNext = os.Getenv(EnvNewApiToBillingServiceTokenNext)
 	WischoicerBillingBaseURL = strings.TrimRight(os.Getenv(EnvWischoicerBillingBaseURL), "/")
 	if NewApiToBillingServiceToken != "" && WischoicerBillingBaseURL != "" {
 		if err := validateWischoicerBillingBaseURL(WischoicerBillingBaseURL); err != nil {

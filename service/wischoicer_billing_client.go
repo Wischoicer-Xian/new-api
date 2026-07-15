@@ -97,18 +97,31 @@ type WischoicerBillingClient interface {
 // httpBillingClient 是 WischoicerBillingClient 的 HTTP 实现。
 type httpBillingClient struct {
 	baseURL    string
-	token      string // Token A，绝不写入日志/响应/tracing
+	token      string // Token A current，发送时使用；绝不写入日志/响应/tracing
+	tokenNext  string // Token A next 槽（轮换暂存）；发送端始终发 current，详见 NewWischoicerBillingClient
 	httpClient *http.Client
 	maxRetries int
 	backoff    time.Duration
 }
 
 // NewWischoicerBillingClient 用解析后的 Token A + billing 基址构造 client。
-// 仅在 WischoicerWalletRechargeEnabled 为 true（即 Token A 非空且基址合法）时调用。
+// 仅在 WischoicerWalletRechargeEnabled 为 true（即 Token A current 非空且基址合法）时调用。
+//
+// 发送端 Token A 双槽（WIS-547 R3 锁定的 current/next 无损轮换，与 billing 侧 NewApiTrust
+// 接收端对齐）：本 client 始终发送 current（token）。next（tokenNext）是轮换暂存槽，不被直接
+// 发送——无损轮换由接收端在窗口内同时接受 current 与 next 来保证，步骤：
+//  1. 两端配 next=N1：billing NewApiTrust 接受 {current=C0, next=N1}；new-api 仍发 C0。
+//  2. 发送端提升：把 NEWAPI_TO_BILLING_SERVICE_TOKEN 改为 N1（current=N1）、清空 next，重启 new-api
+//     → 发送 N1，billing 仍接受 {C0,N1}，全程不中断。
+//  3. 接收端收口：billing current=N1、清空 next → 只接受 N1，C0 立即失效。
+//
+// tokenNext 在此持有是为了让两端 {current,next} 配置形态对称、便于运维核对轮换窗口；它不参与
+// 请求发送，也不是占位闭合——current 为权威，current 为空时 façade 根本不挂载。
 func NewWischoicerBillingClient() WischoicerBillingClient {
 	return &httpBillingClient{
-		baseURL: common.WischoicerBillingBaseURL,
-		token:   common.NewApiToBillingServiceToken,
+		baseURL:   common.WischoicerBillingBaseURL,
+		token:     common.NewApiToBillingServiceToken,
+		tokenNext: common.NewApiToBillingServiceTokenNext,
 		httpClient: &http.Client{
 			Timeout: time.Duration(common.WischoicerBillingClientTimeoutSeconds) * time.Second,
 			// 安全边界（WIS-547 R2 复审 P1-1）：禁止跟随 HTTP redirect。Go 默认会跟随 30x
