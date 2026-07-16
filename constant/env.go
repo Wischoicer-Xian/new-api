@@ -19,6 +19,17 @@ var ErrorLogEnabled bool
 var TaskQueryLimit int
 var TaskTimeoutMinutes int
 
+// ImageTaskCreateEnabled is the §14.1 create-allowlist placeholder for the
+// public single-image task API. It defaults off: the create routes stay
+// fail-closed (no task is created) until P3-I wires the real
+// principal/channel/model allowlist. P3-C reads it; P3-I replaces it.
+var ImageTaskCreateEnabled bool
+
+// MaxImageTasksPerUser caps how many non-terminal image tasks one user may hold
+// at once (§6.1: over the cap returns 429 + Retry-After). The default is a
+// conservative placeholder; the product owner owns the final throttle value.
+var MaxImageTasksPerUser int
+
 // temporary variable for sora patch, will be removed in future
 var TaskPricePatches []string
 
