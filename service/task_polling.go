@@ -57,6 +57,13 @@ func sweepTimedOutTasks(ctx context.Context) {
 	timedOutCount := 0
 
 	for _, task := range tasks {
+		if !constant.IsLegacyTimeoutPlatform(task.Platform) {
+			// Only legacy Suno/video platforms — plus the attested historical
+			// aliases kling/jimeng — are swept here, so their failure/finalize
+			// convergence is not lost. Image and unknown platforms time out via
+			// their own path (§7.3). The SQL allowlist is the primary guard.
+			continue
+		}
 		isLegacy := task.SubmitTime > 0 && task.SubmitTime < legacyTaskCutoff
 
 		oldStatus := task.Status
@@ -95,6 +102,27 @@ type TaskPollSummary struct {
 	UnfinishedTasks  int `json:"unfinished_tasks"`
 	PlatformsScanned int `json:"platforms_scanned"`
 	NullTasksFailed  int `json:"null_tasks_failed"`
+	// NonLegacyTasksSkipped counts tasks dropped by the in-memory secondary
+	// guard (image + any unknown platform). The primary isolation is the SQL
+	// platform-IN allowlist on the legacy queries (§7.3); this guard covers any
+	// caller that bypasses them.
+	NonLegacyTasksSkipped int `json:"non_legacy_tasks_skipped"`
+}
+
+// filterLegacyPollingTasks is the in-memory secondary guard backing the SQL
+// platform-IN allowlist (§7.3). The legacy queries already filter to the
+// allowlist before LIMIT; this keeps only allowlisted platforms, dropping image
+// and unknown so they can never reach DispatchPlatformUpdate's default
+// UpdateVideoTasks branch. Positive allowlist, not a post-limit denylist.
+func filterLegacyPollingTasks(tasks []*model.Task) (legacy []*model.Task, dropped int) {
+	for _, t := range tasks {
+		if constant.IsLegacyPollingPlatform(t.Platform) {
+			legacy = append(legacy, t)
+			continue
+		}
+		dropped++
+	}
+	return legacy, dropped
 }
 
 // RunTaskPollingOnce performs one async-task (Suno/video) polling pass
@@ -115,8 +143,10 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 	sweepTimedOutTasks(ctx)
 	allTasks := model.GetAllUnFinishSyncTasks(constant.TaskQueryLimit)
 	summary.UnfinishedTasks = len(allTasks)
+	legacyTasks, nonLegacySkipped := filterLegacyPollingTasks(allTasks)
+	summary.NonLegacyTasksSkipped = nonLegacySkipped
 	platformTask := make(map[constant.TaskPlatform][]*model.Task)
-	for _, t := range allTasks {
+	for _, t := range legacyTasks {
 		platformTask[t.Platform] = append(platformTask[t.Platform], t)
 	}
 

@@ -136,6 +136,11 @@ func setupWischoicerIntegrationDB(t *testing.T) {
 		&ImageTaskExecution{},
 		&TaskBillingLedger{},
 		&ChannelRevision{},
+		// Task is the legacy provider/billing projection that image tasks extend
+		// (§7.3). Migrated so the poller-isolation integration test can seed real
+		// Task rows and prove the legacy fetch + image-platform exclusion hold on
+		// each database.
+		&Task{},
 	); err != nil {
 		t.Fatalf("auto-migrate %s schema: %v", database, err)
 	}

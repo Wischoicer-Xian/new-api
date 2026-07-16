@@ -54,9 +54,10 @@ jobs:
         run: go test -tags integration -count=1 ./model/...
 
       # Also run the default SQLite suite to catch regressions in the
-      # non-integration path.
+      # non-integration path. ./service covers the §7.3 image-task poller /
+      # timeout isolation filters; ./constant covers the image-platform predicate.
       - name: Unit tests (SQLite)
-        run: go test -count=1 ./common ./model ./controller
+        run: go test -count=1 ./common ./model ./controller ./constant ./service
 
   # DTO contract gate for the §6.1 public image-task API. The duplicate-key
   # helper (common/json.go) and the exact-key / null / hostless-URL validators
