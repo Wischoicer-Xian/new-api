@@ -38,9 +38,45 @@ func cleanupAtomicOwner(t *testing.T, owner int) {
 		}
 		DB.Where("owner_user_id = ?", owner).Delete(&ImageTaskExecution{})
 		DB.Where("user_id = ?", owner).Delete(&Token{})
+		DB.Where("user_id = ?", owner).Delete(&UserSubscription{})
 		DB.Where("user_id = ?", owner).Delete(&Task{})
 		DB.Where("id = ?", owner).Delete(&User{})
 	})
+}
+
+// seedAtomicPlan inserts a minimal subscription plan and cleans it up.
+func seedAtomicPlan(t *testing.T, id int) {
+	t.Helper()
+	require.NoError(t, DB.Create(&SubscriptionPlan{
+		Id:           id,
+		Title:        fmt.Sprintf("atomic_plan_%d", id),
+		DurationUnit: "month",
+	}).Error)
+	t.Cleanup(func() { DB.Where("id = ?", id).Delete(&SubscriptionPlan{}) })
+}
+
+// seedAtomicSubscription inserts an active subscription with capacity. NextResetTime
+// is set far in the future so maybeResetUserSubscriptionWithPlanTx is a no-op.
+func seedAtomicSubscription(t *testing.T, subID, planID, userID int, total, used int64) {
+	t.Helper()
+	require.NoError(t, DB.Create(&UserSubscription{
+		Id:            subID,
+		UserId:        userID,
+		PlanId:        planID,
+		AmountTotal:   total,
+		AmountUsed:    used,
+		StartTime:     1_600_000_000,
+		EndTime:       2_000_000_000,
+		Status:        "active",
+		NextResetTime: 2_000_000_000,
+	}).Error)
+}
+
+func subAmountUsed(t *testing.T, id int) int64 {
+	t.Helper()
+	var s UserSubscription
+	require.NoError(t, DB.Select("amount_used").First(&s, id).Error)
+	return s.AmountUsed
 }
 
 // seedAtomicToken inserts a creation token for the owner and returns its id.
@@ -403,4 +439,45 @@ func userQuota(t *testing.T, owner int) int {
 	var u User
 	require.NoError(t, DB.First(&u, owner).Error)
 	return u.Quota
+}
+
+// P1-1/P1-3 subscription funding source.
+
+func TestCreateImageTaskAtomic_SubscriptionFundingDeducts(t *testing.T) {
+	const owner = 1201
+	seedAtomicOwner(t, owner, 100) // wallet present but must NOT be touched
+	seedAtomicPlan(t, 1201)
+	seedAtomicSubscription(t, 1201, 1201, owner, 100, 0)
+	setCap(t, 5)
+
+	intent := baseAtomicIntent(owner, "sub-1")
+	intent.BillingPreference = ImageTaskBillingPrefSubscriptionOnly
+	intent.ReserveQuota = 5
+	out, err := CreateImageTaskAtomic(intent)
+	require.NoError(t, err)
+	require.True(t, out.Created)
+
+	assert.Equal(t, int64(5), subAmountUsed(t, 1201), "subscription amount_used deducted")
+	assert.Equal(t, 100, userQuota(t, owner), "wallet untouched on subscription path")
+	assert.Equal(t, ImageTaskBillingSourceSubscription, out.Task.PrivateData.BillingSource)
+	assert.Equal(t, 1201, out.Task.PrivateData.SubscriptionId)
+}
+
+func TestCreateImageTaskAtomic_SubscriptionInsufficientFallsBackToWallet(t *testing.T) {
+	const owner = 1202
+	seedAtomicOwner(t, owner, 100) // wallet fallback target
+	seedAtomicPlan(t, 1202)
+	seedAtomicSubscription(t, 1202, 1202, owner, 3, 0) // subscription capacity < reserve
+	setCap(t, 5)
+
+	// default = subscription_first: sub insufficient → fall back to wallet
+	intent := baseAtomicIntent(owner, "sub-fallback")
+	intent.ReserveQuota = 5
+	out, err := CreateImageTaskAtomic(intent)
+	require.NoError(t, err)
+	require.True(t, out.Created)
+
+	assert.Equal(t, int64(0), subAmountUsed(t, 1202), "subscription not consumed (insufficient)")
+	assert.Equal(t, 95, userQuota(t, owner), "fell back to wallet")
+	assert.Equal(t, ImageTaskBillingSourceWallet, out.Task.PrivateData.BillingSource)
 }

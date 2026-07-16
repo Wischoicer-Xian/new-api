@@ -14,18 +14,20 @@ import (
 // responses (409 IDEMPOTENCY_CONFLICT / 429 TOO_MANY_REQUESTS / insufficient
 // quota).
 var (
-	ErrImageTaskIdempotencyConflict = errors.New("idempotency key reused with a different request")
-	ErrImageTaskInFlightCap         = errors.New("per-user in-flight image task cap reached")
-	ErrImageTaskInsufficientQuota   = errors.New("insufficient quota to reserve image task")
-	ErrImageTaskInsufficientToken   = errors.New("insufficient token quota to reserve image task")
+	ErrImageTaskIdempotencyConflict  = errors.New("idempotency key reused with a different request")
+	ErrImageTaskInFlightCap          = errors.New("per-user in-flight image task cap reached")
+	ErrImageTaskInsufficientQuota    = errors.New("insufficient quota to reserve image task")
+	ErrImageTaskInsufficientToken    = errors.New("insufficient token quota to reserve image task")
+	ErrImageTaskNoActiveSubscription = errors.New("no active subscription to reserve image task")
+	ErrImageTaskInsufficientSub      = errors.New("subscription quota insufficient to reserve image task")
 )
 
 // ImageTaskCreateIntent captures everything CreateImageTaskAtomic needs for one
-// §6.1 create. The caller resolves price into ReserveQuota and builds the §7.4
-// BillingSnapshot; this function owns the transactional create + cap
-// enforcement + reserve. The full funding-source/subscription/token billing
-// aggregate (P1-1, grounded in BillingSession) is the next increment; today
-// reserve deducts the wallet path inside the create transaction.
+// §6.1 create. The caller resolves price into ReserveQuota, reads the user's
+// billing preference into BillingPreference, and builds the §7.4 BillingSnapshot;
+// this function owns the transactional create + cap enforcement + the full
+// funding-source/token reserve aggregate (wallet | subscription, grounded in
+// BillingSession), all in one transaction.
 type ImageTaskCreateIntent struct {
 	OwnerUserID       int
 	Group             string
@@ -40,9 +42,10 @@ type ImageTaskCreateIntent struct {
 	ReserveQuota      int
 	// TokenID is the creation token whose limited quota is also reserved (0 =
 	// no token). Unlimited tokens are frozen but not deducted.
-	TokenID         int
-	BillingSnapshot json.RawMessage
-	Now             int64
+	TokenID           int
+	BillingPreference string // "", wallet_only, subscription_only, wallet_first, subscription_first
+	BillingSnapshot   json.RawMessage
+	Now               int64
 }
 
 // ImageTaskCreateOutcome is the result of one atomic create. Created is false
@@ -161,7 +164,7 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 
 		// 6. Reserve via the tx-aware billing ledger, sharing this transaction
 		// (§7.4): billing stage and fund changes commit or roll back together.
-		if err := reserveImageTaskInTx(tx, task.ID, intent); err != nil {
+		if err := reserveImageTaskInTx(tx, task, intent); err != nil {
 			return err
 		}
 
@@ -245,9 +248,19 @@ func validateImageTaskCreateIntent(intent ImageTaskCreateIntent) error {
 // without subscription). The subscription funding source (P1-1 remaining
 // slice) replaces deductWalletInTx with the tx-aware subscription analogue;
 // the frozen projection's BillingSource is updated then.
-func reserveImageTaskInTx(tx *gorm.DB, taskDBID int64, intent ImageTaskCreateIntent) error {
+// Funding-source preference values, mirroring the user billing preference
+// (NewBillingSession). The caller reads them from UserSetting and passes them
+// in; the empty default is subscription_first.
+const (
+	ImageTaskBillingPrefWalletOnly        = "wallet_only"
+	ImageTaskBillingPrefSubscriptionOnly  = "subscription_only"
+	ImageTaskBillingPrefWalletFirst       = "wallet_first"
+	ImageTaskBillingPrefSubscriptionFirst = "subscription_first"
+)
+
+func reserveImageTaskInTx(tx *gorm.DB, task *Task, intent ImageTaskCreateIntent) error {
 	_, ledger, err := RecordBillingStage(tx, TaskBillingStageIntent{
-		TaskDBID:    taskDBID,
+		TaskDBID:    task.ID,
 		Stage:       TaskBillingReserve,
 		Snapshot:    intent.BillingSnapshot,
 		QuotaAmount: intent.ReserveQuota,
@@ -255,15 +268,121 @@ func reserveImageTaskInTx(tx *gorm.DB, taskDBID int64, intent ImageTaskCreateInt
 	if err != nil {
 		return fmt.Errorf("reserve ledger record: %w", err)
 	}
+	var fundingSource string
+	var subscriptionID int
 	if _, err := ApplyBillingStageTx(tx, ledger.ID, func(t *gorm.DB, _ *TaskBillingLedger) error {
+		// Token first (BillingSession.preConsume order); a funding failure rolls
+		// the token deduction back with the transaction — no manual rollback.
 		if err := deductTokenQuotaInTx(t, intent.TokenID, intent.ReserveQuota); err != nil {
 			return err
 		}
-		return deductWalletInTx(t, intent.OwnerUserID, intent.ReserveQuota)
+		source, sid, ferr := deductFundingInTx(t, intent)
+		if ferr != nil {
+			return ferr
+		}
+		fundingSource = source
+		subscriptionID = sid
+		return nil
 	}); err != nil {
 		return err
 	}
+	// Freeze the actual funding source on the task projection. Tasks default to
+	// wallet; switch to subscription when that source was used.
+	if fundingSource == ImageTaskBillingSourceSubscription {
+		task.PrivateData.BillingSource = ImageTaskBillingSourceSubscription
+		task.PrivateData.SubscriptionId = subscriptionID
+		if err := tx.Model(&Task{}).Where("id = ?", task.ID).Update("private_data", task.PrivateData).Error; err != nil {
+			return fmt.Errorf("reserve projection update: %w", err)
+		}
+	}
 	return nil
+}
+
+// deductFundingInTx chooses the funding source per the user's billing preference
+// (mirroring NewBillingSession) and deducts it inside the transaction. It
+// returns the source used and the subscription id (0 for wallet). A 0 reserve
+// deducts nothing.
+func deductFundingInTx(tx *gorm.DB, intent ImageTaskCreateIntent) (string, int, error) {
+	if intent.ReserveQuota <= 0 {
+		return ImageTaskBillingSourceWallet, 0, nil
+	}
+	tryWallet := func() error { return deductWalletInTx(tx, intent.OwnerUserID, intent.ReserveQuota) }
+	trySub := func() (int, error) {
+		return deductSubscriptionInTx(tx, intent.OwnerUserID, int64(intent.ReserveQuota), intent.Now)
+	}
+	switch intent.BillingPreference {
+	case ImageTaskBillingPrefWalletOnly:
+		return ImageTaskBillingSourceWallet, 0, tryWallet()
+	case ImageTaskBillingPrefSubscriptionOnly:
+		sid, err := trySub()
+		if err != nil {
+			return "", 0, err
+		}
+		return ImageTaskBillingSourceSubscription, sid, nil
+	case ImageTaskBillingPrefWalletFirst:
+		if err := tryWallet(); err == nil {
+			return ImageTaskBillingSourceWallet, 0, nil
+		} else if !errors.Is(err, ErrImageTaskInsufficientQuota) {
+			return "", 0, err
+		}
+		sid, err := trySub()
+		if err == nil {
+			return ImageTaskBillingSourceSubscription, sid, nil
+		}
+		return "", 0, err
+	default: // subscription_first (and "")
+		sid, err := trySub()
+		if err == nil {
+			return ImageTaskBillingSourceSubscription, sid, nil
+		}
+		if !errors.Is(err, ErrImageTaskNoActiveSubscription) && !errors.Is(err, ErrImageTaskInsufficientSub) {
+			return "", 0, err
+		}
+		if err := tryWallet(); err == nil {
+			return ImageTaskBillingSourceWallet, 0, nil
+		} else {
+			return "", 0, err
+		}
+	}
+}
+
+// deductSubscriptionInTx is the tx-aware analogue of
+// PreConsumeUserSubscription's core: lock the owner's active subscriptions,
+// apply any period reset, and decrement the first subscription with enough
+// remaining quota. It mirrors the lockForUpdate + plan reset + amount_used
+// deduction; image-task idempotency is the execution key (a replay never enters
+// the transaction), so the separate requestId pre-consume record is not needed
+// here — settle/refund (P3-E/F) reconstruct via the frozen SubscriptionId.
+func deductSubscriptionInTx(tx *gorm.DB, ownerUserID int, amount int64, now int64) (int, error) {
+	var subs []UserSubscription
+	if err := lockForUpdate(tx).
+		Where("user_id = ? AND status = ? AND end_time > ?", ownerUserID, "active", now).
+		Order("end_time asc, id asc").
+		Find(&subs).Error; err != nil {
+		return 0, fmt.Errorf("reserve subscription lookup: %w", err)
+	}
+	if len(subs) == 0 {
+		return 0, ErrImageTaskNoActiveSubscription
+	}
+	for _, candidate := range subs {
+		sub := candidate
+		plan, err := getSubscriptionPlanByIdTx(tx, sub.PlanId)
+		if err != nil {
+			return 0, fmt.Errorf("reserve subscription plan lookup: %w", err)
+		}
+		if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
+			return 0, fmt.Errorf("reserve subscription period reset: %w", err)
+		}
+		if sub.AmountTotal > 0 && sub.AmountTotal-sub.AmountUsed < amount {
+			continue
+		}
+		sub.AmountUsed += amount
+		if err := tx.Save(&sub).Error; err != nil {
+			return 0, fmt.Errorf("reserve subscription deduction: %w", err)
+		}
+		return sub.Id, nil
+	}
+	return 0, ErrImageTaskInsufficientSub
 }
 
 // deductWalletInTx performs a tx-aware, conditional wallet deduction that
