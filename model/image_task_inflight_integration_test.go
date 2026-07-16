@@ -17,7 +17,7 @@ func TestCountInFlightImageTasksByOwner_OnRealDB(t *testing.T) {
 	setupWischoicerIntegrationDB(t)
 	seedInFlightRows(t, 7)
 
-	count, err := CountInFlightImageTasksByOwner(7)
+	count, err := CountInFlightImageTasksByOwner(DB, 7)
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), count, "six non-terminal states count; three terminal states do not")
 }

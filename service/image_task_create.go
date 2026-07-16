@@ -15,34 +15,28 @@ func ImageTaskCreateAllowed() bool {
 	return constant.ImageTaskCreateEnabled
 }
 
-// imageTaskInFlightRetryAfterSeconds is the Retry-After hint (seconds) returned
-// with a 429 when a user is over the in-flight cap. A short, fixed backoff:
-// image tasks complete asynchronously and free capacity continuously.
-const imageTaskInFlightRetryAfterSeconds = 5
-
-// ImageTaskInFlightStatus reports a user's non-terminal image task count
-// against the §6.1 per-user cap. AtCap is true when the cap is configured and
-// current meets/exceeds it; the caller then rejects the create with 429 +
-// RetryAfter. A cap <= 0 disables the limit (AtCap always false).
+// ImageTaskInFlightStatus is a READ-ONLY snapshot of a user's in-flight image
+// task count against the configured cap (§6.1). It is NOT concurrency-safe
+// enforcement: ImageTaskInFlightStatusOf holds no transaction and no owner
+// fence, so two concurrent requests can both observe the same count (write
+// skew). Callers MUST NOT treat this primitive as a gate.
+//
+// Real per-user enforcement lands in C3, inside one transaction: idempotent
+// replay/conflict first, then lockForUpdate on the owner fence, then
+// CountInFlightImageTasksByOwner(tx, owner) + Task/execution + reserve ledger,
+// all in that tx (SQLite serial-write, MySQL/PostgreSQL row lock).
 type ImageTaskInFlightStatus struct {
-	Current    int64
-	Cap        int
-	AtCap      bool
-	RetryAfter int
+	Current int64
+	Cap     int
 }
 
-// ImageTaskInFlightStatusOf reads the user's in-flight image task count and
-// evaluates it against the configured cap.
+// ImageTaskInFlightStatusOf reads the user's in-flight image task count and the
+// configured cap. Read-only primitive; see the type doc for why it is not
+// enforcement.
 func ImageTaskInFlightStatusOf(userID int) (ImageTaskInFlightStatus, error) {
-	cap := constant.MaxImageTasksPerUser
-	current, err := model.CountInFlightImageTasksByOwner(userID)
+	current, err := model.CountInFlightImageTasksByOwner(model.DB, userID)
 	if err != nil {
 		return ImageTaskInFlightStatus{}, fmt.Errorf("count in-flight image tasks for user %d: %w", userID, err)
 	}
-	status := ImageTaskInFlightStatus{Current: current, Cap: cap}
-	if cap > 0 && current >= int64(cap) {
-		status.AtCap = true
-		status.RetryAfter = imageTaskInFlightRetryAfterSeconds
-	}
-	return status, nil
+	return ImageTaskInFlightStatus{Current: current, Cap: constant.MaxImageTasksPerUser}, nil
 }

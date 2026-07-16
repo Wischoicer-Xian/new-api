@@ -16,15 +16,15 @@ func TestCountInFlightImageTasksByOwner(t *testing.T) {
 	seedInFlightRows(t, 1)
 	seedInFlightRows(t, 2) // other user, must not affect owner 1
 
-	count, err := CountInFlightImageTasksByOwner(1)
+	count, err := CountInFlightImageTasksByOwner(DB, 1)
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), count, "six non-terminal states for owner 1")
 
-	other, err := CountInFlightImageTasksByOwner(2)
+	other, err := CountInFlightImageTasksByOwner(DB, 2)
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), other, "owner 2 isolated, same six non-terminal states")
 
-	none, err := CountInFlightImageTasksByOwner(999)
+	none, err := CountInFlightImageTasksByOwner(DB, 999)
 	require.NoError(t, err)
 	assert.Zero(t, none, "unknown owner has no in-flight tasks")
 }

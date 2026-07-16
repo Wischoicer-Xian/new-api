@@ -21,8 +21,10 @@ func TestImageTaskCreateAllowed(t *testing.T) {
 	assert.True(t, ImageTaskCreateAllowed(), "create allowed when the switch is on")
 }
 
-// TestImageTaskInFlightStatusOf proves the per-user cap (§6.1): AtCap flips at
-// the configured threshold and a cap <= 0 disables the limit.
+// TestImageTaskInFlightStatusOf proves the READ-ONLY status primitive returns
+// the user's non-terminal count and the configured cap. It deliberately does
+// not assert any enforcement (AtCap/429): per §6.1 review, this primitive is
+// not a concurrency-safe gate; enforcement lands in C3 inside one transaction.
 func TestImageTaskInFlightStatusOf(t *testing.T) {
 	truncate(t)
 
@@ -48,18 +50,4 @@ func TestImageTaskInFlightStatusOf(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), status.Current)
 	assert.Equal(t, 3, status.Cap)
-	assert.False(t, status.AtCap, "under the cap is not at-cap")
-	assert.Zero(t, status.RetryAfter)
-
-	mk(3) // meets the cap
-	status, err = ImageTaskInFlightStatusOf(1)
-	require.NoError(t, err)
-	assert.True(t, status.AtCap, "at the cap rejects with 429")
-	assert.Equal(t, imageTaskInFlightRetryAfterSeconds, status.RetryAfter)
-
-	// cap disabled
-	constant.MaxImageTasksPerUser = 0
-	status, err = ImageTaskInFlightStatusOf(1)
-	require.NoError(t, err)
-	assert.False(t, status.AtCap, "cap <= 0 disables the limit")
 }

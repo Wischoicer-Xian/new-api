@@ -25,9 +25,17 @@ var TaskTimeoutMinutes int
 // principal/channel/model allowlist. P3-C reads it; P3-I replaces it.
 var ImageTaskCreateEnabled bool
 
+// DefaultMaxImageTasksPerUser is the dormant, provisional per-user in-flight
+// image task cap (§6.1). The final throttle value is a product-owner decision
+// that 夏洛克/Krislliu close before any create route goes live; until then this
+// default is provisional and MUST NOT be presented as a closed rate-limit
+// decision. common.ParseMaxImageTasksPerUser returns it when the env is unset.
+const DefaultMaxImageTasksPerUser = 10
+
 // MaxImageTasksPerUser caps how many non-terminal image tasks one user may hold
-// at once (§6.1: over the cap returns 429 + Retry-After). The default is a
-// conservative placeholder; the product owner owns the final throttle value.
+// at once (§6.1). It must be positive: common.ParseMaxImageTasksPerUser fails
+// startup on 0/negative/non-numeric, so the §6.1/§12.1/§17 mandatory cap can
+// never be silently disabled. Initialized from MAX_IMAGE_TASKS_PER_USER.
 var MaxImageTasksPerUser int
 
 // temporary variable for sora patch, will be removed in future
