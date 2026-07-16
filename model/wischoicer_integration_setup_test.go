@@ -141,6 +141,13 @@ func setupWischoicerIntegrationDB(t *testing.T) {
 		// Task rows and prove the legacy fetch + image-platform exclusion hold on
 		// each database.
 		&Task{},
+		// Token, UserSubscription, SubscriptionPlan back the tx-aware image-task
+		// reserve aggregate (P1-1): token deduction + funding-source choice. The
+		// default subscription_first path queries user_subscriptions, so the
+		// integration DB must migrate these for the concurrency matrix.
+		&Token{},
+		&UserSubscription{},
+		&SubscriptionPlan{},
 	); err != nil {
 		t.Fatalf("auto-migrate %s schema: %v", database, err)
 	}
