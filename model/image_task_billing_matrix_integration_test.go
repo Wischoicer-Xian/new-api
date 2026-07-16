@@ -176,13 +176,13 @@ func TestFundMatrix_RealDB(t *testing.T) {
 			require.NoError(t, r.err)
 		}
 		assert.Equal(t, results[0].execID, results[1].execID)
-		replayedCount := 0
+		createdCount := 0
 		for _, r := range results {
 			if !r.replayed {
-				replayedCount++
+				createdCount++
 			}
 		}
-		assert.Equal(t, 0, replayedCount, "neither replayed; one created")
+		assert.Equal(t, 1, createdCount, "exactly one created, one replayed")
 		var u User
 		require.NoError(t, DB.First(&u, owner).Error)
 		assert.Equal(t, 1000-42, u.Quota, "deducted once")
