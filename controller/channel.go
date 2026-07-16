@@ -1075,7 +1075,7 @@ func UpdateChannel(c *gin.Context) {
 		}
 	}
 	// 渠道写 + ability + 图片 revision 同事务（§7.2 原子性）；revision 创建失败整笔回滚，保存明确失败。
-	if err := model.UpdateChannelWithImageRevision(&channel.Channel, imageChannelRevisionBuilder()); err != nil {
+	if err := model.UpdateChannelWithImageRevision(&channel.Channel, collectNullColumns(&channel, requestData), imageChannelRevisionBuilder()); err != nil {
 		common.ApiError(c, err)
 		return
 	}

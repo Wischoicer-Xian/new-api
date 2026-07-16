@@ -215,11 +215,25 @@ func InsertChannelWithImageRevision(channel *Channel, buildRevision ChannelRevis
 // same transaction. A revision build or persist failure rolls the channel
 // update back so the save fails explicitly rather than leaving a channel whose
 // persisted config has no matching revision (§7.2 atomicity).
-func UpdateChannelWithImageRevision(channel *Channel, buildRevision ChannelRevisionBuilder) error {
+//
+// nullColumns lists column names the request explicitly set to nil (e.g.
+// image_execution_config on a clear). GORM's struct Updates skips nil pointer
+// fields, so without this the old value would silently persist; each listed
+// column is written to SQL NULL in the SAME transaction, keeping the
+// channel + ability + revision write atomic across SQLite/MySQL/PostgreSQL.
+func UpdateChannelWithImageRevision(channel *Channel, nullColumns []string, buildRevision ChannelRevisionBuilder) error {
 	return DB.Transaction(func(tx *gorm.DB) error {
 		channel.recalcMultiKeySize()
 		if err := tx.Model(channel).Updates(channel).Error; err != nil {
 			return err
+		}
+		// Explicit NULL writes for fields the request cleared. Struct Updates
+		// skips nil pointers; this closes the gap so a null patch actually
+		// persists NULL instead of leaving the prior value.
+		for _, column := range nullColumns {
+			if err := tx.Model(channel).Update(column, nil).Error; err != nil {
+				return err
+			}
 		}
 		if err := tx.Model(channel).First(channel, "id = ?", channel.Id).Error; err != nil {
 			return err

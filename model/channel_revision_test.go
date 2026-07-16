@@ -15,6 +15,7 @@ func truncateChannelRevisions(t *testing.T) {
 	t.Cleanup(func() {
 		DB.Exec("DELETE FROM image_task_executions")
 		DB.Exec("DELETE FROM channel_revisions")
+		DB.Exec("DELETE FROM abilities")
 		DB.Exec("DELETE FROM channels")
 	})
 }

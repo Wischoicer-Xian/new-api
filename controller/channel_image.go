@@ -111,3 +111,32 @@ func mergeChannelPatchIntoOrigin(channel *PatchChannel, origin *model.Channel, r
 		channel.OpenAIOrganization = origin.OpenAIOrganization
 	}
 }
+
+// collectNullColumns returns the DB column names the request explicitly cleared
+// (key present in requestData, value resolves to nil after merge). These are the
+// columns GORM struct Updates would silently skip, leaving the prior value in
+// place. UpdateChannelWithImageRevision writes each to SQL NULL in-transaction.
+func collectNullColumns(channel *PatchChannel, requestData map[string]any) []string {
+	type field struct {
+		jsonKey string
+		column  string
+		isNil   bool
+	}
+	fields := []field{
+		{"image_execution_config", "image_execution_config", channel.ImageExecutionConfig == nil},
+		{"setting", "setting", channel.Setting == nil},
+		{"param_override", "param_override", channel.ParamOverride == nil},
+		{"header_override", "header_override", channel.HeaderOverride == nil},
+		{"model_mapping", "model_mapping", channel.ModelMapping == nil},
+		{"status_code_mapping", "status_code_mapping", channel.StatusCodeMapping == nil},
+		{"openai_organization", "openai_organization", channel.OpenAIOrganization == nil},
+		{"base_url", "base_url", channel.BaseURL == nil},
+	}
+	cols := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if _, ok := requestData[f.jsonKey]; ok && f.isNil {
+			cols = append(cols, f.column)
+		}
+	}
+	return cols
+}

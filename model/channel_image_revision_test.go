@@ -112,7 +112,7 @@ func TestUpdateChannelWithImageRevision_CreatesNewRevisionKeepingOld(t *testing.
 
 	// Second save: change a mutable field and freeze a new revision.
 	ch.Name = "img-update-renamed"
-	require.NoError(t, UpdateChannelWithImageRevision(&ch, imageRevisionBuilderForTest("test-v1")))
+	require.NoError(t, UpdateChannelWithImageRevision(&ch, nil, imageRevisionBuilderForTest("test-v1")))
 
 	var allRevs []ChannelRevision
 	require.NoError(t, DB.Where("channel_id = ?", ch.Id).Order("revision_number").Find(&allRevs).Error)
@@ -132,7 +132,7 @@ func TestUpdateChannelWithImageRevision_BuilderErrorRollsBackUpdate(t *testing.T
 	originalName := ch.Name
 
 	ch.Name = "should-not-persist"
-	err := UpdateChannelWithImageRevision(&ch, ChannelRevisionBuilder(func(*Channel) (*ChannelRevisionCreate, error) {
+	err := UpdateChannelWithImageRevision(&ch, nil, ChannelRevisionBuilder(func(*Channel) (*ChannelRevisionCreate, error) {
 		return nil, errors.New("revision boom")
 	}))
 	require.Error(t, err)
@@ -169,7 +169,7 @@ func TestImageRevision_FreezesRuntimeProviderFields(t *testing.T) {
 	// Mutate runtime-consumed provider fields and save a new revision.
 	paramAfter := `{"quality":"hd"}`
 	ch.ParamOverride = &paramAfter
-	require.NoError(t, UpdateChannelWithImageRevision(&ch, imageRevisionBuilderForTest("v1")))
+	require.NoError(t, UpdateChannelWithImageRevision(&ch, nil, imageRevisionBuilderForTest("v1")))
 
 	var allRevs []ChannelRevision
 	require.NoError(t, DB.Where("channel_id = ?", ch.Id).Order("revision_number").Find(&allRevs).Error)
@@ -240,4 +240,30 @@ func TestBatchInsertChannelsWithImageRevision_NthFailureRollsBackWholeBatch(t *t
 	var revCount int64
 	require.NoError(t, DB.Model(&ChannelRevision{}).Count(&revCount).Error)
 	assert.Zero(t, revCount)
+}
+
+func TestUpdateChannelWithImageRevision_ExplicitNullClearPersists(t *testing.T) {
+	truncateChannelRevisions(t)
+	ch := newImageChannelForTest(t, "img-clear")
+	require.NoError(t, InsertChannelWithImageRevision(&ch, imageRevisionBuilderForTest("v1")))
+	require.Equal(t, countRevisions(t, ch.Id), int64(1))
+	originalAbilityCount := countAbilities(t, ch.Id)
+
+	// Simulate an explicit PATCH {image_execution_config: null}: the field is
+	// cleared and the controller lists it in nullColumns so the write path
+	// persists SQL NULL instead of silently keeping the old value (GORM struct
+	// Updates would otherwise skip the nil pointer).
+	ch.ImageExecutionConfig = nil
+	err := UpdateChannelWithImageRevision(&ch, []string{"image_execution_config"}, imageRevisionBuilderForTest("v1"))
+	require.NoError(t, err)
+
+	// Re-query the DB and assert the column is actually NULL, not the old config.
+	var dbCh Channel
+	require.NoError(t, DB.First(&dbCh, ch.Id).Error)
+	assert.Nil(t, dbCh.ImageExecutionConfig, "explicit null must persist as SQL NULL, not the prior value")
+
+	// Clearing the config makes the channel non-image-capable: no new revision.
+	assert.Equal(t, countRevisions(t, ch.Id), int64(1), "no new revision after clearing config")
+	// Abilities are untouched by the config clear.
+	assert.Equal(t, originalAbilityCount, countAbilities(t, ch.Id))
 }
