@@ -131,44 +131,13 @@ func ApplyBillingStage(db *gorm.DB, id int64, apply func(tx *gorm.DB, ledger *Ta
 	if apply == nil {
 		return false, fmt.Errorf("apply billing stage: nil callback")
 	}
+	// ApplyBillingStage is the self-managed-transaction wrapper; the CAS itself
+	// lives in ApplyBillingStageTx so there is exactly one pending→applying→
+	// applied state machine in the codebase.
 	err = db.Transaction(func(tx *gorm.DB) error {
-		claim := tx.Model(&TaskBillingLedger{}).
-			Where("id = ? AND state = ?", id, BillingStatePending).
-			Update("state", BillingStateApplying)
-		if claim.Error != nil {
-			return claim.Error
-		}
-		if claim.RowsAffected != 1 {
-			var state string
-			if err := tx.Model(&TaskBillingLedger{}).Select("state").Where("id = ?", id).Scan(&state).Error; err != nil {
-				return err
-			}
-			if state == BillingStateApplied {
-				return nil
-			}
-			if state == "" {
-				return gorm.ErrRecordNotFound
-			}
-			return fmt.Errorf("apply billing stage: ledger %d is in state %q", id, state)
-		}
-		ledger := &TaskBillingLedger{}
-		if err := tx.First(ledger, id).Error; err != nil {
-			return err
-		}
-		if err := apply(tx, ledger); err != nil {
-			return err
-		}
-		result := tx.Model(&TaskBillingLedger{}).
-			Where("id = ? AND state = ?", id, BillingStateApplying).
-			Update("state", BillingStateApplied)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return fmt.Errorf("apply billing stage: ledger %d lost pending state", id)
-		}
-		won = true
-		return nil
+		w, e := ApplyBillingStageTx(tx, id, apply)
+		won = w
+		return e
 	})
 	if err != nil {
 		return false, err

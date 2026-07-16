@@ -225,6 +225,12 @@ func validateImageTaskCreateIntent(intent ImageTaskCreateIntent) error {
 	if intent.ReserveQuota < 0 {
 		return errors.New("image task create: reserve quota must not be negative")
 	}
+	// CreationTokenID and TokenID must refer to the same token when both set,
+	// so a caller cannot freeze one token on the execution row while deducting
+	// another (P1-2 cross-owner/cross-token gap).
+	if intent.TokenID != 0 && intent.CreationTokenID != 0 && intent.TokenID != intent.CreationTokenID {
+		return fmt.Errorf("image task create: token id mismatch (token=%d, creation_token=%d)", intent.TokenID, intent.CreationTokenID)
+	}
 	if len(intent.BillingSnapshot) == 0 {
 		return errors.New("image task create: billing_snapshot required")
 	}
@@ -273,7 +279,7 @@ func reserveImageTaskInTx(tx *gorm.DB, task *Task, intent ImageTaskCreateIntent)
 	if _, err := ApplyBillingStageTx(tx, ledger.ID, func(t *gorm.DB, _ *TaskBillingLedger) error {
 		// Token first (BillingSession.preConsume order); a funding failure rolls
 		// the token deduction back with the transaction — no manual rollback.
-		if err := deductTokenQuotaInTx(t, intent.TokenID, intent.ReserveQuota); err != nil {
+		if err := deductTokenQuotaInTx(t, intent.OwnerUserID, intent.TokenID, intent.ReserveQuota, intent.Now); err != nil {
 			return err
 		}
 		source, sid, ferr := deductFundingInTx(t, intent)
@@ -407,26 +413,32 @@ func deductWalletInTx(tx *gorm.DB, ownerUserID, amount int) error {
 	return nil
 }
 
-// deductTokenQuotaInTx is the tx-aware analogue of the relay token pre-consume:
-// unlimited tokens (token.go UnlimitedQuota) are frozen but not deducted;
-// limited tokens are conditionally decremented (remain_quota >= amount) so the
-// balance never goes negative. tokenId 0 means no token and is a no-op. The
-// token row is read under the create transaction (owner fence already
-// serializes same-owner writes), so no separate lock is needed.
-func deductTokenQuotaInTx(tx *gorm.DB, tokenID, amount int) error {
+// deductTokenQuotaInTx is the tx-aware analogue of the relay token pre-consume
+// (DecreaseTokenQuota): unlimited tokens are frozen but not deducted; limited
+// tokens are decremented in one conditional UPDATE that constrains owner,
+// status, expiry and remaining quota — and synchronously bumps used_quota and
+// accessed_time so the token's usage stats and balance stay consistent (no
+// async cache mutation). tokenId 0 means no token. The constraint
+// user_id=owner closes the cross-owner token-deduction gap (P1-2).
+func deductTokenQuotaInTx(tx *gorm.DB, ownerUserID, tokenID, amount int, now int64) error {
 	if tokenID == 0 || amount <= 0 {
 		return nil
 	}
 	var token Token
-	if err := tx.Select("id", "unlimited_quota", "remain_quota").First(&token, tokenID).Error; err != nil {
+	if err := tx.Select("id", "unlimited_quota").First(&token, tokenID).Error; err != nil {
 		return fmt.Errorf("reserve token lookup: %w", err)
 	}
 	if token.UnlimitedQuota {
 		return nil // frozen, not deducted
 	}
 	deducted := tx.Model(&Token{}).
-		Where("id = ? AND remain_quota >= ?", tokenID, amount).
-		Update("remain_quota", gorm.Expr("remain_quota - ?", amount))
+		Where("id = ? AND user_id = ? AND status = ? AND remain_quota >= ? AND (expired_time = ? OR expired_time > ?)",
+			tokenID, ownerUserID, common.TokenStatusEnabled, amount, -1, now).
+		Updates(map[string]any{
+			"remain_quota":  gorm.Expr("remain_quota - ?", amount),
+			"used_quota":    gorm.Expr("used_quota + ?", amount),
+			"accessed_time": now,
+		})
 	if deducted.Error != nil {
 		return fmt.Errorf("reserve token deduction: %w", deducted.Error)
 	}
