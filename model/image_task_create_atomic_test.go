@@ -59,15 +59,16 @@ func seedAtomicPlan(t *testing.T, id int) {
 func seedAtomicSubscription(t *testing.T, subID, planID, userID int, total, used int64) {
 	t.Helper()
 	require.NoError(t, DB.Create(&UserSubscription{
-		Id:            subID,
-		UserId:        userID,
-		PlanId:        planID,
-		AmountTotal:   total,
-		AmountUsed:    used,
-		StartTime:     1_600_000_000,
-		EndTime:       2_000_000_000,
-		Status:        "active",
-		NextResetTime: 2_000_000_000,
+		Id:                  subID,
+		UserId:              userID,
+		PlanId:              planID,
+		AmountTotal:         total,
+		AmountUsed:          used,
+		StartTime:           1_600_000_000,
+		EndTime:             2_000_000_000,
+		Status:              "active",
+		NextResetTime:       2_000_000_000,
+		AllowWalletOverflow: true, // mirror plan default (AllowWalletOverflow nil→true)
 	}).Error)
 }
 
@@ -519,7 +520,7 @@ func TestCreateImageTaskAtomic_SubscriptionInsufficientFallsBackToWallet(t *test
 	seedAtomicSubscription(t, 1202, 1202, owner, 3, 0) // subscription capacity < reserve
 	setCap(t, 5)
 
-	// default = subscription_first: sub insufficient → fall back to wallet
+	// default = subscription_first: sub insufficient + allow_wallet_overflow → wallet
 	intent := baseAtomicIntent(owner, "sub-fallback")
 	intent.ReserveQuota = 5
 	out, err := CreateImageTaskAtomic(intent)
@@ -529,4 +530,29 @@ func TestCreateImageTaskAtomic_SubscriptionInsufficientFallsBackToWallet(t *test
 	assert.Equal(t, int64(0), subAmountUsed(t, 1202), "subscription not consumed (insufficient)")
 	assert.Equal(t, 95, userQuota(t, owner), "fell back to wallet")
 	assert.Equal(t, ImageTaskBillingSourceWallet, out.Task.PrivateData.BillingSource)
+}
+
+func TestCreateImageTaskAtomic_StrictSubscriptionDoesNotTouchWallet(t *testing.T) {
+	const owner = 1203
+	seedAtomicOwner(t, owner, 100) // wallet present but must NOT be touched
+	seedAtomicPlan(t, 1203)
+	// strict subscription: insufficient + allow_wallet_overflow=false
+	require.NoError(t, DB.Create(&UserSubscription{
+		Id: 1203, UserId: owner, PlanId: 1203,
+		AmountTotal: 3, AmountUsed: 0,
+		StartTime: 1_600_000_000, EndTime: 2_000_000_000,
+		Status: "active", NextResetTime: 2_000_000_000,
+		AllowWalletOverflow: false,
+	}).Error)
+	setCap(t, 5)
+
+	intent := baseAtomicIntent(owner, "strict-sub")
+	intent.ReserveQuota = 5
+	_, err := CreateImageTaskAtomic(intent)
+	assert.ErrorIs(t, err, ErrImageTaskInsufficientSub, "strict subscription returns insufficient, not wallet")
+
+	// wallet NOT touched (strict path)
+	assert.Equal(t, 100, userQuota(t, owner), "strict subscription must not deduct wallet")
+	count, _ := CountInFlightImageTasksByOwner(DB, owner)
+	assert.Zero(t, count, "nothing persisted")
 }

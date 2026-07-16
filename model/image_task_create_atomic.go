@@ -215,7 +215,33 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 	if err != nil {
 		return ImageTaskCreateOutcome{}, err
 	}
+	// Post-commit cache convergence (P1-2): decrement the Redis quota cache for
+	// the actual funding sources that were deducted in the committed reserve
+	// transaction. Only for Created=true; replay/rollback do not touch cache.
+	// No-op when Redis is disabled (common.RedisEnabled=false).
+	if outcome.Created {
+		convergeImageTaskReserveCache(outcome.Task, intent)
+	}
 	return outcome, nil
+}
+
+// convergeImageTaskReserveCache decrements the Redis quota cache for the actual
+// wallet/token sources deducted in the committed reserve transaction. It is
+// called AFTER the create transaction commits, so a rollback never dirties the
+// cache. Subscription-source reserves do not touch the user-quota cache.
+func convergeImageTaskReserveCache(task *Task, intent ImageTaskCreateIntent) {
+	if !common.RedisEnabled {
+		return // Redis disabled: no cache to converge
+	}
+	if task.PrivateData.BillingSource == ImageTaskBillingSourceWallet {
+		_ = cacheDecrUserQuota(intent.OwnerUserID, int64(intent.ReserveQuota))
+	}
+	if intent.TokenID != 0 {
+		var tk Token
+		if DB.Select("key", "unlimited_quota").First(&tk, intent.TokenID).Error == nil && !tk.UnlimitedQuota {
+			_ = cacheDecrTokenQuota(tk.Key, int64(intent.ReserveQuota))
+		}
+	}
 }
 
 // lookupImageTaskExecution returns the existing execution for an idempotency
@@ -366,19 +392,25 @@ func reserveImageTaskInTx(tx *gorm.DB, task *Task, intent ImageTaskCreateIntent)
 // (mirroring NewBillingSession) and deducts it inside the transaction. It
 // returns the source used and the subscription id (0 for wallet). A 0 reserve
 // deducts nothing.
+//
+// subscription_first (default) respects the subscription's frozen
+// allow_wallet_overflow flag (from the plan at purchase): a strict subscription
+// (allow_wallet_overflow=false) that is insufficient returns subscription
+// insufficient WITHOUT falling back to wallet; allow_wallet_overflow=true falls
+// back to wallet; no active subscription falls back to wallet.
 func deductFundingInTx(tx *gorm.DB, intent ImageTaskCreateIntent) (string, int, error) {
 	if intent.ReserveQuota <= 0 {
 		return ImageTaskBillingSourceWallet, 0, nil
 	}
 	tryWallet := func() error { return deductWalletInTx(tx, intent.OwnerUserID, intent.ReserveQuota) }
-	trySub := func() (int, error) {
+	trySub := func() (int, bool, error) {
 		return deductSubscriptionInTx(tx, intent.OwnerUserID, int64(intent.ReserveQuota), intent.Now)
 	}
 	switch intent.BillingPreference {
 	case ImageTaskBillingPrefWalletOnly:
 		return ImageTaskBillingSourceWallet, 0, tryWallet()
 	case ImageTaskBillingPrefSubscriptionOnly:
-		sid, err := trySub()
+		sid, _, err := trySub()
 		if err != nil {
 			return "", 0, err
 		}
@@ -389,23 +421,28 @@ func deductFundingInTx(tx *gorm.DB, intent ImageTaskCreateIntent) (string, int, 
 		} else if !errors.Is(err, ErrImageTaskInsufficientQuota) {
 			return "", 0, err
 		}
-		sid, err := trySub()
+		sid, _, err := trySub()
 		if err == nil {
 			return ImageTaskBillingSourceSubscription, sid, nil
 		}
 		return "", 0, err
 	default: // subscription_first (and "")
-		sid, err := trySub()
+		sid, overflow, err := trySub()
 		if err == nil {
 			return ImageTaskBillingSourceSubscription, sid, nil
 		}
+		// strict (allow_wallet_overflow=false) + insufficient → do NOT touch wallet
+		if errors.Is(err, ErrImageTaskInsufficientSub) && !overflow {
+			return "", 0, err
+		}
+		// no-active, allow-overflow, or unexpected → wallet fallback
 		if !errors.Is(err, ErrImageTaskNoActiveSubscription) && !errors.Is(err, ErrImageTaskInsufficientSub) {
 			return "", 0, err
 		}
-		if err := tryWallet(); err == nil {
+		if e := tryWallet(); e == nil {
 			return ImageTaskBillingSourceWallet, 0, nil
 		} else {
-			return "", 0, err
+			return "", 0, e
 		}
 	}
 }
@@ -417,36 +454,39 @@ func deductFundingInTx(tx *gorm.DB, intent ImageTaskCreateIntent) (string, int, 
 // deduction; image-task idempotency is the execution key (a replay never enters
 // the transaction), so the separate requestId pre-consume record is not needed
 // here — settle/refund (P3-E/F) reconstruct via the frozen SubscriptionId.
-func deductSubscriptionInTx(tx *gorm.DB, ownerUserID int, amount int64, now int64) (int, error) {
+func deductSubscriptionInTx(tx *gorm.DB, ownerUserID int, amount int64, now int64) (subID int, allowOverflow bool, err error) {
 	var subs []UserSubscription
 	if err := lockForUpdate(tx).
 		Where("user_id = ? AND status = ? AND end_time > ?", ownerUserID, "active", now).
 		Order("end_time asc, id asc").
 		Find(&subs).Error; err != nil {
-		return 0, fmt.Errorf("reserve subscription lookup: %w", err)
+		return 0, false, fmt.Errorf("reserve subscription lookup: %w", err)
 	}
 	if len(subs) == 0 {
-		return 0, ErrImageTaskNoActiveSubscription
+		return 0, false, ErrImageTaskNoActiveSubscription
 	}
 	for _, candidate := range subs {
 		sub := candidate
 		plan, err := getSubscriptionPlanByIdTx(tx, sub.PlanId)
 		if err != nil {
-			return 0, fmt.Errorf("reserve subscription plan lookup: %w", err)
+			return 0, false, fmt.Errorf("reserve subscription plan lookup: %w", err)
 		}
 		if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
-			return 0, fmt.Errorf("reserve subscription period reset: %w", err)
+			return 0, false, fmt.Errorf("reserve subscription period reset: %w", err)
 		}
 		if sub.AmountTotal > 0 && sub.AmountTotal-sub.AmountUsed < amount {
 			continue
 		}
 		sub.AmountUsed += amount
 		if err := tx.Save(&sub).Error; err != nil {
-			return 0, fmt.Errorf("reserve subscription deduction: %w", err)
+			return 0, false, fmt.Errorf("reserve subscription deduction: %w", err)
 		}
-		return sub.Id, nil
+		return sub.Id, false, nil
 	}
-	return 0, ErrImageTaskInsufficientSub
+	// All active subs insufficient: return the overflow flag of the first
+	// candidate (frozen from plan at purchase) so the caller can decide whether
+	// wallet fallback is allowed (strict vs allow).
+	return 0, subs[0].AllowWalletOverflow, ErrImageTaskInsufficientSub
 }
 
 // deductWalletInTx performs a tx-aware, conditional wallet deduction that
