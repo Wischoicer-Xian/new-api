@@ -187,6 +187,7 @@ import {
   ChannelAuthSection,
   ChannelBasicSection,
   ChannelEditorLoadingState,
+  ChannelImageCapabilitySection,
   ChannelModelsSection,
 } from './sections'
 
@@ -4621,6 +4622,7 @@ export function ChannelMutateDrawer({
                             </fieldset>
                           </div>
                         )}
+                        <ChannelImageCapabilitySection form={form} />
                       </ChannelAdvancedSection>
                     </div>
                   </div>

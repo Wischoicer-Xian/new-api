@@ -16,7 +16,9 @@
     "copyright:check": "node scripts/add-copyright.mjs --check",
     "copyright": "node scripts/add-copyright.mjs",
     "i18n:sync": "node scripts/sync-i18n.mjs",
-    "knip": "knip"
+    "knip": "knip",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -85,6 +87,9 @@
     "@tanstack/react-query-devtools": "^5.101.2",
     "@tanstack/react-router-devtools": "^1.167.0",
     "@tanstack/router-plugin": "^1.168.19",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^26.1.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -92,10 +97,12 @@
     "@xyflow/react": "^12.11.1",
     "embla-carousel-react": "^8.6.0",
     "happy-dom": "^20.10.6",
+    "jsdom": "^29.1.1",
     "knip": "^6.24.0",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
-    "shadcn": "^4.12.0"
+    "shadcn": "^4.12.0",
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "brace-expansion": "2.1.1",

@@ -470,6 +470,11 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
 	}
 
+	// 图片任务执行配置：未知字段或不被 adapter 支持的模式 fail closed，避免错误渠道进入图片任务候选池。
+	if err := validateImageExecutionConfig(channel); err != nil {
+		return err
+	}
+
 	// 如果是添加操作，检查 channel 和 key 是否为空
 	if isAdd {
 		if channel == nil || channel.Key == "" {
@@ -681,10 +686,24 @@ func AddChannel(c *gin.Context) {
 		}
 		channels = append(channels, *localChannel)
 	}
-	err = model.BatchInsertChannels(channels)
-	if err != nil {
-		common.ApiError(c, err)
+	// 图片能力渠道：单条事务插入（Create + ability + revision 原子，ID 回填后建 revision）；
+	// 非图片渠道沿用批量插入。先 probe 模板判定路径。
+	imageRevisionBuilder := imageChannelRevisionBuilder()
+	if probe, probeErr := imageRevisionBuilder(addChannelRequest.Channel); probeErr != nil {
+		common.ApiError(c, probeErr)
 		return
+	} else if probe != nil {
+		// 图片能力批次：整批 channel + abilities + revisions 共用一个事务，
+		// 任一条失败整批回滚，保留 BatchInsertChannels 的 all-or-nothing 语义。
+		if err := model.BatchInsertChannelsWithImageRevision(channels, imageRevisionBuilder); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	} else {
+		if err := model.BatchInsertChannels(channels); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	service.ResetProxyClientCache()
 	recordManageAudit(c, "channel.create", map[string]interface{}{
@@ -849,7 +868,7 @@ func EditTagChannels(c *gin.Context) {
 		}
 		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
 	}
-	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride)
+	err = model.EditChannelByTagWithImageRevision(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride, imageChannelRevisionBuilder())
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -934,15 +953,10 @@ func UpdateChannel(c *gin.Context) {
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
-	// 使用统一的校验函数
-	if err := validateChannel(&channel.Channel, false); err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
+	// Load origin BEFORE validating: validation must run against the FINAL
+	// persisted state (origin merged with the patch), not the patch-zero view.
+	// A config-only patch (omitting type) must not be rejected as "unknown type
+	// 0" before origin merge (P1-2).
 	originChannel, err := model.GetChannelById(channel.Id, true)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -954,6 +968,20 @@ func UpdateChannel(c *gin.Context) {
 
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
+
+	// Merge origin values for fields the request did not explicitly provide,
+	// keyed on requestData presence: a field absent from the request inherits
+	// origin; a field present (even null/empty) is honored as the patch intent.
+	// This yields the FINAL persisted object so one validateChannel pass covers
+	// both partial-patch directions (type-only and config-only).
+	mergeChannelPatchIntoOrigin(&channel, originChannel, requestData)
+	if err := validateChannel(&channel.Channel, false); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
 
 	if channelHasSensitiveChanges(&channel, originChannel, requestData) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
@@ -1046,8 +1074,8 @@ func UpdateChannel(c *gin.Context) {
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
 		}
 	}
-	err = channel.Update()
-	if err != nil {
+	// 渠道写 + ability + 图片 revision 同事务（§7.2 原子性）；revision 创建失败整笔回滚，保存明确失败。
+	if err := model.UpdateChannelWithImageRevision(&channel.Channel, collectNullColumns(&channel, requestData), imageChannelRevisionBuilder()); err != nil {
 		common.ApiError(c, err)
 		return
 	}

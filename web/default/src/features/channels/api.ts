@@ -139,6 +139,41 @@ export async function updateChannel(
   return res.data
 }
 
+export interface ImageCapabilityPreviewEntry {
+  operation: string
+  model?: string
+  mode?: string
+  source?: string
+  ok: boolean
+}
+
+export interface ImageCapabilityPreviewResponse {
+  image_capable: boolean
+  adapter_version?: string
+  support: { generation?: string[]; edit?: string[] }
+  preview: ImageCapabilityPreviewEntry[]
+}
+
+/**
+ * Resolve the image task execution capability for a channel type and an in-edit
+ * configuration. Read-only computation used by the channel editor to render the
+ * effective execution mode and disable unsupported options.
+ */
+export async function previewImageCapability(
+  type: number,
+  imageExecutionConfig: string
+): Promise<{
+  success: boolean
+  message?: string
+  data?: ImageCapabilityPreviewResponse
+}> {
+  const res = await api.post('/api/channel/image-capability/preview', {
+    type,
+    image_execution_config: imageExecutionConfig,
+  })
+  return res.data
+}
+
 /**
  * Update channel enabled/disabled status.
  */
