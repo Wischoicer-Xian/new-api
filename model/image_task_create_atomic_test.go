@@ -1,7 +1,6 @@
 package model
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -103,23 +102,24 @@ func tokenRemain(t *testing.T, id int) int {
 
 func baseAtomicIntent(owner int, key string) ImageTaskCreateIntent {
 	return ImageTaskCreateIntent{
-		OwnerUserID:     owner,
-		Group:           "default",
-		Operation:       ImageTaskOperationGeneration,
-		IdempotencyKey:  key,
-		RequestHash:     "hash-" + key,
-		ReserveQuota:    5,
-		BillingSnapshot: snapshotJSON(map[string]int{"unit": 5}),
-		Now:             1_700_000_000,
+		OwnerUserID:    owner,
+		Group:          "default",
+		Operation:      ImageTaskOperationGeneration,
+		IdempotencyKey: key,
+		RequestHash:    "hash-" + key,
+		ReserveQuota:   5,
+		BillingSnapshot: ImageTaskBillingSnapshot{
+			OwnerUserID:  owner,
+			Group:        "default",
+			Operation:    ImageTaskOperationGeneration,
+			ReserveQuota: 5,
+		},
+		Now: 1_700_000_000,
 	}
 }
 
-// snapshotJSON builds a billing-snapshot fixture. The input is a static map, so
-// the marshal error is not asserted; common.Marshal on a map cannot fail.
-func snapshotJSON(v any) json.RawMessage {
-	b, _ := common.Marshal(v)
-	return b
-}
+// snapshotJSON helper removed: billing snapshots are now typed
+// ImageTaskBillingSnapshot, built inline in each test intent.
 
 func TestCreateImageTaskAtomic_CreatesNewTaskAndReserves(t *testing.T) {
 	const owner = 1001
@@ -148,6 +148,55 @@ func TestCreateImageTaskAtomic_CreatesNewTaskAndReserves(t *testing.T) {
 	count, err := CountInFlightImageTasksByOwner(DB, owner)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), count)
+}
+
+// TestCreateImageTaskAtomic_LedgerSnapshotWalletPathFieldByField proves the
+// ledger's durable billing snapshot is the typed, final fact (not a placeholder
+// map): after a wallet-path create, the snapshot records the actual funding
+// source, owner, operation, and reserve quota, deserializable field-by-field.
+func TestCreateImageTaskAtomic_LedgerSnapshotWalletPathFieldByField(t *testing.T) {
+	const owner = 1301
+	seedAtomicOwner(t, owner, 100)
+	setCap(t, 5)
+
+	out, err := CreateImageTaskAtomic(baseAtomicIntent(owner, "snap-wallet"))
+	require.NoError(t, err)
+	require.True(t, out.Created)
+
+	var ledger TaskBillingLedger
+	require.NoError(t, DB.Where("task_db_id = ?", out.Task.ID).First(&ledger).Error)
+	var snap ImageTaskBillingSnapshot
+	require.NoError(t, common.Unmarshal(ledger.BillingSnapshot, &snap))
+	assert.Equal(t, owner, snap.OwnerUserID)
+	assert.Equal(t, "default", snap.Group)
+	assert.Equal(t, ImageTaskOperationGeneration, snap.Operation)
+	assert.Equal(t, 5, snap.ReserveQuota)
+	assert.Equal(t, ImageTaskBillingSourceWallet, snap.FundingSource, "final funding source written post-choice")
+	assert.Zero(t, snap.SubscriptionID, "wallet path has no subscription")
+}
+
+// TestCreateImageTaskAtomic_LedgerSnapshotSubscriptionPathFieldByField proves
+// the ledger snapshot records subscription as the funding source + the
+// subscription id when that path is taken.
+func TestCreateImageTaskAtomic_LedgerSnapshotSubscriptionPathFieldByField(t *testing.T) {
+	const owner = 1302
+	seedAtomicOwner(t, owner, 100)
+	seedAtomicPlan(t, 1302)
+	seedAtomicSubscription(t, 1302, 1302, owner, 100, 0)
+	setCap(t, 5)
+
+	intent := baseAtomicIntent(owner, "snap-sub")
+	intent.BillingPreference = ImageTaskBillingPrefSubscriptionOnly
+	out, err := CreateImageTaskAtomic(intent)
+	require.NoError(t, err)
+	require.True(t, out.Created)
+
+	var ledger TaskBillingLedger
+	require.NoError(t, DB.Where("task_db_id = ?", out.Task.ID).First(&ledger).Error)
+	var snap ImageTaskBillingSnapshot
+	require.NoError(t, common.Unmarshal(ledger.BillingSnapshot, &snap))
+	assert.Equal(t, ImageTaskBillingSourceSubscription, snap.FundingSource)
+	assert.Equal(t, 1302, snap.SubscriptionID, "subscription id frozen in the snapshot")
 }
 
 func TestCreateImageTaskAtomic_ReplaysSameKeyHash(t *testing.T) {
@@ -265,7 +314,7 @@ func TestCreateImageTaskAtomic_ConcurrentSameKeyReplaysSQLite(t *testing.T) {
 				IdempotencyKey:  "sqlite-same-key",
 				RequestHash:     "sqlite-same-hash",
 				ReserveQuota:    5,
-				BillingSnapshot: snapshotJSON(map[string]int{"u": 5}),
+				BillingSnapshot: ImageTaskBillingSnapshot{OwnerUserID: owner, Group: "default", Operation: ImageTaskOperationGeneration, ReserveQuota: 5},
 				Now:             19,
 			})
 			eid := int64(0)

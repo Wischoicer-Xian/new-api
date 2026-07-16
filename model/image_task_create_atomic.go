@@ -1,7 +1,6 @@
 package model
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -22,12 +21,52 @@ var (
 	ErrImageTaskInsufficientSub      = errors.New("subscription quota insufficient to reserve image task")
 )
 
+// ImageTaskBillingSnapshot is the §7.4 typed, frozen-at-reserve billing fact
+// written to the task billing ledger. It replaces the placeholder json blobs
+// (map{"u":5}) with a strongly-validated struct so settle/refund can reconstruct
+// the exact creation-time charge from the durable ledger. Core fields are
+// required and validated; the optional price-ratio/attribution/clamp fields come
+// from price resolution (caller) and default to zero until that layer is wired.
+// FundingSource and SubscriptionID are filled AFTER the funding choice, before
+// the ledger stage is marked applied, so the durable record matches the actual
+// deduction.
+type ImageTaskBillingSnapshot struct {
+	OwnerUserID       int    `json:"owner_user_id"`
+	Group             string `json:"group"`
+	TokenID           int    `json:"token_id"`
+	Operation         string `json:"operation"`
+	FundingSource     string `json:"funding_source"` // wallet|subscription; "" until chosen in tx
+	SubscriptionID    int    `json:"subscription_id"`
+	ReserveQuota      int    `json:"reserve_quota"`
+	ChannelRevisionID int64  `json:"channel_revision_id"`
+	// Optional price-resolution fields (zero/"" = not yet wired).
+	ModelRatioVersion int    `json:"model_ratio_version,omitempty"`
+	Attribution       string `json:"attribution,omitempty"`
+	QuotaClamp        int    `json:"quota_clamp,omitempty"`
+}
+
+// Validate checks the pre-choice core fields. FundingSource is validated after
+// the funding choice (it is empty at intent time and set to wallet/subscription
+// inside the create transaction).
+func (s ImageTaskBillingSnapshot) Validate() error {
+	if s.OwnerUserID <= 0 {
+		return errors.New("billing snapshot: owner_user_id required")
+	}
+	if s.Operation == "" {
+		return errors.New("billing snapshot: operation required")
+	}
+	if s.ReserveQuota < 0 {
+		return errors.New("billing snapshot: reserve_quota must not be negative")
+	}
+	return nil
+}
+
 // ImageTaskCreateIntent captures everything CreateImageTaskAtomic needs for one
 // §6.1 create. The caller resolves price into ReserveQuota, reads the user's
-// billing preference into BillingPreference, and builds the §7.4 BillingSnapshot;
-// this function owns the transactional create + cap enforcement + the full
-// funding-source/token reserve aggregate (wallet | subscription, grounded in
-// BillingSession), all in one transaction.
+// billing preference into BillingPreference, and builds the §7.4 typed
+// BillingSnapshot; this function owns the transactional create + cap enforcement
+// + the full funding-source/token reserve aggregate (wallet | subscription,
+// grounded in BillingSession), all in one transaction.
 type ImageTaskCreateIntent struct {
 	OwnerUserID       int
 	Group             string
@@ -44,7 +83,7 @@ type ImageTaskCreateIntent struct {
 	// no token). Unlimited tokens are frozen but not deducted.
 	TokenID           int
 	BillingPreference string // "", wallet_only, subscription_only, wallet_first, subscription_first
-	BillingSnapshot   json.RawMessage
+	BillingSnapshot   ImageTaskBillingSnapshot
 	Now               int64
 }
 
@@ -231,8 +270,8 @@ func validateImageTaskCreateIntent(intent ImageTaskCreateIntent) error {
 	if intent.TokenID != 0 && intent.CreationTokenID != 0 && intent.TokenID != intent.CreationTokenID {
 		return fmt.Errorf("image task create: token id mismatch (token=%d, creation_token=%d)", intent.TokenID, intent.CreationTokenID)
 	}
-	if len(intent.BillingSnapshot) == 0 {
-		return errors.New("image task create: billing_snapshot required")
+	if err := intent.BillingSnapshot.Validate(); err != nil {
+		return err
 	}
 	if intent.Now == 0 {
 		return errors.New("image task create: now required")
@@ -265,10 +304,16 @@ const (
 )
 
 func reserveImageTaskInTx(tx *gorm.DB, task *Task, intent ImageTaskCreateIntent) error {
+	// Record the base (pre-choice) typed snapshot. The actual funding source is
+	// filled after the choice and written back before the stage is applied.
+	baseJSON, err := common.Marshal(intent.BillingSnapshot)
+	if err != nil {
+		return fmt.Errorf("reserve ledger snapshot marshal: %w", err)
+	}
 	_, ledger, err := RecordBillingStage(tx, TaskBillingStageIntent{
 		TaskDBID:    task.ID,
 		Stage:       TaskBillingReserve,
-		Snapshot:    intent.BillingSnapshot,
+		Snapshot:    baseJSON,
 		QuotaAmount: intent.ReserveQuota,
 	})
 	if err != nil {
@@ -288,6 +333,19 @@ func reserveImageTaskInTx(tx *gorm.DB, task *Task, intent ImageTaskCreateIntent)
 		}
 		fundingSource = source
 		subscriptionID = sid
+		// Write the FINAL snapshot (with the actual funding source + subscription
+		// id) to the ledger, in this transaction, before the CAS marks it
+		// applied. settle/refund read this durable record (§7.4).
+		final := intent.BillingSnapshot
+		final.FundingSource = source
+		final.SubscriptionID = sid
+		finalJSON, mErr := common.Marshal(final)
+		if mErr != nil {
+			return mErr
+		}
+		if uErr := t.Model(&TaskBillingLedger{}).Where("id = ?", ledger.ID).Update("billing_snapshot", finalJSON).Error; uErr != nil {
+			return fmt.Errorf("reserve ledger snapshot finalize: %w", uErr)
+		}
 		return nil
 	}); err != nil {
 		return err

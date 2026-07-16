@@ -54,7 +54,7 @@ func TestCreateImageTaskAtomic_ConcurrentDifferentKeysConverges(t *testing.T) {
 				IdempotencyKey:  keys[i],
 				RequestHash:     "h-" + keys[i],
 				ReserveQuota:    5,
-				BillingSnapshot: snapshotJSON(map[string]int{"u": 5}),
+				BillingSnapshot: ImageTaskBillingSnapshot{OwnerUserID: owner, Group: "default", Operation: ImageTaskOperationGeneration, ReserveQuota: 5},
 				Now:             17,
 			})
 			results[i] = res{created: out.Created, err: err}
@@ -116,7 +116,7 @@ func TestCreateImageTaskAtomic_ConcurrentSameKeyReplays(t *testing.T) {
 				IdempotencyKey:  "same-key",
 				RequestHash:     "same-hash",
 				ReserveQuota:    5,
-				BillingSnapshot: snapshotJSON(map[string]int{"u": 5}),
+				BillingSnapshot: ImageTaskBillingSnapshot{OwnerUserID: owner, Group: "default", Operation: ImageTaskOperationGeneration, ReserveQuota: 5},
 				Now:             18,
 			})
 			eid := int64(0)
