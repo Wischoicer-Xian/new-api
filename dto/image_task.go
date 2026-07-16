@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"net/url"
 	"strings"
@@ -28,6 +27,12 @@ import (
 // upstream call — not re-marshaled verbatim — so Rule 6 pointer-preservation
 // does not apply to upstream fidelity. Pointers are used here only to let
 // validation distinguish an absent optional field from an explicit empty one.
+//
+// JSON decoding goes through common.* exclusively: duplicate-key detection
+// (which encoding/json cannot do) lives in common.AssertJSONObjectNoDuplicateKeys,
+// and the case-sensitive exact-key whitelist below closes the gap that Go's
+// case-insensitive struct matching and JSON null→nil mapping would otherwise
+// leave open. encoding/json is imported here only for the json.RawMessage type.
 
 const ImageTaskObjectIdentifier = "image.task"
 
@@ -42,12 +47,24 @@ const (
 // this is a client contract violation rejected with 400, never truncated.
 const MaxImageTaskInputs = 8
 
-// maxImageURLBytes is a defensive upper bound on a single image_url length.
-// §6.1 specifies only "non-empty absolute https URL"; this bound guards against
-// abuse and is an implementation defense, not a contract value.
+// maxImageURLBytes is the image_url length cap recorded as a safety constraint
+// in §12.4 (8192). §6.1 specifies only "non-empty absolute https URL"; this
+// bound is the §12.4 defense against oversized locators.
 const maxImageURLBytes = 8192
 
 const imageTaskJSONMediaType = "application/json"
+
+// generationFieldWhitelist and editFieldWhitelist are the case-sensitive exact
+// top-level key sets accepted by each create route. Go matches struct fields
+// case-insensitively and would otherwise accept "Model"/"PROMPT"; checking the
+// raw object keys against these sets makes every other spelling unknown.
+var generationFieldWhitelist = map[string]struct{}{
+	"model": {}, "prompt": {}, "quality": {}, "size": {},
+}
+
+var editFieldWhitelist = map[string]struct{}{
+	"model": {}, "prompt": {}, "quality": {}, "size": {}, "images": {},
+}
 
 // ImageTaskPublicStatus is the set of status values exposed on the public task
 // object. The richer submission_unknown lifetime is internal to the execution
@@ -154,11 +171,11 @@ type ImageTaskGenerationRequest struct {
 }
 
 // DecodeImageTaskGenerationRequest strictly decodes a generation request body.
-// Any unknown field, duplicate object key at any level, explicit n, malformed
-// JSON, or non-object top level yields 400 INVALID_REQUEST.
+// Any unknown field, duplicate object key at any level, explicit null, explicit
+// n, malformed JSON, or non-object top level yields 400 INVALID_REQUEST.
 func DecodeImageTaskGenerationRequest(body []byte) (ImageTaskGenerationRequest, error) {
 	var req ImageTaskGenerationRequest
-	if err := strictDecodeImageTaskBody(body, &req); err != nil {
+	if _, err := strictDecodeImageTaskBody(body, &req, generationFieldWhitelist); err != nil {
 		return req, err
 	}
 	if err := req.validate(); err != nil {
@@ -211,19 +228,55 @@ func ValidateIdempotencyKey(key string) error {
 	return nil
 }
 
-// strictDecodeImageTaskBody runs the two §6.1 strict checks the standard
-// encoding/json decoder cannot: duplicate object keys at any level (handled
-// here by a token walk), then DisallowUnknownFields + type correctness via
-// common.UnmarshalStrict. A non-object top level is rejected by both passes.
-func strictDecodeImageTaskBody(body []byte, target any) error {
+// strictDecodeImageTaskBody runs the §6.1 strict checks that encoding/json
+// cannot express on its own: duplicate keys (common.AssertJSONObjectNoDuplicateKeys),
+// a case-sensitive exact top-level whitelist, and explicit-null rejection. It
+// returns the parsed raw top-level map so callers (edit) can apply the same
+// exact-key rule to nested image items. The final common.UnmarshalStrict pass
+// catches type mismatches the raw pass does not inspect.
+func strictDecodeImageTaskBody(body []byte, target any, whitelist map[string]struct{}) (map[string]json.RawMessage, error) {
 	if len(body) == 0 {
-		return imageTaskError(ImageTaskErrInvalidRequest, 400, "request body is required")
+		return nil, imageTaskError(ImageTaskErrInvalidRequest, 400, "request body is required")
 	}
-	if err := detectDuplicateJSONKeys(body); err != nil {
-		return err
+	if err := common.AssertJSONObjectNoDuplicateKeys(body); err != nil {
+		return nil, wrapStrictJSONError(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := common.Unmarshal(body, &raw); err != nil {
+		return nil, imageTaskError(ImageTaskErrInvalidRequest, 400, "malformed request body")
+	}
+	if err := validateExactKeys(raw, whitelist); err != nil {
+		return nil, err
 	}
 	if err := common.UnmarshalStrict(body, target); err != nil {
-		return imageTaskError(ImageTaskErrInvalidRequest, 400, normalizeStrictDecodeError(err))
+		return nil, imageTaskError(ImageTaskErrInvalidRequest, 400, normalizeStrictDecodeError(err))
+	}
+	return raw, nil
+}
+
+// wrapStrictJSONError maps the common duplicate-key / malformed errors onto a
+// stable public message, preserving the offending field name for a duplicate.
+func wrapStrictJSONError(err error) error {
+	var dup *common.DuplicateJSONKeyError
+	if errors.As(err, &dup) {
+		return imageTaskError(ImageTaskErrInvalidRequest, 400, fmt.Sprintf("duplicate field %q", dup.Key))
+	}
+	return imageTaskError(ImageTaskErrInvalidRequest, 400, "malformed request body")
+}
+
+// validateExactKeys enforces the case-sensitive exact top-level whitelist and
+// rejects explicit JSON null for any present field. A map decode preserves the
+// literal object keys, so "Model" is correctly treated as unknown, and a "null"
+// value is caught here rather than collapsing to a nil pointer.
+func validateExactKeys(raw map[string]json.RawMessage, whitelist map[string]struct{}) error {
+	nullLiteral := []byte("null")
+	for key, value := range raw {
+		if _, ok := whitelist[key]; !ok {
+			return imageTaskError(ImageTaskErrInvalidRequest, 400, fmt.Sprintf("unknown field %q", key))
+		}
+		if bytes.Equal(bytes.TrimSpace(value), nullLiteral) {
+			return imageTaskError(ImageTaskErrInvalidRequest, 400, fmt.Sprintf("field %q must not be null", key))
+		}
 	}
 	return nil
 }
@@ -238,81 +291,10 @@ func normalizeStrictDecodeError(err error) string {
 	return "malformed request body"
 }
 
-// detectDuplicateJSONKeys walks the JSON token stream and rejects a duplicate
-// key at any object nesting level, as well as a non-object top level and any
-// structural malformedness. encoding/json otherwise silently keeps the last
-// value for a repeated key, which §6.1 forbids.
-func detectDuplicateJSONKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
-	if err != nil {
-		return imageTaskError(ImageTaskErrInvalidRequest, 400, "malformed request body")
-	}
-	open, ok := tok.(json.Delim)
-	if !ok || open != '{' {
-		return imageTaskError(ImageTaskErrInvalidRequest, 400, "request body must be a JSON object")
-	}
-	var stack []*keyScope
-	stack = append(stack, &keyScope{isObject: true, seen: make(map[string]struct{})})
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			if len(stack) != 0 {
-				return imageTaskError(ImageTaskErrInvalidRequest, 400, "malformed request body")
-			}
-			return nil
-		}
-		if err != nil {
-			return imageTaskError(ImageTaskErrInvalidRequest, 400, "malformed request body")
-		}
-		if len(stack) == 0 {
-			// Top-level object already closed; any further token is trailing data.
-			return imageTaskError(ImageTaskErrInvalidRequest, 400, "malformed request body")
-		}
-		top := stack[len(stack)-1]
-		if delim, isDelim := tok.(json.Delim); isDelim {
-			switch delim {
-			case '{', '[':
-				scope := &keyScope{isObject: delim == '{'}
-				if scope.isObject {
-					scope.seen = make(map[string]struct{})
-				}
-				stack = append(stack, scope)
-				if top.isObject {
-					top.awaitingValue = false
-				}
-			case '}', ']':
-				stack = stack[:len(stack)-1]
-			}
-			continue
-		}
-		if top.isObject && !top.awaitingValue {
-			key, ok := tok.(string)
-			if !ok {
-				return imageTaskError(ImageTaskErrInvalidRequest, 400, "malformed request body")
-			}
-			if _, dup := top.seen[key]; dup {
-				return imageTaskError(ImageTaskErrInvalidRequest, 400, fmt.Sprintf("duplicate field %q", key))
-			}
-			top.seen[key] = struct{}{}
-			top.awaitingValue = true
-			continue
-		}
-		// scalar value token
-		if top.isObject {
-			top.awaitingValue = false
-		}
-	}
-}
-
-type keyScope struct {
-	isObject      bool
-	seen          map[string]struct{}
-	awaitingValue bool
-}
-
 // validateImageURL enforces the §6.1 image_url constraint: non-empty, absolute
-// https URL, within the defensive length bound.
+// https, hierarchical, with a non-empty host, within the §12.4 length cap. Go's
+// url.IsAbs only checks that a scheme is present, so opaque forms and hostless
+// URLs ("https:///path", "https:opaque") are rejected explicitly here.
 func validateImageURL(raw string) error {
 	if raw == "" {
 		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url is required")
@@ -321,8 +303,8 @@ func validateImageURL(raw string) error {
 		return imageTaskError(ImageTaskErrInvalidRequest, 400, fmt.Sprintf("images[].image_url exceeds %d bytes", maxImageURLBytes))
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || !parsed.IsAbs() || parsed.Scheme != "https" {
-		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must be an absolute https URL")
+	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.Hostname() == "" {
+		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must be an absolute https URL with a host")
 	}
 	return nil
 }

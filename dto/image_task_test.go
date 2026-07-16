@@ -105,6 +105,31 @@ func TestDecodeImageTaskGenerationRequest(t *testing.T) {
 			body:    `{"model":"gpt-image-1","prompt":"p","size":""}`,
 			wantErr: true,
 		},
+		{
+			name:    "quality null rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","quality":null}`,
+			wantErr: true,
+		},
+		{
+			name:    "size null rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","size":null}`,
+			wantErr: true,
+		},
+		{
+			name:    "model null rejected",
+			body:    `{"model":null,"prompt":"p"}`,
+			wantErr: true,
+		},
+		{
+			name:    "uppercase Model rejected as unknown",
+			body:    `{"Model":"gpt-image-1","prompt":"p"}`,
+			wantErr: true,
+		},
+		{
+			name:    "uppercase PROMPT rejected as unknown",
+			body:    `{"model":"gpt-image-1","PROMPT":"p"}`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

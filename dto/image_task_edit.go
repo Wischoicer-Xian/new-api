@@ -1,12 +1,16 @@
 package dto
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+
+	"github.com/QuantumNous/new-api/common"
 )
 
 // ImageTaskEditImage is one entry of the §6.1 edit images[] array. An item
-// accepts only image_url; any other field is unknown and rejected (enforced by
-// DisallowUnknownFields, which recurses into array elements).
+// accepts only image_url; any other field is unknown and rejected, enforced by
+// the exact-key check in validateEditImagesItems.
 type ImageTaskEditImage struct {
 	ImageURL string `json:"image_url"`
 }
@@ -25,12 +29,18 @@ type ImageTaskEditRequest struct {
 
 // DecodeImageTaskEditRequest strictly decodes an edit request body. It enforces
 // the generation field set plus the images[] array: 1..8 items, each a single
-// non-empty absolute https image_url. Unknown fields, duplicate keys, explicit
-// n, more than 8 images, or a non-object top level all yield 400.
+// non-null absolute https image_url. Unknown fields, duplicate keys, explicit
+// null, explicit n, more than 8 images, or a non-object top level all yield 400.
 func DecodeImageTaskEditRequest(body []byte) (ImageTaskEditRequest, error) {
 	var req ImageTaskEditRequest
-	if err := strictDecodeImageTaskBody(body, &req); err != nil {
+	raw, err := strictDecodeImageTaskBody(body, &req, editFieldWhitelist)
+	if err != nil {
 		return req, err
+	}
+	if imagesRaw, ok := raw["images"]; ok {
+		if err := validateEditImagesItems(imagesRaw); err != nil {
+			return req, err
+		}
 	}
 	if err := req.validate(); err != nil {
 		return req, err
@@ -51,6 +61,31 @@ func (req ImageTaskEditRequest) validate() error {
 	for _, img := range req.Images {
 		if err := validateImageURL(img.ImageURL); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateEditImagesItems enforces the §6.1 rule that each images[] entry is an
+// object carrying exactly an image_url key. The raw per-item maps preserve the
+// literal keys, so "Image_URL" is unknown and a null image_url is rejected here
+// rather than collapsing to an empty string.
+func validateEditImagesItems(imagesRaw json.RawMessage) error {
+	var items []map[string]json.RawMessage
+	if err := common.Unmarshal(imagesRaw, &items); err != nil {
+		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images must be an array of objects")
+	}
+	nullLiteral := []byte("null")
+	for _, item := range items {
+		if len(item) != 1 {
+			return imageTaskError(ImageTaskErrInvalidRequest, 400, "each image must contain only image_url")
+		}
+		value, ok := item["image_url"]
+		if !ok {
+			return imageTaskError(ImageTaskErrInvalidRequest, 400, "image item must use image_url")
+		}
+		if bytes.Equal(bytes.TrimSpace(value), nullLiteral) {
+			return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must not be null")
 		}
 	}
 	return nil

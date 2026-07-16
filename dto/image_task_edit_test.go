@@ -71,13 +71,38 @@ func TestDecodeImageTaskEditRequest(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "oversized image url rejected",
-			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://x.example.com/` + strings.Repeat("a", 8193) + `"}]}`,
+			name:    "image item extra field rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"` + httpsURL + `","extra":1}]}`,
 			wantErr: true,
 		},
 		{
-			name:    "image item extra field rejected",
-			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"` + httpsURL + `","extra":1}]}`,
+			name:    "image item case variant Image_URL rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"Image_URL":"` + httpsURL + `"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "image item null image_url rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":null}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "opaque https url rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https:opaque-value"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "hostless triple slash url rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https:///path"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "query only url rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://?q=1"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "scheme only url rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://"}]}`,
 			wantErr: true,
 		},
 		{
@@ -111,9 +136,30 @@ func TestDecodeImageTaskEditRequest(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "quality null rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","quality":null,"images":[{"image_url":"` + httpsURL + `"}]}`,
+			wantErr: true,
+		},
+		{
 			name:    "duplicate top-level key rejected",
 			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"` + httpsURL + `"}],"prompt":"q"}`,
 			wantErr: true,
+		},
+		{
+			name: "url with explicit port accepted",
+			body: `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://cdn.example.com:8443/a.png"}]}`,
+			check: func(t *testing.T, req ImageTaskEditRequest) {
+				require.Len(t, req.Images, 1)
+				assert.Equal(t, "https://cdn.example.com:8443/a.png", req.Images[0].ImageURL)
+			},
+		},
+		{
+			name: "url with path and query accepted",
+			body: `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://cdn.example.com/a/b.png?x=1&y=2"}]}`,
+			check: func(t *testing.T, req ImageTaskEditRequest) {
+				require.Len(t, req.Images, 1)
+				assert.Equal(t, "https://cdn.example.com/a/b.png?x=1&y=2", req.Images[0].ImageURL)
+			},
 		},
 	}
 
@@ -134,6 +180,27 @@ func TestDecodeImageTaskEditRequest(t *testing.T) {
 			}
 		})
 	}
+
+	// §12.4 image_url length cap (8192): accept at exactly the cap, reject one
+	// byte over. Built from the constant so the boundary tracks the cap if it
+	// ever changes.
+	t.Run("image_url length boundary 8192 accept and 8193 reject", func(t *testing.T) {
+		prefix := "https://x.example.com/"
+		acceptURL := prefix + strings.Repeat("a", maxImageURLBytes-len(prefix))
+		require.Equal(t, maxImageURLBytes, len(acceptURL))
+		acceptBody := `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"` + acceptURL + `"}]}`
+		req, err := DecodeImageTaskEditRequest([]byte(acceptBody))
+		require.NoError(t, err)
+		require.Len(t, req.Images, 1)
+		assert.Len(t, req.Images[0].ImageURL, maxImageURLBytes)
+
+		rejectURL := prefix + strings.Repeat("a", maxImageURLBytes-len(prefix)+1)
+		rejectBody := `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"` + rejectURL + `"}]}`
+		_, err = DecodeImageTaskEditRequest([]byte(rejectBody))
+		rt := AsImageTaskRequestError(err)
+		require.NotNil(t, rt)
+		assert.Equal(t, ImageTaskErrInvalidRequest, rt.Code)
+	})
 }
 
 // imageArrayJSON builds a comma-joined list of n identical image objects for
