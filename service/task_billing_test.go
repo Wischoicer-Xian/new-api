@@ -54,6 +54,7 @@ func TestMain(m *testing.M) {
 		&model.SystemTask{},
 		&model.SystemTaskLock{},
 		&model.WischoicerRechargeCredit{},
+		&model.ImageTaskExecution{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}

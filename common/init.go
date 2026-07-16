@@ -163,6 +163,18 @@ func initConstantEnv() {
 	constant.TaskQueryLimit = GetEnvOrDefault("TASK_QUERY_LIMIT", 1000)
 	// 异步任务超时时间（分钟），超过此时间未完成的任务将被标记为失败并退款。0 表示禁用。
 	constant.TaskTimeoutMinutes = GetEnvOrDefault("TASK_TIMEOUT_MINUTES", 1440)
+	// §14.1 create-allowlist placeholder for the public single-image task API.
+	// Defaults off (fail-closed) until P3-I wires the real allowlist.
+	constant.ImageTaskCreateEnabled = GetEnvOrDefaultBool("IMAGE_TASK_CREATE_ENABLED", false)
+	// §6.1 per-user in-flight image task cap. Must be positive; 0/negative/
+	// non-numeric fail startup (fail-closed) so the mandatory cap is never
+	// silently disabled. Default is a dormant provisional value, not a closed
+	// product rate-limit decision.
+	parsedCap, err := ParseMaxImageTasksPerUser(os.Getenv("MAX_IMAGE_TASKS_PER_USER"))
+	if err != nil {
+		log.Fatal("image task in-flight cap config invalid: " + err.Error())
+	}
+	constant.MaxImageTasksPerUser = parsedCap
 
 	soraPatchStr := GetEnvOrDefaultString("TASK_PRICE_PATCH", "")
 	if soraPatchStr != "" {
