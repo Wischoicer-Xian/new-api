@@ -303,6 +303,7 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 	err := DB.Where("progress != ?", "100%").
 		Where("status NOT IN ?", []string{TaskStatusFailure, TaskStatusSuccess}).
 		Where("submit_time < ?", cutoffUnix).
+		Where("platform IN ?", constant.LegacyPollingPlatformValues()).
 		Order("submit_time").
 		Limit(limit).
 		Find(&tasks).Error
@@ -315,24 +316,28 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 func GetAllUnFinishSyncTasks(limit int) []*Task {
 	var tasks []*Task
 	var err error
-	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Limit(limit).Order("id").Find(&tasks).Error
+	// get all tasks progress is not 100%. The platform allowlist (§7.3) is
+	// applied before LIMIT so image/unknown platforms cannot starve legacy
+	// Suno/video work out of the window.
+	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Where("platform IN ?", constant.LegacyPollingPlatformValues()).Limit(limit).Order("id").Find(&tasks).Error
 	if err != nil {
 		return nil
 	}
 	return tasks
 }
 
-// HasUnfinishedSyncTasks reports whether at least one async (Suno/video) task is
-// still in progress. It is a cheap existence check (LIMIT 1) used to decide
-// whether the async_task_poll system task needs to run; when no task is pending
-// the scheduler skips creating a row entirely.
+// HasUnfinishedSyncTasks reports whether at least one legacy async (Suno/video)
+// task is still in progress. It is a cheap existence check (LIMIT 1) used to
+// decide whether the async_task_poll system task needs to run; when no legacy
+// task is pending the scheduler skips creating a row entirely. The platform
+// allowlist (§7.3) keeps image-only load from spinning up the legacy poller.
 func HasUnfinishedSyncTasks() bool {
 	var id int64
 	err := DB.Model(&Task{}).
 		Where("progress != ?", "100%").
 		Where("status != ?", TaskStatusFailure).
 		Where("status != ?", TaskStatusSuccess).
+		Where("platform IN ?", constant.LegacyPollingPlatformValues()).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0

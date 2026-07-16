@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,130 +12,117 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFilterImageTasksForLegacyPolling is the pure invariant: only Wischoicer
-// image-platform tasks are carved out; every legacy platform (suno, mj, video
-// provider strings, empty) stays in the polling set.
-func TestFilterImageTasksForLegacyPolling(t *testing.T) {
+// legacyVideoPlatform is a real legacy-polling platform value: the numeric
+// string of a registered video channel type, which is what production video
+// tasks carry (relay.GetTaskPlatform -> strconv.Itoa(channelType)).
+var legacyVideoPlatform = constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeKling))
+
+// TestFilterLegacyPollingTasks is the pure invariant for the in-memory secondary
+// guard: it keeps Suno + registered video numeric platforms and drops image,
+// Midjourney (own poller), and any unknown/empty platform.
+func TestFilterLegacyPollingTasks(t *testing.T) {
 	tasks := []*model.Task{
-		{TaskID: "kling-1", Platform: constant.TaskPlatform("kling")},
+		{TaskID: "video-1", Platform: legacyVideoPlatform},
 		{TaskID: "suno-1", Platform: constant.TaskPlatformSuno},
 		{TaskID: "image-1", Platform: constant.TaskPlatformWischoicerImage},
 		{TaskID: "mj-1", Platform: constant.TaskPlatformMidjourney},
-		{TaskID: "image-2", Platform: constant.TaskPlatformWischoicerImage},
+		{TaskID: "unknown-1", Platform: constant.TaskPlatform("999")},
+		{TaskID: "empty-1", Platform: constant.TaskPlatform("")},
 	}
-	legacy, imageCount := filterImageTasksForLegacyPolling(tasks)
+	legacy, dropped := filterLegacyPollingTasks(tasks)
 
-	assert.Equal(t, 2, imageCount)
-	require.Len(t, legacy, 3)
-	got := make([]string, len(legacy))
-	for i, t := range legacy {
-		got[i] = t.TaskID
-	}
-	assert.Equal(t, []string{"kling-1", "suno-1", "mj-1"}, got)
+	assert.Equal(t, 4, dropped, "image, mj, unknown, empty are dropped")
+	require.Len(t, legacy, 2)
+	got := []string{legacy[0].TaskID, legacy[1].TaskID}
+	assert.Equal(t, []string{"video-1", "suno-1"}, got)
 }
 
-// TestRunTaskPollingOnceSkipsImageTasks proves the full poll pass counts the
-// image-platform task as skipped and never admits it into the platform dispatch
-// set. The legacy video task is left for the existing dispatch path (exercised
-// by TestUpdateVideoTasksCanSkipPollingSleepPerChannel); this test isolates the
-// §7.3 carve-out — that an image task present in the unfinished set is filtered
-// before any per-platform work, so it cannot reach DispatchPlatformUpdate's
-// default UpdateVideoTasks branch.
-func TestRunTaskPollingOnceSkipsImageTasks(t *testing.T) {
+// TestRunTaskPollingOnceKeepsOnlyAllowlisted proves the §7.3 SQL allowlist is
+// applied before LIMIT at the query layer: with image and unknown-platform tasks
+// seeded alongside a legacy video task, only the legacy task is visible to the
+// poller (UnfinishedTasks=1), so image/unknown can never be dispatched even when
+// they would otherwise fill the window. No starvation.
+func TestRunTaskPollingOnceKeepsOnlyAllowlisted(t *testing.T) {
 	truncate(t)
 
-	// GetAllUnFinishSyncTasks applies Limit(TaskQueryLimit); the default is 0 in
-	// tests (production sets it via env), which yields no rows. Set a real bound
-	// so the seeded tasks are actually fetched through the poll path.
 	prevLimit := constant.TaskQueryLimit
 	constant.TaskQueryLimit = 100
 	t.Cleanup(func() { constant.TaskQueryLimit = prevLimit })
 
-	const channelID = 210
-	seedTaskPollingChannel(t, channelID, true)
-	seedPollingTask(t, channelID, "poll_legacy", "up_legacy")
-	imageTask := &model.Task{
-		TaskID:      "poll_image",
-		Platform:    constant.TaskPlatformWischoicerImage,
-		UserId:      1,
-		ChannelId:   channelID,
-		Action:      constant.TaskActionGenerate,
-		Status:      model.TaskStatusInProgress,
-		Progress:    "30%",
-		SubmitTime:  time.Now().Unix(),
-		CreatedAt:   time.Now().Unix(),
-		UpdatedAt:   time.Now().Unix(),
-		PrivateData: model.TaskPrivateData{UpstreamTaskID: "up_image"},
+	now := time.Now().Unix()
+	seed := func(taskID string, platform constant.TaskPlatform) {
+		require.NoError(t, model.DB.Create(&model.Task{
+			TaskID:     taskID,
+			Platform:   platform,
+			UserId:     1,
+			Action:     constant.TaskActionGenerate,
+			Status:     model.TaskStatusInProgress,
+			Progress:   "30%",
+			SubmitTime: now,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}).Error)
 	}
-	require.NoError(t, model.DB.Create(imageTask).Error)
+	// Seed image and unknown FIRST so they would fill the limit window if the
+	// filter were post-limit; then the legacy task.
+	seed("img-a", constant.TaskPlatformWischoicerImage)
+	seed("img-b", constant.TaskPlatformWischoicerImage)
+	seed("unknown-a", constant.TaskPlatform("999"))
+	seed("legacy-a", legacyVideoPlatform)
 
-	// A non-nil adaptor factory is required so RunTaskPollingOnce does not bail
-	// on its startup nil-check; the legacy task then takes the existing dispatch
-	// path. The assertion targets the summary (set during fetch + filter, before
-	// any dispatch), so the outcome of the legacy dispatch does not affect it.
 	adaptor := &taskPollingFetchAdaptor{}
 	previousFactory := GetTaskAdaptorFunc
 	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
 	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
 
-	// No adaptor is wired: if the image task were not filtered, RunTaskPollingOnce
-	// would still skip dispatch for it (its platform is not Suno/MJ and has no
-	// video upstream), but the summary must record it as skipped. Asserting on
-	// the summary (not a wired adaptor) keeps this test focused on the filter,
-	// independent of the legacy dispatch machinery.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	summary := RunTaskPollingOnce(ctx, nil)
 
-	assert.Equal(t, 2, summary.UnfinishedTasks, "both legacy and image tasks are unfinished in the DB")
-	assert.Equal(t, 1, summary.ImageTasksSkipped, "the image task is counted as skipped")
+	assert.Equal(t, 1, summary.UnfinishedTasks, "only the legacy task survives the SQL allowlist; image/unknown are excluded before LIMIT")
+	assert.Equal(t, 0, summary.NonLegacyTasksSkipped, "the secondary guard sees only the already-filtered legacy task")
 }
 
-// TestSweepTimedOutTasksSkipsImageTasks proves the legacy timeout sweep fails a
-// timed-out legacy task but leaves a timed-out image task untouched, so the
-// image_task_execution scheduler + billing ledger own its lifecycle (§7.3).
-func TestSweepTimedOutTasksSkipsImageTasks(t *testing.T) {
+// TestSweepTimedOutTasksKeepsOnlyAllowlisted proves the timeout sweep query
+// applies the same allowlist, so a timed-out legacy task is swept while timed-
+// out image and unknown tasks are left untouched (they own their own timeout
+// path). The fixed limit=100 cannot strand legacy timeouts behind image rows.
+func TestSweepTimedOutTasksKeepsOnlyAllowlisted(t *testing.T) {
 	truncate(t)
 
 	prevTimeout := constant.TaskTimeoutMinutes
 	constant.TaskTimeoutMinutes = 1
 	t.Cleanup(func() { constant.TaskTimeoutMinutes = prevTimeout })
 
-	oldSubmit := time.Now().Unix() - 120 // older than the 1-minute cutoff
-	legacyTask := &model.Task{
-		TaskID:     "to_legacy",
-		Platform:   constant.TaskPlatform("kling"),
-		UserId:     1,
-		Action:     constant.TaskActionGenerate,
-		Status:     model.TaskStatusInProgress,
-		Progress:   "30%",
-		Quota:      0, // no refund path needed for the isolation assertion
-		SubmitTime: oldSubmit,
-		CreatedAt:  oldSubmit,
-		UpdatedAt:  oldSubmit,
+	old := time.Now().Unix() - 7200
+	seed := func(taskID string, platform constant.TaskPlatform) *model.Task {
+		tk := &model.Task{
+			TaskID:     taskID,
+			Platform:   platform,
+			UserId:     1,
+			Action:     constant.TaskActionGenerate,
+			Status:     model.TaskStatusInProgress,
+			Progress:   "30%",
+			Quota:      0,
+			SubmitTime: old,
+			CreatedAt:  old,
+			UpdatedAt:  old,
+		}
+		require.NoError(t, model.DB.Create(tk).Error)
+		return tk
 	}
-	require.NoError(t, model.DB.Create(legacyTask).Error)
-	imageTask := &model.Task{
-		TaskID:     "to_image",
-		Platform:   constant.TaskPlatformWischoicerImage,
-		UserId:     1,
-		Action:     constant.TaskActionGenerate,
-		Status:     model.TaskStatusInProgress,
-		Progress:   "30%",
-		Quota:      0,
-		SubmitTime: oldSubmit,
-		CreatedAt:  oldSubmit,
-		UpdatedAt:  oldSubmit,
-	}
-	require.NoError(t, model.DB.Create(imageTask).Error)
+	legacyTask := seed("to-legacy", legacyVideoPlatform)
+	imageTask := seed("to-image", constant.TaskPlatformWischoicerImage)
+	unknownTask := seed("to-unknown", constant.TaskPlatform("999"))
 
 	sweepTimedOutTasks(context.Background())
 
-	var legacyAfter model.Task
+	var legacyAfter, imageAfter, unknownAfter model.Task
 	require.NoError(t, model.DB.First(&legacyAfter, legacyTask.ID).Error)
-	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), legacyAfter.Status, "legacy timed-out task is swept")
-
-	var imageAfter model.Task
 	require.NoError(t, model.DB.First(&imageAfter, imageTask.ID).Error)
-	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), imageAfter.Status, "image task must not be swept by legacy timeout")
+	require.NoError(t, model.DB.First(&unknownAfter, unknownTask.ID).Error)
+
+	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), legacyAfter.Status, "legacy timed-out task is swept")
+	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), imageAfter.Status, "image task is not swept by the legacy timeout")
+	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), unknownAfter.Status, "unknown platform is not swept by the legacy timeout")
 }
