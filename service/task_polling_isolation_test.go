@@ -126,3 +126,44 @@ func TestSweepTimedOutTasksKeepsOnlyAllowlisted(t *testing.T) {
 	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), imageAfter.Status, "image task is not swept by the legacy timeout")
 	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), unknownAfter.Status, "unknown platform is not swept by the legacy timeout")
 }
+
+// TestSweepTimedOutTasksConvergesHistoricalAliases is the §7.3 + backward-
+// compatibility characterization: pre-b3c4d972 rows with the named-string
+// platforms kling/jimeng have no provider adaptor (so they are not polled) but
+// the timeout sweep still owes them failure/finalize. The sweep must converge
+// them while leaving image/unknown untouched.
+func TestSweepTimedOutTasksConvergesHistoricalAliases(t *testing.T) {
+	truncate(t)
+
+	prevTimeout := constant.TaskTimeoutMinutes
+	constant.TaskTimeoutMinutes = 1
+	t.Cleanup(func() { constant.TaskTimeoutMinutes = prevTimeout })
+
+	old := time.Now().Unix() - 7200
+	seed := func(taskID string, platform constant.TaskPlatform) *model.Task {
+		tk := &model.Task{
+			TaskID: taskID, Platform: platform, UserId: 1, Action: constant.TaskActionGenerate,
+			Status: model.TaskStatusInProgress, Progress: "30%", Quota: 0,
+			SubmitTime: old, CreatedAt: old, UpdatedAt: old,
+		}
+		require.NoError(t, model.DB.Create(tk).Error)
+		return tk
+	}
+	kling := seed("to-kling-named", constant.TaskPlatform("kling"))
+	jimeng := seed("to-jimeng-named", constant.TaskPlatform("jimeng"))
+	imageTask := seed("to-image", constant.TaskPlatformWischoicerImage)
+	unknownTask := seed("to-unknown", constant.TaskPlatform("999"))
+
+	sweepTimedOutTasks(context.Background())
+
+	var klingAfter, jimengAfter, imageAfter, unknownAfter model.Task
+	require.NoError(t, model.DB.First(&klingAfter, kling.ID).Error)
+	require.NoError(t, model.DB.First(&jimengAfter, jimeng.ID).Error)
+	require.NoError(t, model.DB.First(&imageAfter, imageTask.ID).Error)
+	require.NoError(t, model.DB.First(&unknownAfter, unknownTask.ID).Error)
+
+	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), klingAfter.Status, "historical kling row is swept to failure")
+	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), jimengAfter.Status, "historical jimeng row is swept to failure")
+	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), imageAfter.Status, "image is not swept")
+	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), unknownAfter.Status, "unknown is not swept")
+}

@@ -56,10 +56,34 @@ func TestLegacyPollingPlatformAllowlist(t *testing.T) {
 		TaskPlatformWischoicerImage, // image — own scheduler
 		TaskPlatformMidjourney,      // MJ — own poller, intentionally not in legacy allowlist
 		TaskPlatform(""),            // empty
-		TaskPlatform("kling"),       // name string, not the registered numeric form
+		TaskPlatform("kling"),       // pre-b3c4d972 named alias — NOT pollable
+		TaskPlatform("jimeng"),      // pre-b3c4d972 named alias — NOT pollable
 		TaskPlatform("999"),         // unknown numeric
 	}
 	for _, p := range mustExclude {
 		assert.False(t, IsLegacyPollingPlatform(p), "%s must NOT be a legacy polling platform", p)
+	}
+}
+
+// TestLegacyTimeoutSuperset pins the two-domain split (§7.3 + historical
+// compatibility): the timeout convergence set is the polling set plus the
+// attested pre-b3c4d972 named aliases kling/jimeng, so those rows are still
+// swept to failure; image, MJ, and unknown stay excluded from both.
+func TestLegacyTimeoutSuperset(t *testing.T) {
+	timeout := LegacyTimeoutPlatformValues()
+	// superset of the polling set
+	for _, v := range LegacyPollingPlatformValues() {
+		assert.Contains(t, timeout, v)
+	}
+	// historical aliases are in the timeout set, not the polling set
+	for _, alias := range []string{"kling", "jimeng"} {
+		assert.Contains(t, timeout, alias, "%s historical alias must be in the timeout set", alias)
+		assert.False(t, IsLegacyPollingPlatform(TaskPlatform(alias)), "%s is not pollable", alias)
+		assert.True(t, IsLegacyTimeoutPlatform(TaskPlatform(alias)), "%s is timeout-convergable", alias)
+	}
+
+	// image / MJ / unknown stay excluded from the timeout set too
+	for _, p := range []TaskPlatform{TaskPlatformWischoicerImage, TaskPlatformMidjourney, TaskPlatform("999"), TaskPlatform("")} {
+		assert.False(t, IsLegacyTimeoutPlatform(p), "%s must NOT be timeout-convergable", p)
 	}
 }

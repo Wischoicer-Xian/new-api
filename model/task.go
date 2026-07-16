@@ -303,7 +303,7 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 	err := DB.Where("progress != ?", "100%").
 		Where("status NOT IN ?", []string{TaskStatusFailure, TaskStatusSuccess}).
 		Where("submit_time < ?", cutoffUnix).
-		Where("platform IN ?", constant.LegacyPollingPlatformValues()).
+		Where("platform IN ?", constant.LegacyTimeoutPlatformValues()).
 		Order("submit_time").
 		Limit(limit).
 		Find(&tasks).Error
@@ -326,18 +326,22 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 	return tasks
 }
 
-// HasUnfinishedSyncTasks reports whether at least one legacy async (Suno/video)
-// task is still in progress. It is a cheap existence check (LIMIT 1) used to
-// decide whether the async_task_poll system task needs to run; when no legacy
-// task is pending the scheduler skips creating a row entirely. The platform
-// allowlist (§7.3) keeps image-only load from spinning up the legacy poller.
+// HasUnfinishedSyncTasks reports whether at least one legacy async task still
+// needs the async_task_poll pass — either a currently-pollable Suno/video task
+// or a historical named-string task (kling/jimeng) that the timeout sweep still
+// owes failure/finalize. It is a cheap existence check (LIMIT 1) used to decide
+// whether the async_task_poll system task needs to run; the platform superset
+// (LegacyTimeoutPlatformValues, §7.3) is applied so a backlog of only historical
+// rows still spins up the poller long enough to sweep them, instead of
+// silently stranding their timeout convergence. When nothing remains the
+// scheduler skips creating a row entirely.
 func HasUnfinishedSyncTasks() bool {
 	var id int64
 	err := DB.Model(&Task{}).
 		Where("progress != ?", "100%").
 		Where("status != ?", TaskStatusFailure).
 		Where("status != ?", TaskStatusSuccess).
-		Where("platform IN ?", constant.LegacyPollingPlatformValues()).
+		Where("platform IN ?", constant.LegacyTimeoutPlatformValues()).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0

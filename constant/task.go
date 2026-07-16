@@ -64,6 +64,43 @@ func IsLegacyPollingPlatform(p TaskPlatform) bool {
 	return false
 }
 
+// legacyHistoricalPlatformAliases names the Task.Platform values written before
+// commit b3c4d972 migrated video platforms from named strings to channel-type
+// numeric strings. Production no longer creates rows with these platforms, but
+// unfinished historical rows may still exist. They have no provider adaptor, so
+// they cannot be polled, but the legacy timeout sweep still owes them
+// failure/finalize (sweepTimedOutTasks marks them FAILURE; its legacyTaskCutoff
+// branch avoids refunding them). Limited to the two attested aliases.
+var legacyHistoricalPlatformAliases = []string{"kling", "jimeng"}
+
+// LegacyTimeoutPlatformValues is the superset of platforms the legacy timeout
+// sweep may converge: every currently-pollable legacy platform plus the attested
+// historical named-string aliases. Used by GetTimedOutUnfinishedTasks so
+// pre-b3c4d972 kling/jimeng rows are still swept to failure, while wis_image,
+// Midjourney, and unknown platforms remain excluded (§7.3). It is a strict
+// superset of LegacyPollingPlatformValues.
+func LegacyTimeoutPlatformValues() []string {
+	polling := LegacyPollingPlatformValues()
+	out := make([]string, 0, len(polling)+len(legacyHistoricalPlatformAliases))
+	out = append(out, polling...)
+	out = append(out, legacyHistoricalPlatformAliases...)
+	return out
+}
+
+// IsLegacyTimeoutPlatform reports whether a platform is in the legacy timeout
+// convergence superset (pollable platforms + historical named-string aliases).
+// The timeout sweep's secondary guard uses this — NOT IsLegacyPollingPlatform
+// — so historical kling/jimeng rows fetched by GetTimedOutUnfinishedTasks are
+// still swept to failure rather than re-excluded by the guard.
+func IsLegacyTimeoutPlatform(p TaskPlatform) bool {
+	for _, v := range LegacyTimeoutPlatformValues() {
+		if string(p) == v {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	SunoActionMusic  = "MUSIC"
 	SunoActionLyrics = "LYRICS"

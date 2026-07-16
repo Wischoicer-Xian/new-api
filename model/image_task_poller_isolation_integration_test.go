@@ -81,5 +81,53 @@ func TestPollerIsolation_TimedOutQueryExcludesImage(t *testing.T) {
 	assert.Equal(t, "to-legacy", timedOut[0].TaskID)
 }
 
+// TestPollerIsolation_TimedOutQueryIncludesHistoricalAliases is the backward-
+// compatibility characterization (§7.3 + b3c4d972): timed-out rows carrying the
+// pre-migration named-string platforms kling/jimeng are still returned by the
+// timeout query so the sweep can converge them to failure, while wis_image and
+// unknown platforms stay excluded.
+func TestPollerIsolation_TimedOutQueryIncludesHistoricalAliases(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
+
+	old := time.Now().Unix() - 7200
+	mk := func(taskID string, platform constant.TaskPlatform) *Task {
+		return &Task{TaskID: taskID, Platform: platform, UserId: 1, Action: "generate", Status: TaskStatusInProgress, Progress: "30%", SubmitTime: old, CreatedAt: old, UpdatedAt: old}
+	}
+	require.NoError(t, DB.Create(mk("to-kling", constant.TaskPlatform("kling"))).Error)
+	require.NoError(t, DB.Create(mk("to-jimeng", constant.TaskPlatform("jimeng"))).Error)
+	require.NoError(t, DB.Create(mk("to-image", constant.TaskPlatformWischoicerImage)).Error)
+	require.NoError(t, DB.Create(mk("to-unknown", constant.TaskPlatform("999"))).Error)
+
+	timedOut := GetTimedOutUnfinishedTasks(time.Now().Unix()-60, 100)
+	ids := make(map[string]bool, len(timedOut))
+	for _, tk := range timedOut {
+		ids[tk.TaskID] = true
+	}
+	assert.True(t, ids["to-kling"], "historical kling timed-out row is returned for convergence")
+	assert.True(t, ids["to-jimeng"], "historical jimeng timed-out row is returned for convergence")
+	assert.False(t, ids["to-image"], "image timed-out row stays excluded")
+	assert.False(t, ids["to-unknown"], "unknown timed-out row stays excluded")
+}
+
+// TestPollerIsolation_HistoricalAliasesNotPolled proves the two-domain split:
+// historical named-string rows (kling/jimeng) have no provider adaptor, so they
+// are excluded from the polling fetch even though they remain in the timeout
+// convergence set. Only currently-pollable legacy platforms are polled.
+func TestPollerIsolation_HistoricalAliasesNotPolled(t *testing.T) {
+	setupWischoicerIntegrationDB(t)
+
+	now := time.Now().Unix()
+	mk := func(taskID string, platform constant.TaskPlatform) *Task {
+		return &Task{TaskID: taskID, Platform: platform, UserId: 1, Action: "generate", Status: TaskStatusInProgress, Progress: "30%", SubmitTime: now, CreatedAt: now, UpdatedAt: now}
+	}
+	require.NoError(t, DB.Create(mk("named-kling", constant.TaskPlatform("kling"))).Error)
+	require.NoError(t, DB.Create(mk("named-jimeng", constant.TaskPlatform("jimeng"))).Error)
+	require.NoError(t, DB.Create(mk("numeric-legacy", legacyVideoPlatformIT)).Error)
+
+	fetched := GetAllUnFinishSyncTasks(100)
+	require.Len(t, fetched, 1, "historical named-string rows are not pollable; only the numeric legacy task is")
+	assert.Equal(t, "numeric-legacy", fetched[0].TaskID)
+}
+
 // itoa is a local helper to keep the test bodies free of strconv noise.
 func itoa(i int) string { return strconv.Itoa(i) }

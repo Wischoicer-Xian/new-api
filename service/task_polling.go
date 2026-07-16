@@ -57,10 +57,11 @@ func sweepTimedOutTasks(ctx context.Context) {
 	timedOutCount := 0
 
 	for _, task := range tasks {
-		if !constant.IsLegacyPollingPlatform(task.Platform) {
-			// Only legacy Suno/video platforms are swept here. Image and unknown
-			// platforms time out through their own scheduler/refund path (§7.3);
-			// the SQL allowlist is the primary guard, this is the secondary.
+		if !constant.IsLegacyTimeoutPlatform(task.Platform) {
+			// Only legacy Suno/video platforms — plus the attested historical
+			// aliases kling/jimeng — are swept here, so their failure/finalize
+			// convergence is not lost. Image and unknown platforms time out via
+			// their own path (§7.3). The SQL allowlist is the primary guard.
 			continue
 		}
 		isLegacy := task.SubmitTime > 0 && task.SubmitTime < legacyTaskCutoff
