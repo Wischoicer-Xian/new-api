@@ -82,3 +82,52 @@ jobs:
 
       - name: Vet dto
         run: go vet ./dto/
+
+  image-billing-sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go mod download
+      - name: Image billing SQLite tests
+        run: go test -count=1 -race ./model/ -run 'ImageTaskPriceResolution|ImageTaskBillingSnapshot|ApplyBillingStageTx'
+      - name: Vet model
+        run: go vet ./model/
+
+  image-billing-mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go mod download
+      - name: Compile integration
+        run: go test -tags integration -run '^$' ./model
+      - name: MySQL integration
+        env:
+          WIS_INTEGRATION_DATABASE: mysql
+        run: go test -tags integration -count=1 ./model/... -run 'LedgerCASGates_RealDB|FundMatrix_RealDB'
+
+  image-billing-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go mod download
+      - name: Compile integration
+        run: go test -tags integration -run '^$' ./model
+      - name: PostgreSQL integration
+        env:
+          WIS_INTEGRATION_DATABASE: postgres
+        run: go test -tags integration -count=1 ./model/... -run 'LedgerCASGates_RealDB|FundMatrix_RealDB'
