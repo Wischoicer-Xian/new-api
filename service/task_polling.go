@@ -57,6 +57,11 @@ func sweepTimedOutTasks(ctx context.Context) {
 	timedOutCount := 0
 
 	for _, task := range tasks {
+		if constant.IsImageTaskPlatform(task.Platform) {
+			// Image tasks time out through the image_task_execution scheduler
+			// and the billing ledger refund path (§7.3), never the legacy sweep.
+			continue
+		}
 		isLegacy := task.SubmitTime > 0 && task.SubmitTime < legacyTaskCutoff
 
 		oldStatus := task.Status
@@ -95,6 +100,26 @@ type TaskPollSummary struct {
 	UnfinishedTasks  int `json:"unfinished_tasks"`
 	PlatformsScanned int `json:"platforms_scanned"`
 	NullTasksFailed  int `json:"null_tasks_failed"`
+	// ImageTasksSkipped counts Wischoicer single-image tasks excluded from the
+	// legacy polling pass (§7.3). They are driven by the image_task_execution
+	// scheduler, not this poller.
+	ImageTasksSkipped int `json:"image_tasks_skipped"`
+}
+
+// filterImageTasksForLegacyPolling partitions unfinished tasks into the legacy
+// polling set and the image-task set the legacy Suno/video poller must never
+// touch (§7.3). Image tasks own their submit/poll/cancel/refund lifecycle on
+// image_task_execution, so excluding them here is the single chokepoint that
+// keeps them out of DispatchPlatformUpdate's default UpdateVideoTasks branch.
+func filterImageTasksForLegacyPolling(tasks []*model.Task) (legacy []*model.Task, imageCount int) {
+	for _, t := range tasks {
+		if constant.IsImageTaskPlatform(t.Platform) {
+			imageCount++
+			continue
+		}
+		legacy = append(legacy, t)
+	}
+	return legacy, imageCount
 }
 
 // RunTaskPollingOnce performs one async-task (Suno/video) polling pass
@@ -115,8 +140,10 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 	sweepTimedOutTasks(ctx)
 	allTasks := model.GetAllUnFinishSyncTasks(constant.TaskQueryLimit)
 	summary.UnfinishedTasks = len(allTasks)
+	legacyTasks, imageSkipped := filterImageTasksForLegacyPolling(allTasks)
+	summary.ImageTasksSkipped = imageSkipped
 	platformTask := make(map[constant.TaskPlatform][]*model.Task)
-	for _, t := range allTasks {
+	for _, t := range legacyTasks {
 		platformTask[t.Platform] = append(platformTask[t.Platform], t)
 	}
 
