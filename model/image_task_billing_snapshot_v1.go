@@ -130,12 +130,14 @@ func buildSnapshotFromPriceAndFunding(
 	subscriptionID int,
 	appliedReserveQuota int,
 ) (*ImageTaskBillingSnapshotV1, error) {
+	// Use the verbatim source from the price value object — do NOT overwrite
+	// "default_model_price" with "model_price" (P1-4: wire field must match
+	// fingerprint's pricing_source).
 	mode := "model_price"
-	source := "model_price"
 	if price.IsRatioMode() {
 		mode = "model_ratio"
-		source = "model_ratio"
 	}
+	source := price.PricingSourceRaw()
 	snap := &ImageTaskBillingSnapshotV1{
 		SnapshotVersion:            1,
 		OwnerUserID:                ownerUserID,

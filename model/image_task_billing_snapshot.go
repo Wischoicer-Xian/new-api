@@ -45,6 +45,7 @@ type ImageTaskPriceResolution struct {
 	snapshotVersion     int
 	mode                imageTaskPricingMode
 	source              imageTaskPricingSource
+	sourceRaw           string // verbatim source for wire snapshot fidelity
 	originModel         string
 	matchedModel        string
 	resolvedGroup       string
@@ -64,11 +65,21 @@ type ImageTaskPriceResolution struct {
 // All strings must be non-empty after trim. Floats must be finite, non-negative.
 // quotaPerUnit must be > 0. The formula is computed exactly once (§5.2.1) and
 // the fingerprint is derived from canonical bytes (§5.2.2).
+//
+// otherRatios must be nil/empty — non-empty values are rejected with
+// ErrUnsupportedImageTaskPricingFacts (§5.2: Option A fail-closed).
+// sourceRaw is stored verbatim so the wire snapshot faithfully records whether
+// the price came from "model_price" or "default_model_price".
 func NewImageTaskPriceResolution(
 	mode, source, originModel, matchedModel, resolvedGroup string,
 	modelPrice, modelRatio, groupRatio, quotaPerUnit float64,
 	freeModelPreconsume bool,
+	otherRatios map[string]float64,
 ) (*ImageTaskPriceResolution, error) {
+	if len(otherRatios) > 0 {
+		return nil, ErrUnsupportedImageTaskPricingFacts
+	}
+
 	v := &ImageTaskPriceResolution{
 		snapshotVersion:     imageTaskPriceSnapshotVersion,
 		originModel:         strings.TrimSpace(originModel),
@@ -79,6 +90,7 @@ func NewImageTaskPriceResolution(
 		groupRatio:          groupRatio,
 		quotaPerUnit:        quotaPerUnit,
 		freeModelPreconsume: freeModelPreconsume,
+		sourceRaw:           source,
 	}
 
 	// Parse mode + source enums and validate consistency.
@@ -252,5 +264,6 @@ func (v *ImageTaskPriceResolution) FreeModelPreconsume() bool  { return v.freeMo
 func (v *ImageTaskPriceResolution) FreeModel() bool            { return v.freeModel }
 func (v *ImageTaskPriceResolution) FormulaReserveQuota() int   { return v.formulaReserveQuota }
 func (v *ImageTaskPriceResolution) PricingFingerprint() string { return v.pricingFingerprint }
+func (v *ImageTaskPriceResolution) PricingSourceRaw() string   { return v.sourceRaw }
 func (v *ImageTaskPriceResolution) IsFixedMode() bool          { return v.mode == pricingModeFixed }
 func (v *ImageTaskPriceResolution) IsRatioMode() bool          { return v.mode == pricingModeRatio }

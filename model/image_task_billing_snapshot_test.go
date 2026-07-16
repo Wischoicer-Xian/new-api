@@ -82,7 +82,7 @@ func TestImageTaskPriceResolution_FormulaGoldenVectors(t *testing.T) {
 			v, err := NewImageTaskPriceResolution(
 				tt.mode, tt.source, "img-v1", "img-v1", "default",
 				tt.modelPrice, tt.modelRatio, tt.groupRatio, qpu,
-				tt.freePrec,
+				tt.freePrec, nil,
 			)
 			if tt.wantErr {
 				require.Error(t, err, "overflow must fail closed")
@@ -135,7 +135,7 @@ func TestImageTaskPriceResolution_CanonicalFingerprint(t *testing.T) {
 			v, err := NewImageTaskPriceResolution(
 				tt.mode, tt.source, "img-v1", "img-v1", "default",
 				modelPrice, modelRatio, 1.0, qpu,
-				true, // free-preconsume enabled (matches fixture)
+				true, nil, // free-preconsume enabled (matches fixture)
 			)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantFingerprint, v.PricingFingerprint(), "fingerprint must match RFC fixture exactly")
@@ -168,7 +168,7 @@ func TestImageTaskPriceResolution_ValidationErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewImageTaskPriceResolution(tt.mode, tt.source, tt.origin, tt.matched, tt.group, 0.001, 0, 1, tt.qpu, true)
+			_, err := NewImageTaskPriceResolution(tt.mode, tt.source, tt.origin, tt.matched, tt.group, 0.001, 0, 1, tt.qpu, true, nil)
 			require.Error(t, err)
 			assert.Contains(t, strings.ToLower(err.Error()), strings.ToLower(tt.wantErr))
 		})
@@ -184,7 +184,7 @@ func TestImageTaskPriceResolution_CanonicalHex(t *testing.T) {
 
 	v, err := NewImageTaskPriceResolution(
 		"model_price", "model_price", "img-v1", "img-v1", "default",
-		0.000085, 0, 1, 500000, true,
+		0.000085, 0, 1, 500000, true, nil,
 	)
 	require.NoError(t, err)
 
