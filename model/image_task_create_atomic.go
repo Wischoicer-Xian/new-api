@@ -134,6 +134,8 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 	}
 
 	outcome := ImageTaskCreateOutcome{}
+	var reserveWalletUsed bool
+	var reserveTokenKey string
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		// 2. Owner fence: the FIRST statement of the transaction, so the snapshot
 		// is taken here and includes any same-owner commit that finished while we
@@ -203,9 +205,12 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 
 		// 6. Reserve via the tx-aware billing ledger, sharing this transaction
 		// (§7.4): billing stage and fund changes commit or roll back together.
-		if err := reserveImageTaskInTx(tx, task, intent); err != nil {
-			return err
+		wu, tk, rerr := reserveImageTaskInTx(tx, task, intent)
+		if rerr != nil {
+			return rerr
 		}
+		reserveWalletUsed = wu
+		reserveTokenKey = tk
 
 		outcome.Task = task
 		outcome.Execution = exec
@@ -215,31 +220,34 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 	if err != nil {
 		return ImageTaskCreateOutcome{}, err
 	}
-	// Post-commit cache convergence (P1-2): decrement the Redis quota cache for
-	// the actual funding sources that were deducted in the committed reserve
-	// transaction. Only for Created=true; replay/rollback do not touch cache.
-	// No-op when Redis is disabled (common.RedisEnabled=false).
+	// Post-commit cache convergence (P1-4): decrement the Redis quota cache for
+	// the actual funding sources deducted in the committed reserve, using the
+	// cache effect captured inside the transaction (no post-commit DB re-read).
+	// Only for Created=true; replay/rollback do not touch cache. Failures are
+	// logged (not silently swallowed) so stale-cache drift is observable.
 	if outcome.Created {
-		convergeImageTaskReserveCache(outcome.Task, intent)
+		convergeImageTaskReserveCache(intent, reserveWalletUsed, reserveTokenKey)
 	}
 	return outcome, nil
 }
 
 // convergeImageTaskReserveCache decrements the Redis quota cache for the actual
-// wallet/token sources deducted in the committed reserve transaction. It is
-// called AFTER the create transaction commits, so a rollback never dirties the
-// cache. Subscription-source reserves do not touch the user-quota cache.
-func convergeImageTaskReserveCache(task *Task, intent ImageTaskCreateIntent) {
+// wallet/token sources deducted in the committed reserve. It uses the cache
+// effect (walletUsed + tokenKey) captured inside the transaction — no
+// post-commit DB re-read. Errors are logged via common.SysError (not silently
+// swallowed) so stale-cache drift is observable and debuggable (P1-4).
+func convergeImageTaskReserveCache(intent ImageTaskCreateIntent, walletUsed bool, tokenKey string) {
 	if !common.RedisEnabled {
-		return // Redis disabled: no cache to converge
+		return
 	}
-	if task.PrivateData.BillingSource == ImageTaskBillingSourceWallet {
-		_ = cacheDecrUserQuota(intent.OwnerUserID, int64(intent.ReserveQuota))
+	if walletUsed {
+		if err := cacheDecrUserQuota(intent.OwnerUserID, int64(intent.ReserveQuota)); err != nil {
+			common.SysError(fmt.Sprintf("image task reserve cache: user quota convergence failed (user=%d, amount=%d): %v", intent.OwnerUserID, intent.ReserveQuota, err))
+		}
 	}
-	if intent.TokenID != 0 {
-		var tk Token
-		if DB.Select("key", "unlimited_quota").First(&tk, intent.TokenID).Error == nil && !tk.UnlimitedQuota {
-			_ = cacheDecrTokenQuota(tk.Key, int64(intent.ReserveQuota))
+	if tokenKey != "" {
+		if err := cacheDecrTokenQuota(tokenKey, int64(intent.ReserveQuota)); err != nil {
+			common.SysError(fmt.Sprintf("image task reserve cache: token quota convergence failed (amount=%d): %v", intent.ReserveQuota, err))
 		}
 	}
 }
@@ -329,63 +337,74 @@ const (
 	ImageTaskBillingPrefSubscriptionFirst = "subscription_first"
 )
 
-func reserveImageTaskInTx(tx *gorm.DB, task *Task, intent ImageTaskCreateIntent) error {
-	// Record the base (pre-choice) typed snapshot. The actual funding source is
-	// filled after the choice and written back before the stage is applied.
-	baseJSON, err := common.Marshal(intent.BillingSnapshot)
-	if err != nil {
-		return fmt.Errorf("reserve ledger snapshot marshal: %w", err)
+func reserveImageTaskInTx(tx *gorm.DB, task *Task, intent ImageTaskCreateIntent) (walletUsed bool, tokenKey string, err error) {
+	// Build the snapshot from the authoritative intent (P1-3): core fields
+	// (owner/group/token/operation/reserve/channel_revision) are overwritten from
+	// intent regardless of what the caller put in BillingSnapshot; only
+	// price-resolution extras (model_ratio_version/attribution/clamp) are
+	// preserved from the caller.
+	snapshot := intent.BillingSnapshot
+	snapshot.OwnerUserID = intent.OwnerUserID
+	snapshot.Group = intent.Group
+	snapshot.TokenID = intent.TokenID
+	snapshot.Operation = intent.Operation
+	snapshot.ReserveQuota = intent.ReserveQuota
+	snapshot.ChannelRevisionID = intent.ChannelRevisionID
+	snapshotJSON, mErr := common.Marshal(snapshot)
+	if mErr != nil {
+		return false, "", fmt.Errorf("reserve ledger snapshot marshal: %w", mErr)
 	}
 	_, ledger, err := RecordBillingStage(tx, TaskBillingStageIntent{
 		TaskDBID:    task.ID,
 		Stage:       TaskBillingReserve,
-		Snapshot:    baseJSON,
+		Snapshot:    snapshotJSON,
 		QuotaAmount: intent.ReserveQuota,
 	})
 	if err != nil {
-		return fmt.Errorf("reserve ledger record: %w", err)
+		return false, "", fmt.Errorf("reserve ledger record: %w", err)
 	}
 	var fundingSource string
 	var subscriptionID int
 	if _, err := ApplyBillingStageTx(tx, ledger.ID, func(t *gorm.DB, _ *TaskBillingLedger) error {
 		// Token first (BillingSession.preConsume order); a funding failure rolls
 		// the token deduction back with the transaction — no manual rollback.
-		if err := deductTokenQuotaInTx(t, intent.OwnerUserID, intent.TokenID, intent.ReserveQuota, intent.Now); err != nil {
-			return err
+		key, terr := deductTokenQuotaInTx(t, intent.OwnerUserID, intent.TokenID, intent.ReserveQuota, intent.Now)
+		if terr != nil {
+			return terr
 		}
+		tokenKey = key // non-empty only for limited+deducted (cache convergence)
 		source, sid, ferr := deductFundingInTx(t, intent)
 		if ferr != nil {
 			return ferr
 		}
 		fundingSource = source
 		subscriptionID = sid
+		walletUsed = source == ImageTaskBillingSourceWallet
 		// Write the FINAL snapshot (with the actual funding source + subscription
-		// id) to the ledger, in this transaction, before the CAS marks it
-		// applied. settle/refund read this durable record (§7.4).
-		final := intent.BillingSnapshot
+		// id) to the ledger, in this transaction, before the CAS marks it applied.
+		final := snapshot
 		final.FundingSource = source
 		final.SubscriptionID = sid
-		finalJSON, mErr := common.Marshal(final)
-		if mErr != nil {
-			return mErr
+		finalJSON, fmErr := common.Marshal(final)
+		if fmErr != nil {
+			return fmErr
 		}
 		if uErr := t.Model(&TaskBillingLedger{}).Where("id = ?", ledger.ID).Update("billing_snapshot", finalJSON).Error; uErr != nil {
 			return fmt.Errorf("reserve ledger snapshot finalize: %w", uErr)
 		}
 		return nil
 	}); err != nil {
-		return err
+		return false, "", err
 	}
-	// Freeze the actual funding source on the task projection. Tasks default to
-	// wallet; switch to subscription when that source was used.
+	// Freeze the actual funding source on the task projection.
 	if fundingSource == ImageTaskBillingSourceSubscription {
 		task.PrivateData.BillingSource = ImageTaskBillingSourceSubscription
 		task.PrivateData.SubscriptionId = subscriptionID
 		if err := tx.Model(&Task{}).Where("id = ?", task.ID).Update("private_data", task.PrivateData).Error; err != nil {
-			return fmt.Errorf("reserve projection update: %w", err)
+			return false, "", fmt.Errorf("reserve projection update: %w", err)
 		}
 	}
-	return nil
+	return walletUsed, tokenKey, nil
 }
 
 // deductFundingInTx chooses the funding source per the user's billing preference
@@ -483,10 +502,17 @@ func deductSubscriptionInTx(tx *gorm.DB, ownerUserID int, amount int64, now int6
 		}
 		return sub.Id, false, nil
 	}
-	// All active subs insufficient: return the overflow flag of the first
-	// candidate (frozen from plan at purchase) so the caller can decide whether
-	// wallet fallback is allowed (strict vs allow).
-	return 0, subs[0].AllowWalletOverflow, ErrImageTaskInsufficientSub
+	// All active subs insufficient: aggregate overflow — wallet fallback is
+	// allowed only when ALL active subscriptions allow it (mirror
+	// UserActiveSubscriptionsAllowWalletOverflow: ANY strict → no fallback).
+	allAllow := true
+	for _, s := range subs {
+		if !s.AllowWalletOverflow {
+			allAllow = false
+			break
+		}
+	}
+	return 0, allAllow, ErrImageTaskInsufficientSub
 }
 
 // deductWalletInTx performs a tx-aware, conditional wallet deduction that
@@ -511,39 +537,44 @@ func deductWalletInTx(tx *gorm.DB, ownerUserID, amount int) error {
 	return nil
 }
 
-// deductTokenQuotaInTx is the tx-aware analogue of the relay token pre-consume
-// (DecreaseTokenQuota): unlimited tokens are frozen but not deducted; limited
-// tokens are decremented in one conditional UPDATE that constrains owner,
-// status, expiry and remaining quota — and synchronously bumps used_quota and
-// accessed_time so the token's usage stats and balance stay consistent (no
-// async cache mutation). tokenId 0 means no token. The constraint
-// user_id=owner closes the cross-owner token-deduction gap (P1-2).
-func deductTokenQuotaInTx(tx *gorm.DB, ownerUserID, tokenID, amount int, now int64) error {
+// deductTokenQuotaInTx reads, validates, and optionally decrements the token in
+// one transaction-safe step. ALL tokens — including unlimited — are read with
+// full ownership/status/expiry constraints (id + user_id=owner + status=enabled
+// + not expired) BEFORE the unlimited branch, so a disabled, expired, or
+// cross-owner unlimited token cannot be frozen onto a new task (P1-1). It
+// returns the token Key (for post-commit cache convergence) when the token is
+// accessed; "" when no token (TokenID=0).
+func deductTokenQuotaInTx(tx *gorm.DB, ownerUserID, tokenID, amount int, now int64) (string, error) {
 	if tokenID == 0 || amount <= 0 {
-		return nil
+		return "", nil
 	}
+	// Full-constraint read: covers owner, enabled, and expiry for ALL tokens
+	// (including unlimited) before branching. A wrong-owner / disabled /
+	// expired token is rejected here, not silently frozen.
 	var token Token
-	if err := tx.Select("id", "unlimited_quota").First(&token, tokenID).Error; err != nil {
-		return fmt.Errorf("reserve token lookup: %w", err)
+	err := tx.Where("id = ? AND user_id = ? AND status = ? AND (expired_time = ? OR expired_time > ?)",
+		tokenID, ownerUserID, common.TokenStatusEnabled, -1, now).
+		First(&token).Error
+	if err != nil {
+		return "", fmt.Errorf("reserve token lookup (owner/status/expiry): %w", err)
 	}
 	if token.UnlimitedQuota {
-		return nil // frozen, not deducted
+		return "", nil // frozen, not deducted; no cache change needed
 	}
 	deducted := tx.Model(&Token{}).
-		Where("id = ? AND user_id = ? AND status = ? AND remain_quota >= ? AND (expired_time = ? OR expired_time > ?)",
-			tokenID, ownerUserID, common.TokenStatusEnabled, amount, -1, now).
+		Where("id = ? AND remain_quota >= ?", tokenID, amount).
 		Updates(map[string]any{
 			"remain_quota":  gorm.Expr("remain_quota - ?", amount),
 			"used_quota":    gorm.Expr("used_quota + ?", amount),
 			"accessed_time": now,
 		})
 	if deducted.Error != nil {
-		return fmt.Errorf("reserve token deduction: %w", deducted.Error)
+		return "", fmt.Errorf("reserve token deduction: %w", deducted.Error)
 	}
 	if deducted.RowsAffected != 1 {
-		return ErrImageTaskInsufficientToken
+		return "", ErrImageTaskInsufficientToken
 	}
-	return nil
+	return token.Key, nil
 }
 
 // ImageTaskBillingSource* are the funding-source values frozen on
