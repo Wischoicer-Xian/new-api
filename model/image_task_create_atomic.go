@@ -52,43 +52,53 @@ type ImageTaskCreateOutcome struct {
 // CreateImageTaskAtomic performs the §6.1 / §7.4 create in ONE transaction with
 // a double-checked idempotency guard:
 //
-//  1. look up the idempotency key WITHOUT a lock — a hit replays/conflicts
-//     immediately, before any write or owner lock (replay must not depend on
-//     the owner row being lockable);
-//  2. lock the owner fence (user row FOR UPDATE on MySQL/PostgreSQL, serial
-//     write on SQLite);
+//  1. a lock-free replay/conflict fast path run OUTSIDE the create transaction;
+//  2. inside the transaction, lock the owner fence (user row FOR UPDATE on
+//     MySQL/PostgreSQL, serial write on SQLite) — this is the FIRST statement
+//     of the transaction, so its snapshot (MySQL REPEATABLE READ) is taken here,
+//     after any concurrent same-owner commit;
 //  3. re-look up the key under the fence — a concurrent same-key create that
-//     committed while we waited on the fence now replays;
+//     committed while we waited now replays;
 //  4. count non-terminal executions under the fence and enforce the §6.1 cap;
 //  5. write Task + image_task_execution and reserve via the tx-aware billing
 //     ledger, all sharing this transaction.
 //
-// Two same-owner requests with different keys converge to exactly one new task
-// plus one cap rejection; the same key converges to one task with the second
-// request replaying it. This is the concurrency-safe enforcement primitive;
-// the read-only service.ImageTaskInFlightStatusOf is explicitly NOT a gate.
+// The fast path must stay outside the transaction: a read before the fence
+// inside the tx would pin a REPEATABLE READ snapshot and hide a concurrent
+// same-key/same-owner commit from the authoritative in-tx check, causing
+// duplicate-key inserts and cap under-count on MySQL. Two same-owner requests
+// with different keys converge to exactly one new task plus one cap rejection;
+// the same key converges to one task with the second request replaying it.
+// This is the concurrency-safe enforcement primitive; the read-only
+// service.ImageTaskInFlightStatusOf is explicitly NOT a gate.
 func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome, error) {
 	if err := validateImageTaskCreateIntent(intent); err != nil {
 		return ImageTaskCreateOutcome{}, err
 	}
+
+	// 1. Fast path: lock-free replay/conflict OUTSIDE the create transaction.
+	if stored, found, err := lookupImageTaskExecution(DB, intent.OwnerUserID, intent.Operation, intent.IdempotencyKey); err != nil {
+		return ImageTaskCreateOutcome{}, fmt.Errorf("image task create: fast-path lookup: %w", err)
+	} else if found {
+		var fast ImageTaskCreateOutcome
+		if err := replayOrConflict(DB, stored, intent, &fast); err != nil {
+			return ImageTaskCreateOutcome{}, err
+		}
+		return fast, nil
+	}
+
 	outcome := ImageTaskCreateOutcome{}
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		// 1. First idempotency check, lock-free: replay/conflict before any write.
-		if stored, found, err := lookupImageTaskExecutionTx(tx, intent.OwnerUserID, intent.Operation, intent.IdempotencyKey); err != nil {
-			return fmt.Errorf("image task create: idempotency lookup: %w", err)
-		} else if found {
-			return replayOrConflict(tx, stored, intent, &outcome)
-		}
-
-		// 2. Owner fence: serialize same-owner creates on the user row.
+		// 2. Owner fence: the FIRST statement of the transaction, so the snapshot
+		// is taken here and includes any same-owner commit that finished while we
+		// waited for the row lock.
 		var fence User
 		if err := lockForUpdate(tx).Select("id").First(&fence, intent.OwnerUserID).Error; err != nil {
 			return fmt.Errorf("image task create: lock owner fence: %w", err)
 		}
 
-		// 3. Second idempotency check under the fence: a concurrent same-key
-		//    create that committed while we waited now replays.
-		if stored, found, err := lookupImageTaskExecutionTx(tx, intent.OwnerUserID, intent.Operation, intent.IdempotencyKey); err != nil {
+		// 3. Authoritative idempotency check under the fence.
+		if stored, found, err := lookupImageTaskExecution(tx, intent.OwnerUserID, intent.Operation, intent.IdempotencyKey); err != nil {
 			return fmt.Errorf("image task create: fenced idempotency lookup: %w", err)
 		} else if found {
 			return replayOrConflict(tx, stored, intent, &outcome)
@@ -157,11 +167,12 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 	return outcome, nil
 }
 
-// lookupImageTaskExecutionTx returns the existing execution for an idempotency
-// namespace (owner, operation, key) within tx, or found=false if none.
-func lookupImageTaskExecutionTx(tx *gorm.DB, ownerUserID int, operation, idempotencyKey string) (*ImageTaskExecution, bool, error) {
+// lookupImageTaskExecution returns the existing execution for an idempotency
+// namespace (owner, operation, key) via db (model.DB or a tx handle), or
+// found=false if none.
+func lookupImageTaskExecution(db *gorm.DB, ownerUserID int, operation, idempotencyKey string) (*ImageTaskExecution, bool, error) {
 	stored := &ImageTaskExecution{}
-	err := tx.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?", ownerUserID, operation, idempotencyKey).First(stored).Error
+	err := db.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?", ownerUserID, operation, idempotencyKey).First(stored).Error
 	if err == nil {
 		return stored, true, nil
 	}
