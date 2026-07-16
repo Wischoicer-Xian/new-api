@@ -20,10 +20,11 @@ var (
 )
 
 // ImageTaskCreateIntent captures everything CreateImageTaskAtomic needs for one
-// §6.1 create. The caller (a future handler) resolves price into ReserveQuota
-// and builds the §7.4 BillingSnapshot; this function owns only the transactional
-// create + cap enforcement + reserve, not price resolution, so it is agnostic
-// to the final product cap value.
+// §6.1 create. The caller resolves price into ReserveQuota and builds the §7.4
+// BillingSnapshot; this function owns the transactional create + cap
+// enforcement + reserve. The full funding-source/subscription/token billing
+// aggregate (P1-1, grounded in BillingSession) is the next increment; today
+// reserve deducts the wallet path inside the create transaction.
 type ImageTaskCreateIntent struct {
 	OwnerUserID       int
 	Group             string
@@ -48,57 +49,52 @@ type ImageTaskCreateOutcome struct {
 	Created   bool
 }
 
-// CreateImageTaskAtomic performs the §6.1 / §7.4 create in ONE transaction:
-// idempotent replay/conflict first, then an owner fence (user row FOR UPDATE),
-// then in-flight cap enforcement, then Task + image_task_execution write, then
-// the reserve ledger stage with the quota deduction — all sharing the same
-// transaction handle so cap and reserve cannot diverge under concurrency.
+// CreateImageTaskAtomic performs the §6.1 / §7.4 create in ONE transaction with
+// a double-checked idempotency guard:
 //
-// SQLite serializes via its single writer; MySQL/PostgreSQL serialize
-// same-owner creates on the user row lock. Two same-owner requests with
-// different keys therefore converge to exactly one new task plus one cap
-// rejection; the same key converges to one task with the second request
-// replaying it.
+//  1. look up the idempotency key WITHOUT a lock — a hit replays/conflicts
+//     immediately, before any write or owner lock (replay must not depend on
+//     the owner row being lockable);
+//  2. lock the owner fence (user row FOR UPDATE on MySQL/PostgreSQL, serial
+//     write on SQLite);
+//  3. re-look up the key under the fence — a concurrent same-key create that
+//     committed while we waited on the fence now replays;
+//  4. count non-terminal executions under the fence and enforce the §6.1 cap;
+//  5. write Task + image_task_execution and reserve via the tx-aware billing
+//     ledger, all sharing this transaction.
 //
-// This is the concurrency-safe enforcement primitive; the read-only
-// service.ImageTaskInFlightStatusOf is explicitly NOT a gate.
+// Two same-owner requests with different keys converge to exactly one new task
+// plus one cap rejection; the same key converges to one task with the second
+// request replaying it. This is the concurrency-safe enforcement primitive;
+// the read-only service.ImageTaskInFlightStatusOf is explicitly NOT a gate.
 func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome, error) {
 	if err := validateImageTaskCreateIntent(intent); err != nil {
 		return ImageTaskCreateOutcome{}, err
 	}
 	outcome := ImageTaskCreateOutcome{}
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		// 1. Owner fence: serialize same-owner creates on the user row. SELECT
-		// FOR UPDATE (MySQL/PostgreSQL) or SQLite serial write makes the
-		// count + create + reserve region per-owner critical.
+		// 1. First idempotency check, lock-free: replay/conflict before any write.
+		if stored, found, err := lookupImageTaskExecutionTx(tx, intent.OwnerUserID, intent.Operation, intent.IdempotencyKey); err != nil {
+			return fmt.Errorf("image task create: idempotency lookup: %w", err)
+		} else if found {
+			return replayOrConflict(tx, stored, intent, &outcome)
+		}
+
+		// 2. Owner fence: serialize same-owner creates on the user row.
 		var fence User
 		if err := lockForUpdate(tx).Select("id").First(&fence, intent.OwnerUserID).Error; err != nil {
 			return fmt.Errorf("image task create: lock owner fence: %w", err)
 		}
 
-		// 2. Idempotent replay/conflict BEFORE cap and reserve: a replay never
-		// consumes a slot; a conflict never creates.
-		stored := &ImageTaskExecution{}
-		lookup := tx.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?",
-			intent.OwnerUserID, intent.Operation, intent.IdempotencyKey).First(stored)
-		if lookup.Error == nil {
-			if stored.RequestHash != intent.RequestHash {
-				return ErrImageTaskIdempotencyConflict
-			}
-			task := &Task{}
-			if err := tx.First(task, stored.TaskDBID).Error; err != nil {
-				return fmt.Errorf("image task create: load replayed task: %w", err)
-			}
-			outcome.Task = task
-			outcome.Execution = stored
-			return nil // commit read-only replay
-		}
-		if !errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("image task create: idempotency lookup: %w", lookup.Error)
+		// 3. Second idempotency check under the fence: a concurrent same-key
+		//    create that committed while we waited now replays.
+		if stored, found, err := lookupImageTaskExecutionTx(tx, intent.OwnerUserID, intent.Operation, intent.IdempotencyKey); err != nil {
+			return fmt.Errorf("image task create: fenced idempotency lookup: %w", err)
+		} else if found {
+			return replayOrConflict(tx, stored, intent, &outcome)
 		}
 
-		// 3. In-flight cap (§6.1): count non-terminal executions for this owner
-		// under the fence, before creating.
+		// 4. In-flight cap (§6.1) under the fence, before creating.
 		count, err := CountInFlightImageTasksByOwner(tx, intent.OwnerUserID)
 		if err != nil {
 			return fmt.Errorf("image task create: count in-flight: %w", err)
@@ -107,7 +103,7 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 			return ErrImageTaskInFlightCap
 		}
 
-		// 4. Task row (provider/billing projection). Platform marks it as an
+		// 5. Task row (provider/billing projection). Platform marks it as an
 		// image task so the legacy poller excludes it (§7.3).
 		task := &Task{
 			TaskID:     GenerateTaskID(),
@@ -125,8 +121,6 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 			return fmt.Errorf("image task create: create task: %w", err)
 		}
 
-		// 5. image_task_execution (full lifecycle). Key uniqueness is guaranteed
-		// under the owner fence + step-2 lookup; a collision here is a defect.
 		exec := &ImageTaskExecution{
 			PublicTaskID:      GenerateImageTaskPublicID(),
 			TaskDBID:          task.ID,
@@ -146,8 +140,8 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 			return fmt.Errorf("image task create: create execution: %w", err)
 		}
 
-		// 6. Reserve ledger + quota deduction in THIS transaction (§7.4: billing
-		// stage and fund/subscription/token changes share the transaction).
+		// 6. Reserve via the tx-aware billing ledger, sharing this transaction
+		// (§7.4): billing stage and fund changes commit or roll back together.
 		if err := reserveImageTaskInTx(tx, task.ID, intent); err != nil {
 			return err
 		}
@@ -161,6 +155,35 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 		return ImageTaskCreateOutcome{}, err
 	}
 	return outcome, nil
+}
+
+// lookupImageTaskExecutionTx returns the existing execution for an idempotency
+// namespace (owner, operation, key) within tx, or found=false if none.
+func lookupImageTaskExecutionTx(tx *gorm.DB, ownerUserID int, operation, idempotencyKey string) (*ImageTaskExecution, bool, error) {
+	stored := &ImageTaskExecution{}
+	err := tx.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?", ownerUserID, operation, idempotencyKey).First(stored).Error
+	if err == nil {
+		return stored, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
+// replayOrConflict resolves a found idempotency key: matching hash replays the
+// stored task (no slot consumed, no reserve); a mismatch is a conflict.
+func replayOrConflict(tx *gorm.DB, stored *ImageTaskExecution, intent ImageTaskCreateIntent, outcome *ImageTaskCreateOutcome) error {
+	if stored.RequestHash != intent.RequestHash {
+		return ErrImageTaskIdempotencyConflict
+	}
+	task := &Task{}
+	if err := tx.First(task, stored.TaskDBID).Error; err != nil {
+		return fmt.Errorf("image task create: load replayed task: %w", err)
+	}
+	outcome.Task = task
+	outcome.Execution = stored
+	return nil
 }
 
 func validateImageTaskCreateIntent(intent ImageTaskCreateIntent) error {
@@ -179,60 +202,59 @@ func validateImageTaskCreateIntent(intent ImageTaskCreateIntent) error {
 	if intent.ReserveQuota < 0 {
 		return errors.New("image task create: reserve quota must not be negative")
 	}
+	if len(intent.BillingSnapshot) == 0 {
+		return errors.New("image task create: billing_snapshot required")
+	}
 	if intent.Now == 0 {
 		return errors.New("image task create: now required")
 	}
 	return nil
 }
 
-// reserveImageTaskInTx records the reserve billing stage and deducts the
-// reserved quota inside tx, mirroring ApplyBillingStage's pending→applying→
-// applied CAS but without its own transaction wrapper so it shares
-// CreateImageTaskAtomic's transaction. The conditional UPDATE (quota >= amount)
-// prevents a negative balance; insufficient quota fails the whole create.
+// reserveImageTaskInTx records the reserve billing stage and applies it inside
+// tx, reusing the tx-aware billing-ledger state machine (RecordBillingStage +
+// ApplyBillingStageTx) so the §7.4 snapshot/MaxQuota validation and the
+// pending→applying→applied CAS are shared with the rest of the codebase rather
+// than hand-rolled. The apply callback performs the tx-aware fund deduction;
+// today that is the wallet path (conditional UPDATE prevents a negative
+// balance). The funding-source/subscription/token aggregate (P1-1) replaces
+// this callback next.
 func reserveImageTaskInTx(tx *gorm.DB, taskDBID int64, intent ImageTaskCreateIntent) error {
-	ledger := &TaskBillingLedger{
-		TaskDBID:        taskDBID,
-		Stage:           TaskBillingReserve,
-		OperationKey:    BillingOperationKey(taskDBID, TaskBillingReserve),
-		State:           BillingStatePending,
-		QuotaAmount:     intent.ReserveQuota,
-		BillingSnapshot: intent.BillingSnapshot,
-		CreatedAt:       intent.Now,
+	_, ledger, err := RecordBillingStage(tx, TaskBillingStageIntent{
+		TaskDBID:    taskDBID,
+		Stage:       TaskBillingReserve,
+		Snapshot:    intent.BillingSnapshot,
+		QuotaAmount: intent.ReserveQuota,
+	})
+	if err != nil {
+		return fmt.Errorf("reserve ledger record: %w", err)
 	}
-	if err := tx.Create(ledger).Error; err != nil {
-		return fmt.Errorf("reserve ledger create: %w", err)
+	if _, err := ApplyBillingStageTx(tx, ledger.ID, func(t *gorm.DB, _ *TaskBillingLedger) error {
+		return deductWalletInTx(t, intent.OwnerUserID, intent.ReserveQuota)
+	}); err != nil {
+		return err
 	}
-	applying := tx.Model(&TaskBillingLedger{}).
-		Where("id = ? AND state = ?", ledger.ID, BillingStatePending).
-		Update("state", BillingStateApplying)
-	if applying.Error != nil {
-		return fmt.Errorf("reserve ledger claim: %w", applying.Error)
+	return nil
+}
+
+// deductWalletInTx performs a tx-aware, conditional wallet deduction that
+// prevents a negative balance. It is the tx-aware analogue of the wallet
+// funding path (model.DecreaseUserQuota minus the async cache + batch): no
+// global DB, no self-opened transaction, no fire-and-forget cache mutation.
+// Redis quota cache convergence is intentionally NOT done here; it must happen
+// after commit (P1-1 funding aggregate), so a rollback never dirties the cache.
+func deductWalletInTx(tx *gorm.DB, ownerUserID, amount int) error {
+	if amount <= 0 {
+		return nil
 	}
-	if applying.RowsAffected != 1 {
-		return fmt.Errorf("reserve ledger %d lost pending state", ledger.ID)
+	deducted := tx.Model(&User{}).
+		Where("id = ? AND quota >= ?", ownerUserID, amount).
+		Update("quota", gorm.Expr("quota - ?", amount))
+	if deducted.Error != nil {
+		return fmt.Errorf("reserve quota deduction: %w", deducted.Error)
 	}
-	// Conditional quota deduction prevents negative balance. A 0-reserve skips
-	// the UPDATE so RowsAffected stays uniform (0 deduction always succeeds).
-	if intent.ReserveQuota > 0 {
-		deducted := tx.Model(&User{}).
-			Where("id = ? AND quota >= ?", intent.OwnerUserID, intent.ReserveQuota).
-			Update("quota", gorm.Expr("quota - ?", intent.ReserveQuota))
-		if deducted.Error != nil {
-			return fmt.Errorf("reserve quota deduction: %w", deducted.Error)
-		}
-		if deducted.RowsAffected != 1 {
-			return ErrImageTaskInsufficientQuota
-		}
-	}
-	applied := tx.Model(&TaskBillingLedger{}).
-		Where("id = ? AND state = ?", ledger.ID, BillingStateApplying).
-		Update("state", BillingStateApplied)
-	if applied.Error != nil {
-		return fmt.Errorf("reserve ledger finalize: %w", applied.Error)
-	}
-	if applied.RowsAffected != 1 {
-		return fmt.Errorf("reserve ledger %d lost applying state", ledger.ID)
+	if deducted.RowsAffected != 1 {
+		return ErrImageTaskInsufficientQuota
 	}
 	return nil
 }

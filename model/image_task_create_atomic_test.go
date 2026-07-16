@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -132,6 +133,109 @@ func TestCreateImageTaskAtomic_ConflictOnSameKeyDifferentHash(t *testing.T) {
 	count, err := CountInFlightImageTasksByOwner(DB, owner)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), count)
+	// conflict does not trigger reserve: quota stays at the first create's deduction
+	var user User
+	require.NoError(t, DB.First(&user, owner).Error)
+	assert.Equal(t, 95, user.Quota, "conflict must not reserve beyond the first create")
+}
+
+// TestCreateImageTaskAtomic_PreExistingKeyReplaysAtCap proves the lock-free
+// first idempotency check wins over the cap: a request whose key already exists
+// (even a terminal one) replays instead of being rejected at a full cap.
+func TestCreateImageTaskAtomic_PreExistingKeyReplaysAtCap(t *testing.T) {
+	const owner = 1006
+	seedAtomicOwner(t, owner, 100)
+	prevCap := constant.MaxImageTasksPerUser
+	constant.MaxImageTasksPerUser = 1
+	t.Cleanup(func() { constant.MaxImageTasksPerUser = prevCap })
+
+	// fill the cap with a queued execution under a different key
+	require.NoError(t, DB.Create(&ImageTaskExecution{
+		PublicTaskID: "imgtask_fill_1006", TaskDBID: 6001, OwnerUserID: owner,
+		Operation: ImageTaskOperationGeneration, IdempotencyKey: "filler", RequestHash: "h",
+		State: ImageTaskStateQueued,
+	}).Error)
+	// a completed execution shares the request's key+hash; its task row must exist
+	// for the replay to load it.
+	require.NoError(t, DB.Create(&Task{ID: 6002, UserId: owner, TaskID: "task_done_1006"}).Error)
+	require.NoError(t, DB.Create(&ImageTaskExecution{
+		PublicTaskID: "imgtask_done_1006", TaskDBID: 6002, OwnerUserID: owner,
+		Operation: ImageTaskOperationGeneration, IdempotencyKey: "replay-key", RequestHash: "h-replay",
+		State: ImageTaskStateCompleted,
+	}).Error)
+
+	intent := baseAtomicIntent(owner, "replay-key")
+	intent.RequestHash = "h-replay"
+	out, err := CreateImageTaskAtomic(intent)
+	require.NoError(t, err)
+	assert.False(t, out.Created, "pre-existing key replays even when the cap is full")
+	assert.Equal(t, "imgtask_done_1006", out.Execution.PublicTaskID)
+}
+
+// TestCreateImageTaskAtomic_ConcurrentSameKeyReplaysSQLite is the SQLite
+// concurrency double-check: two goroutines invoking the same key concurrently
+// converge on one created task and one replay, occupying one slot and
+// deducting the reserve once. SQLite serializes the writes, but the goroutines
+// run concurrently (start barrier) and exercise the double-checked idempotency
+// guard, not a sequential single-call path.
+func TestCreateImageTaskAtomic_ConcurrentSameKeyReplaysSQLite(t *testing.T) {
+	const owner = 1007
+	seedAtomicOwner(t, owner, 100)
+	prevCap := constant.MaxImageTasksPerUser
+	constant.MaxImageTasksPerUser = 5
+	t.Cleanup(func() { constant.MaxImageTasksPerUser = prevCap })
+
+	const workers = 2
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	type res struct {
+		created bool
+		execID  int64
+		err     error
+	}
+	results := make([]res, workers)
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			out, err := CreateImageTaskAtomic(ImageTaskCreateIntent{
+				OwnerUserID:     owner,
+				Group:           "default",
+				Operation:       ImageTaskOperationGeneration,
+				IdempotencyKey:  "sqlite-same-key",
+				RequestHash:     "sqlite-same-hash",
+				ReserveQuota:    5,
+				BillingSnapshot: snapshotJSON(map[string]int{"u": 5}),
+				Now:             19,
+			})
+			eid := int64(0)
+			if out.Execution != nil {
+				eid = out.Execution.ID
+			}
+			results[idx] = res{created: out.Created, execID: eid, err: err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, r := range results {
+		require.NoError(t, r.err, "worker %d must not error", i)
+	}
+	assert.Equal(t, results[0].execID, results[1].execID, "both converge on the same task")
+	createdCount := 0
+	for _, r := range results {
+		if r.created {
+			createdCount++
+		}
+	}
+	assert.Equal(t, 1, createdCount, "exactly one created, one replayed")
+	count, err := CountInFlightImageTasksByOwner(DB, owner)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+	var user User
+	require.NoError(t, DB.First(&user, owner).Error)
+	assert.Equal(t, 95, user.Quota, "reserve deducted once across the race")
 }
 
 func TestCreateImageTaskAtomic_RejectsAtCap(t *testing.T) {
