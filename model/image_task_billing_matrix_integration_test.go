@@ -187,6 +187,57 @@ func TestFundMatrix_RealDB(t *testing.T) {
 		require.NoError(t, DB.First(&u, owner).Error)
 		assert.Equal(t, 1000-42, u.Quota, "deducted once")
 	})
+
+	t.Run("WalletFirstFallbackToSubscription", func(t *testing.T) {
+		const owner = 9006
+		require.NoError(t, DB.Create(&User{Id: owner, Username: "fm9006", AffCode: "aff9006", Quota: 3}).Error)
+		require.NoError(t, DB.Create(&SubscriptionPlan{Id: 9006, Title: "p", DurationUnit: "month"}).Error)
+		require.NoError(t, DB.Create(&UserSubscription{Id: 9006, UserId: owner, PlanId: 9006, AmountTotal: 100, AmountUsed: 0, StartTime: 1, EndTime: 2e9, Status: "active", NextResetTime: 2e9, AllowWalletOverflow: true}).Error)
+		price := mustPrice(t, "model_price", "model_price", 0.000085, 0, 1, true)
+		out := mustReserveWithPref(t, owner, "fm-wf-sub", price, "wallet_first")
+		require.False(t, out.Replayed)
+		assert.Equal(t, FundingSourceSubscription, out.FundingSource, "wallet insufficient → subscription fallback")
+		var u User
+		require.NoError(t, DB.First(&u, owner).Error)
+		assert.Equal(t, 3, u.Quota, "wallet untouched (insufficient)")
+		var sub UserSubscription
+		require.NoError(t, DB.First(&sub, 9006).Error)
+		assert.Equal(t, int64(42), sub.AmountUsed, "subscription deducted")
+	})
+
+	t.Run("SubscriptionFirstFallbackToWallet", func(t *testing.T) {
+		const owner = 9007
+		require.NoError(t, DB.Create(&User{Id: owner, Username: "fm9007", AffCode: "aff9007", Quota: 100}).Error)
+		require.NoError(t, DB.Create(&SubscriptionPlan{Id: 9007, Title: "p", DurationUnit: "month"}).Error)
+		require.NoError(t, DB.Create(&UserSubscription{Id: 9007, UserId: owner, PlanId: 9007, AmountTotal: 3, AmountUsed: 0, StartTime: 1, EndTime: 2e9, Status: "active", NextResetTime: 2e9, AllowWalletOverflow: true}).Error)
+		price := mustPrice(t, "model_price", "model_price", 0.000085, 0, 1, true)
+		out := mustReserve(t, owner, "fm-sf-wallet", price)
+		require.False(t, out.Replayed)
+		assert.Equal(t, FundingSourceWallet, out.FundingSource, "subscription insufficient + allow overflow → wallet fallback")
+		var u User
+		require.NoError(t, DB.First(&u, owner).Error)
+		assert.Equal(t, 100-42, u.Quota, "wallet deducted (fallback)")
+		var sub UserSubscription
+		require.NoError(t, DB.First(&sub, 9007).Error)
+		assert.Equal(t, int64(0), sub.AmountUsed, "subscription not consumed")
+	})
+
+	t.Run("MixedSubsFirstCoversDespiteOrder", func(t *testing.T) {
+		const owner = 9008
+		require.NoError(t, DB.Create(&User{Id: owner, Username: "fm9008", AffCode: "aff9008", Quota: 100}).Error)
+		require.NoError(t, DB.Create(&SubscriptionPlan{Id: 9008, Title: "p", DurationUnit: "month"}).Error)
+		// Two active subs: first (lower end_time) insufficient, second covers.
+		require.NoError(t, DB.Create(&UserSubscription{Id: 90081, UserId: owner, PlanId: 9008, AmountTotal: 3, AmountUsed: 0, StartTime: 1, EndTime: 1999999999, Status: "active", NextResetTime: 1999999999, AllowWalletOverflow: true}).Error)
+		require.NoError(t, DB.Create(&UserSubscription{Id: 90082, UserId: owner, PlanId: 9008, AmountTotal: 200, AmountUsed: 0, StartTime: 1, EndTime: 2e9, Status: "active", NextResetTime: 2e9, AllowWalletOverflow: true}).Error)
+		price := mustPrice(t, "model_price", "model_price", 0.000085, 0, 1, true)
+		out := mustReserveWithPref(t, owner, "fm-mixed", price, "subscription_only")
+		require.False(t, out.Replayed)
+		assert.Equal(t, FundingSourceSubscription, out.FundingSource)
+		assert.Equal(t, 90082, out.SubscriptionID, "second sub covers (first insufficient)")
+		var u User
+		require.NoError(t, DB.First(&u, owner).Error)
+		assert.Equal(t, 100, u.Quota, "wallet untouched")
+	})
 }
 
 // --- helpers for the fund matrix ---
@@ -199,14 +250,34 @@ func mustPrice(t *testing.T, mode, source string, mp, mr, gr float64, freePrec b
 }
 
 func reserveRaw(owner int, key string, price *ImageTaskPriceResolution) (ImageTaskReserveOutcome, error) {
-	return ReserveImageTask(nil, ImageTaskReserveCommand{
+	return reserveRawWithPref(owner, key, price, "")
+}
+
+func reserveRawWithPref(owner int, key string, price *ImageTaskPriceResolution, pref string) (ImageTaskReserveOutcome, error) {
+	cmd := ImageTaskReserveCommand{
 		OwnerUserID:    owner,
 		Operation:      ImageTaskOperationGeneration,
 		IdempotencyKey: key,
 		RequestHash:    "h-" + key,
 		Price:          price,
 		Now:            1_700_000_000,
-	})
+	}
+	_ = pref // preference is read from locked user setting, not command (§5.5)
+	return ReserveImageTask(nil, cmd)
+}
+
+func mustReserveWithPref(t *testing.T, owner int, key string, price *ImageTaskPriceResolution, pref string) ImageTaskReserveOutcome {
+	t.Helper()
+	// Set user billing preference via setting before reserve.
+	var u User
+	require.NoError(t, DB.First(&u, owner).Error)
+	setting := u.GetSetting()
+	setting.BillingPreference = pref
+	u.SetSetting(setting)
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", owner).Update("setting", u.Setting).Error)
+	out, err := reserveRawWithPref(owner, key, price, pref)
+	require.NoError(t, err)
+	return out
 }
 
 func mustReserve(t *testing.T, owner int, key string, price *ImageTaskPriceResolution) ImageTaskReserveOutcome {
