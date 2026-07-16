@@ -17,6 +17,7 @@ var (
 	ErrImageTaskIdempotencyConflict = errors.New("idempotency key reused with a different request")
 	ErrImageTaskInFlightCap         = errors.New("per-user in-flight image task cap reached")
 	ErrImageTaskInsufficientQuota   = errors.New("insufficient quota to reserve image task")
+	ErrImageTaskInsufficientToken   = errors.New("insufficient token quota to reserve image task")
 )
 
 // ImageTaskCreateIntent captures everything CreateImageTaskAtomic needs for one
@@ -37,8 +38,11 @@ type ImageTaskCreateIntent struct {
 	ExecutionMode     string
 	AdapterVersion    string
 	ReserveQuota      int
-	BillingSnapshot   json.RawMessage
-	Now               int64
+	// TokenID is the creation token whose limited quota is also reserved (0 =
+	// no token). Unlimited tokens are frozen but not deducted.
+	TokenID         int
+	BillingSnapshot json.RawMessage
+	Now             int64
 }
 
 // ImageTaskCreateOutcome is the result of one atomic create. Created is false
@@ -114,7 +118,8 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 		}
 
 		// 5. Task row (provider/billing projection). Platform marks it as an
-		// image task so the legacy poller excludes it (§7.3).
+		// image task so the legacy poller excludes it (§7.3). PrivateData freezes
+		// the funding decision so settle/refund (P3-E/F) can reconstruct it.
 		task := &Task{
 			TaskID:     GenerateTaskID(),
 			UserId:     intent.OwnerUserID,
@@ -126,6 +131,10 @@ func CreateImageTaskAtomic(intent ImageTaskCreateIntent) (ImageTaskCreateOutcome
 			Progress:   "0%",
 			SubmitTime: intent.Now,
 			Quota:      intent.ReserveQuota,
+			PrivateData: TaskPrivateData{
+				BillingSource: ImageTaskBillingSourceWallet,
+				TokenId:       intent.TokenID,
+			},
 		}
 		if err := tx.Create(task).Error; err != nil {
 			return fmt.Errorf("image task create: create task: %w", err)
@@ -226,10 +235,16 @@ func validateImageTaskCreateIntent(intent ImageTaskCreateIntent) error {
 // tx, reusing the tx-aware billing-ledger state machine (RecordBillingStage +
 // ApplyBillingStageTx) so the §7.4 snapshot/MaxQuota validation and the
 // pending→applying→applied CAS are shared with the rest of the codebase rather
-// than hand-rolled. The apply callback performs the tx-aware fund deduction;
-// today that is the wallet path (conditional UPDATE prevents a negative
-// balance). The funding-source/subscription/token aggregate (P1-1) replaces
-// this callback next.
+// than hand-rolled. The apply callback performs the tx-aware fund + token
+// deduction in the create transaction, mirroring BillingSession.preConsume's
+// order (token first, then funding): if the wallet deduction fails the whole
+// transaction — including the token deduction — rolls back, so no manual
+// IncreaseTokenQuota rollback is needed (§7.4 same-tx invariant).
+//
+// Funding source: today the wallet path (BillingSession default for a user
+// without subscription). The subscription funding source (P1-1 remaining
+// slice) replaces deductWalletInTx with the tx-aware subscription analogue;
+// the frozen projection's BillingSource is updated then.
 func reserveImageTaskInTx(tx *gorm.DB, taskDBID int64, intent ImageTaskCreateIntent) error {
 	_, ledger, err := RecordBillingStage(tx, TaskBillingStageIntent{
 		TaskDBID:    taskDBID,
@@ -241,6 +256,9 @@ func reserveImageTaskInTx(tx *gorm.DB, taskDBID int64, intent ImageTaskCreateInt
 		return fmt.Errorf("reserve ledger record: %w", err)
 	}
 	if _, err := ApplyBillingStageTx(tx, ledger.ID, func(t *gorm.DB, _ *TaskBillingLedger) error {
+		if err := deductTokenQuotaInTx(t, intent.TokenID, intent.ReserveQuota); err != nil {
+			return err
+		}
 		return deductWalletInTx(t, intent.OwnerUserID, intent.ReserveQuota)
 	}); err != nil {
 		return err
@@ -269,6 +287,44 @@ func deductWalletInTx(tx *gorm.DB, ownerUserID, amount int) error {
 	}
 	return nil
 }
+
+// deductTokenQuotaInTx is the tx-aware analogue of the relay token pre-consume:
+// unlimited tokens (token.go UnlimitedQuota) are frozen but not deducted;
+// limited tokens are conditionally decremented (remain_quota >= amount) so the
+// balance never goes negative. tokenId 0 means no token and is a no-op. The
+// token row is read under the create transaction (owner fence already
+// serializes same-owner writes), so no separate lock is needed.
+func deductTokenQuotaInTx(tx *gorm.DB, tokenID, amount int) error {
+	if tokenID == 0 || amount <= 0 {
+		return nil
+	}
+	var token Token
+	if err := tx.Select("id", "unlimited_quota", "remain_quota").First(&token, tokenID).Error; err != nil {
+		return fmt.Errorf("reserve token lookup: %w", err)
+	}
+	if token.UnlimitedQuota {
+		return nil // frozen, not deducted
+	}
+	deducted := tx.Model(&Token{}).
+		Where("id = ? AND remain_quota >= ?", tokenID, amount).
+		Update("remain_quota", gorm.Expr("remain_quota - ?", amount))
+	if deducted.Error != nil {
+		return fmt.Errorf("reserve token deduction: %w", deducted.Error)
+	}
+	if deducted.RowsAffected != 1 {
+		return ErrImageTaskInsufficientToken
+	}
+	return nil
+}
+
+// ImageTaskBillingSource* are the funding-source values frozen on
+// Task.PrivateData.BillingSource at reserve time, mirroring
+// service.BillingSourceWallet/Subscription. Defined in model so the projection
+// does not import service.
+const (
+	ImageTaskBillingSourceWallet       = "wallet"
+	ImageTaskBillingSourceSubscription = "subscription"
+)
 
 // GenerateImageTaskPublicID returns a new imgtask_ public id.
 func GenerateImageTaskPublicID() string {

@@ -37,9 +37,32 @@ func cleanupAtomicOwner(t *testing.T, owner int) {
 			DB.Where("task_db_id IN ?", taskIDs).Delete(&TaskBillingLedger{})
 		}
 		DB.Where("owner_user_id = ?", owner).Delete(&ImageTaskExecution{})
+		DB.Where("user_id = ?", owner).Delete(&Token{})
 		DB.Where("user_id = ?", owner).Delete(&Task{})
 		DB.Where("id = ?", owner).Delete(&User{})
 	})
+}
+
+// seedAtomicToken inserts a creation token for the owner and returns its id.
+func seedAtomicToken(t *testing.T, id, userID, remain int, unlimited bool) {
+	t.Helper()
+	require.NoError(t, DB.Create(&Token{
+		Id:             id,
+		UserId:         userID,
+		Name:           fmt.Sprintf("atomic_token_%d", id),
+		Key:            fmt.Sprintf("sk-atomic-%d", id),
+		Status:         1,
+		RemainQuota:    remain,
+		UnlimitedQuota: unlimited,
+		ExpiredTime:    -1,
+	}).Error)
+}
+
+func tokenRemain(t *testing.T, id int) int {
+	t.Helper()
+	var tk Token
+	require.NoError(t, DB.Select("remain_quota").First(&tk, id).Error)
+	return tk.RemainQuota
 }
 
 func baseAtomicIntent(owner int, key string) ImageTaskCreateIntent {
@@ -288,4 +311,96 @@ func TestCreateImageTaskAtomic_RejectsInsufficientQuota(t *testing.T) {
 	var user User
 	require.NoError(t, DB.First(&user, owner).Error)
 	assert.Equal(t, 3, user.Quota, "insufficient quota leaves balance intact")
+}
+
+// P1-3 wallet + token matrix (subscription funding source is the remaining
+// slice). Token-first then wallet, same transaction: failure of either rolls
+// both back with no manual IncreaseTokenQuota.
+
+func TestCreateImageTaskAtomic_LimitedTokenDeductedWithWallet(t *testing.T) {
+	const owner = 1101
+	seedAtomicOwner(t, owner, 100)
+	seedAtomicToken(t, 1101, owner, 50, false)
+	setCap(t, 5)
+
+	intent := baseAtomicIntent(owner, "tok-limited")
+	intent.TokenID = 1101
+	out, err := CreateImageTaskAtomic(intent)
+	require.NoError(t, err)
+	require.True(t, out.Created)
+
+	assert.Equal(t, 95, userQuota(t, owner), "wallet deducted")
+	assert.Equal(t, 45, tokenRemain(t, 1101), "limited token deducted")
+	assert.Equal(t, ImageTaskBillingSourceWallet, out.Task.PrivateData.BillingSource)
+	assert.Equal(t, 1101, out.Task.PrivateData.TokenId)
+}
+
+func TestCreateImageTaskAtomic_UnlimitedTokenFrozenNotDeducted(t *testing.T) {
+	const owner = 1102
+	seedAtomicOwner(t, owner, 100)
+	seedAtomicToken(t, 1102, owner, 999, true) // unlimited
+	setCap(t, 5)
+
+	intent := baseAtomicIntent(owner, "tok-unlimited")
+	intent.TokenID = 1102
+	out, err := CreateImageTaskAtomic(intent)
+	require.NoError(t, err)
+	require.True(t, out.Created)
+
+	assert.Equal(t, 95, userQuota(t, owner), "wallet still deducted")
+	assert.Equal(t, 999, tokenRemain(t, 1102), "unlimited token frozen, not deducted")
+	assert.Equal(t, 1102, out.Task.PrivateData.TokenId)
+}
+
+func TestCreateImageTaskAtomic_TokenInsufficientRollsBack(t *testing.T) {
+	const owner = 1103
+	seedAtomicOwner(t, owner, 100)            // wallet sufficient
+	seedAtomicToken(t, 1103, owner, 3, false) // token insufficient (<5)
+	setCap(t, 5)
+
+	intent := baseAtomicIntent(owner, "tok-insuff")
+	intent.TokenID = 1103
+	intent.ReserveQuota = 5
+	_, err := CreateImageTaskAtomic(intent)
+	assert.ErrorIs(t, err, ErrImageTaskInsufficientToken)
+
+	// full rollback: wallet intact, token intact, no task/execution/ledger
+	assert.Equal(t, 100, userQuota(t, owner))
+	assert.Equal(t, 3, tokenRemain(t, 1103))
+	count, _ := CountInFlightImageTasksByOwner(DB, owner)
+	assert.Zero(t, count)
+}
+
+func TestCreateImageTaskAtomic_WalletInsufficientRollsBackTokenIntact(t *testing.T) {
+	const owner = 1104
+	seedAtomicOwner(t, owner, 3)                // wallet insufficient (<5)
+	seedAtomicToken(t, 1104, owner, 100, false) // token sufficient
+	setCap(t, 5)
+
+	intent := baseAtomicIntent(owner, "wallet-insuff")
+	intent.TokenID = 1104
+	intent.ReserveQuota = 5
+	_, err := CreateImageTaskAtomic(intent)
+	assert.ErrorIs(t, err, ErrImageTaskInsufficientQuota)
+
+	// token was deducted then rolled back with the transaction (no manual
+	// IncreaseTokenQuota): both balances intact, nothing persisted.
+	assert.Equal(t, 3, userQuota(t, owner))
+	assert.Equal(t, 100, tokenRemain(t, 1104), "token deduction rolled back with the tx")
+	count, _ := CountInFlightImageTasksByOwner(DB, owner)
+	assert.Zero(t, count)
+}
+
+func setCap(t *testing.T, n int) {
+	t.Helper()
+	prev := constant.MaxImageTasksPerUser
+	constant.MaxImageTasksPerUser = n
+	t.Cleanup(func() { constant.MaxImageTasksPerUser = prev })
+}
+
+func userQuota(t *testing.T, owner int) int {
+	t.Helper()
+	var u User
+	require.NoError(t, DB.First(&u, owner).Error)
+	return u.Quota
 }
