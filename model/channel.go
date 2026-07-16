@@ -835,7 +835,11 @@ func EditChannelByTagWithImageRevision(tag string, newTag *string, modelMapping 
 			channel := channels[i]
 			if shouldReCreateAbilities {
 				if err := channel.UpdateAbilities(tx); err != nil {
-					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error: %v", channel.Id, updatedTag, err))
+					// Fail-closed: an ability write failure must abort the whole
+					// transaction (channel field update + revisions) so the
+					// channel, its ability set and its revisions all stay at the
+					// pre-edit state, matching the all-or-nothing contract.
+					return err
 				}
 			}
 			if freezeRevisions {

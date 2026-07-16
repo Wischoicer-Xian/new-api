@@ -114,3 +114,63 @@ func TestImageChannelRevisionBuilder_FailClosedOnConfigWithUnsupportedAdapter(t 
 	require.NoError(t, err)
 	assert.Nil(t, rev)
 }
+
+func ptrCfg(s string) *string { return &s }
+
+// TestMergeAndValidate_FinalState covers P1-2: validation runs against the
+// FINAL persisted object (origin merged with the patch by requestData key
+// presence), not the patch-zero view. Before the fix a config-only patch was
+// rejected as "未知渠道类型 0" before origin merge; now the merged final state
+// is validated in one pass.
+func TestMergeAndValidate_FinalState(t *testing.T) {
+	cases := []struct {
+		name        string
+		origin      model.Channel
+		requestData map[string]any
+		patch       PatchChannel
+		wantErr     string
+	}{
+		{
+			name:   "config-only patch inherits OpenAI type and validates",
+			origin: model.Channel{Type: constant.ChannelTypeOpenAI},
+			requestData: map[string]any{
+				"image_execution_config": `{"defaults":{"generation":"sync"}}`,
+			},
+			patch:   PatchChannel{Channel: model.Channel{ImageExecutionConfig: ptrCfg(`{"defaults":{"generation":"sync"}}`)}},
+			wantErr: "",
+		},
+		{
+			name:   "type-only patch to unsupported inherits old config and is rejected",
+			origin: model.Channel{Type: constant.ChannelTypeOpenAI, ImageExecutionConfig: ptrCfg(`{"defaults":{"generation":"sync"}}`)},
+			requestData: map[string]any{
+				"type": float64(constant.ChannelTypeAnthropic),
+			},
+			patch:   PatchChannel{Channel: model.Channel{Type: constant.ChannelTypeAnthropic}},
+			wantErr: "不支持图片任务执行",
+		},
+		{
+			name:   "explicit clear config is honored not inherited from origin",
+			origin: model.Channel{Type: constant.ChannelTypeOpenAI, ImageExecutionConfig: ptrCfg(`{"defaults":{"generation":"sync"}}`)},
+			requestData: map[string]any{
+				"image_execution_config": nil,
+			},
+			patch:   PatchChannel{Channel: model.Channel{Type: constant.ChannelTypeOpenAI}},
+			wantErr: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := tc.patch
+			mergeChannelPatchIntoOrigin(&ch, &tc.origin, tc.requestData)
+			err := validateChannel(&ch.Channel, false)
+			switch {
+			case tc.wantErr == "":
+				assert.NoError(t, err)
+			case err == nil:
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			default:
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}

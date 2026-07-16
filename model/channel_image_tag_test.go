@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func ptrString(s string) *string { return &s }
@@ -90,4 +91,45 @@ func TestEditChannelByTagWithImageRevision_BuilderErrorRollsBackFieldUpdate(t *t
 	require.NoError(t, DB.First(&db, img.Id).Error)
 	assert.Nil(t, db.ParamOverride, "field update must roll back when revision creation fails")
 	assert.Equal(t, countRevisions(t, img.Id), int64(0))
+}
+
+func countAbilities(t *testing.T, channelID int) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channelID).Count(&count).Error)
+	return count
+}
+
+// TestEditChannelByTagWithImageRevision_AbilityWriteFailureRollsBack is the
+// fault-injection regression for P1-1 atomicity: a GORM callback forces Ability
+// creates to fail mid-transaction. The whole tag edit (channel field update +
+// ability re-create + revision creation) must roll back so the channel field,
+// the ability set and the revision count all stay at the pre-edit state. This
+// replaces the prior coverage that only exercised builder errors.
+func TestEditChannelByTagWithImageRevision_AbilityWriteFailureRollsBack(t *testing.T) {
+	truncateChannelRevisions(t)
+	tag := "tag-fault"
+	img := createTaggedChannel(t, "tag-fault-ch", tag, true)
+	originalModels := img.Models
+	originalAbilityCount := countAbilities(t, img.Id)
+
+	cbName := "image-test-fail-ability-create"
+	require.NoError(t, DB.Callback().Create().Before("gorm:create").Register(cbName, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "abilities" {
+			_ = tx.AddError(errors.New("forced ability write failure"))
+		}
+	}))
+	t.Cleanup(func() { DB.Callback().Create().Remove(cbName) })
+
+	newModels := "new-model-x"
+	err := EditChannelByTagWithImageRevision(tag, nil, nil, &newModels, nil, nil, nil, nil, nil, imageRevisionBuilderForTest("v1"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "forced ability write failure")
+
+	// All-or-nothing: channel field, ability set, and revisions all unchanged.
+	var dbCh Channel
+	require.NoError(t, DB.First(&dbCh, img.Id).Error)
+	assert.Equal(t, originalModels, dbCh.Models, "channel field must roll back on ability write failure")
+	assert.Equal(t, originalAbilityCount, countAbilities(t, img.Id), "ability set must be unchanged after rollback")
+	assert.Equal(t, countRevisions(t, img.Id), int64(0), "no revision must persist on rollback")
 }

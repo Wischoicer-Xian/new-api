@@ -69,3 +69,45 @@ func imageChannelRevisionBuilder() model.ChannelRevisionBuilder {
 		return &input, nil
 	}
 }
+
+// mergeChannelPatchIntoOrigin fills patch fields the request omitted with the
+// origin values, keyed on requestData presence. The resulting object reflects
+// the FINAL persisted state so validation runs against it (not the patch-zero
+// view). A field present in requestData (even null/empty) is honored as the
+// patch intent and NOT overridden — that is what locks the "explicit clear"
+// semantics (e.g. sending image_execution_config: null clears it). Only fields
+// consumed by validateChannel or frozen into a revision are merged; other
+// fields rely on GORM's zero-skip during Updates, unchanged from prior
+// behavior.
+func mergeChannelPatchIntoOrigin(channel *PatchChannel, origin *model.Channel, requestData map[string]any) {
+	if _, ok := requestData["type"]; !ok {
+		channel.Type = origin.Type
+	}
+	if _, ok := requestData["base_url"]; !ok {
+		channel.BaseURL = origin.BaseURL
+	}
+	if _, ok := requestData["other"]; !ok {
+		channel.Other = origin.Other
+	}
+	if _, ok := requestData["setting"]; !ok {
+		channel.Setting = origin.Setting
+	}
+	if _, ok := requestData["image_execution_config"]; !ok {
+		channel.ImageExecutionConfig = origin.ImageExecutionConfig
+	}
+	if _, ok := requestData["status_code_mapping"]; !ok {
+		channel.StatusCodeMapping = origin.StatusCodeMapping
+	}
+	if _, ok := requestData["model_mapping"]; !ok {
+		channel.ModelMapping = origin.ModelMapping
+	}
+	if _, ok := requestData["param_override"]; !ok {
+		channel.ParamOverride = origin.ParamOverride
+	}
+	if _, ok := requestData["header_override"]; !ok {
+		channel.HeaderOverride = origin.HeaderOverride
+	}
+	if _, ok := requestData["openai_organization"]; !ok {
+		channel.OpenAIOrganization = origin.OpenAIOrganization
+	}
+}

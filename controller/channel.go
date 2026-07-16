@@ -953,15 +953,10 @@ func UpdateChannel(c *gin.Context) {
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
-	// 使用统一的校验函数
-	if err := validateChannel(&channel.Channel, false); err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
+	// Load origin BEFORE validating: validation must run against the FINAL
+	// persisted state (origin merged with the patch), not the patch-zero view.
+	// A config-only patch (omitting type) must not be rejected as "unknown type
+	// 0" before origin merge (P1-2).
 	originChannel, err := model.GetChannelById(channel.Id, true)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -974,18 +969,13 @@ func UpdateChannel(c *gin.Context) {
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
 
-	// Merge origin values for fields the patch omitted so validation and the
-	// revision builder see the FINAL persisted state, not the patch-only view.
-	// Without this, a partial patch (e.g. changing type while omitting
-	// image_execution_config) would bypass the image config check and the
-	// builder would see a nil config and skip revision creation.
-	if channel.Type == 0 {
-		channel.Type = originChannel.Type
-	}
-	if channel.ImageExecutionConfig == nil {
-		channel.ImageExecutionConfig = originChannel.ImageExecutionConfig
-	}
-	if err := validateImageExecutionConfig(&channel.Channel); err != nil {
+	// Merge origin values for fields the request did not explicitly provide,
+	// keyed on requestData presence: a field absent from the request inherits
+	// origin; a field present (even null/empty) is honored as the patch intent.
+	// This yields the FINAL persisted object so one validateChannel pass covers
+	// both partial-patch directions (type-only and config-only).
+	mergeChannelPatchIntoOrigin(&channel, originChannel, requestData)
+	if err := validateChannel(&channel.Channel, false); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
