@@ -1,11 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"net/http"
 	"strings"
@@ -40,7 +42,7 @@ func defaultImageTaskResultDownloader(ctx context.Context, url string) (ImageTas
 	if url == "" {
 		return ImageTaskResultDownload{}, errors.New("image task result download url is empty")
 	}
-	client := GetSSRFProtectedHTTPClient()
+	client := GetStrictSSRFProtectedHTTPClient()
 	if client == nil {
 		return ImageTaskResultDownload{}, errors.New("SSRF-protected result download client is not initialized")
 	}
@@ -133,7 +135,25 @@ func validateImageTaskResultDownload(download ImageTaskResultDownload) (string, 
 	if strings.HasPrefix(declared, "image/") && declared != sniffed {
 		return "", fmt.Errorf("image result content type mismatch: declared %q, detected %q", declared, sniffed)
 	}
+	config, format, err := getImageConfig(bytes.NewReader(download.Body))
+	if err != nil {
+		return "", fmt.Errorf("decode image result dimensions: %w", err)
+	}
+	if err := validateImageTaskResultDimensions(config); err != nil {
+		return "", err
+	}
+	expectedMIME := map[string]string{"jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}[format]
+	if expectedMIME == "" || expectedMIME != sniffed {
+		return "", fmt.Errorf("image result decoder format %q does not match detected type %q", format, sniffed)
+	}
 	return sniffed, nil
+}
+
+func validateImageTaskResultDimensions(config image.Config) error {
+	if config.Width <= 0 || config.Height <= 0 || config.Width > constant.ImageTaskResultMaxDimension || config.Height > constant.ImageTaskResultMaxDimension || int64(config.Width)*int64(config.Height) > constant.ImageTaskResultMaxPixels {
+		return fmt.Errorf("image result dimensions %dx%d exceed safety limits", config.Width, config.Height)
+	}
+	return nil
 }
 
 // locatorFromBlob maps the durable blob row onto the execution's result locator.

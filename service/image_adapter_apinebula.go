@@ -108,11 +108,19 @@ func (a *apinebulaAdapter) Submit(ctx context.Context, rev *model.ChannelRevisio
 		return "", netErr
 	}
 	var parsed apinebulaSubmitResponse
-	if err := common.Unmarshal(respBody, &parsed); err != nil {
+	parseErr := common.Unmarshal(respBody, &parsed)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		message := apinebulaErrorMessage(parsed.Error)
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		return "", classifySubmitHTTP(resp.StatusCode, apinebulaTaskIDPresent(parsed.TaskID, parsed.ID), message)
+	}
+	if parseErr != nil {
 		return "", &ImageProviderError{
 			Kind: ImageErrSubmissionUnknown, Stage: ImageProviderStageSubmit,
 			Status: resp.StatusCode, UpstreamMessage: "unparseable submit response",
-			Err: err,
+			Err: parseErr,
 		}
 	}
 	if classified := classifySubmitHTTP(resp.StatusCode, apinebulaTaskIDPresent(parsed.TaskID, parsed.ID), apinebulaErrorMessage(parsed.Error)); classified != nil {
@@ -145,11 +153,19 @@ func (a *apinebulaAdapter) Poll(ctx context.Context, rev *model.ChannelRevision,
 		return ImageAdapterPollOutcome{}, netErr
 	}
 	var parsed apinebulaPollResponse
-	if err := common.Unmarshal(respBody, &parsed); err != nil {
+	parseErr := common.Unmarshal(respBody, &parsed)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		message := apinebulaErrorMessage(parsed.Error)
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		return ImageAdapterPollOutcome{}, classifyPollHTTP(resp.StatusCode, message)
+	}
+	if parseErr != nil {
 		return ImageAdapterPollOutcome{}, &ImageProviderError{
 			Kind: ImageErrRetryablePoll, Stage: ImageProviderStagePoll,
 			Status: resp.StatusCode, UpstreamMessage: "unparseable poll response",
-			Err: err,
+			Err: parseErr,
 		}
 	}
 	if classified := classifyPollHTTP(resp.StatusCode, apinebulaErrorMessage(parsed.Error)); classified != nil {

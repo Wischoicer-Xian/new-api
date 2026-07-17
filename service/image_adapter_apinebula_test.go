@@ -125,6 +125,7 @@ func TestApinebulaSubmitClassifications(t *testing.T) {
 		wantKind ImageProviderErrorKind
 	}{
 		{name: "400 pre_submit_safe", status: 400, body: `{"error":{"message":"bad model"}}`, wantKind: ImageErrPreSubmitSafe},
+		{name: "plain text 400 pre_submit_safe", status: 400, body: `bad request`, wantKind: ImageErrPreSubmitSafe},
 		{name: "409 manual_review", status: 409, body: `{"error":{"message":"conflict"}}`, wantKind: ImageErrManualReview},
 		{name: "429 submission_unknown retryable", status: 429, body: `{"error":{"message":"slow down"}}`, wantKind: ImageErrSubmissionUnknown},
 		{name: "500 submission_unknown", status: 500, body: `{"error":{"message":"oops"}}`, wantKind: ImageErrSubmissionUnknown},
@@ -210,6 +211,20 @@ func TestApinebulaPollErrorClassifications(t *testing.T) {
 			assert.Equal(t, tt.wantKind, perr.Kind)
 		})
 	}
+}
+
+func TestApinebulaPollPlainText404IsManualReview(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
+	}))
+	t.Cleanup(srv.Close)
+	useApinebulaTestClient(t, &apinebulaTestServer{server: srv})
+
+	_, err := (&apinebulaAdapter{}).Poll(context.Background(), apinebulaTestRev(srv.URL), "k", "task_x")
+	perr := AsImageProviderError(err)
+	require.NotNil(t, perr)
+	assert.Equal(t, ImageErrManualReview, perr.Kind)
 }
 
 func TestApinebulaCancelUnsupported(t *testing.T) {

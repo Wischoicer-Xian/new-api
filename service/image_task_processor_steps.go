@@ -241,6 +241,8 @@ func (env *imageTaskProcessorEnv) processPoll(summary *ImageTaskProcessorSummary
 		env.finalizeFailed(summary, "provider task failed: "+outcome.Message)
 	case ImagePollRunning:
 		env.backoffPoll(summary)
+	default:
+		markManualReview(summary, env.adv, fmt.Sprintf("poll returned unsupported status %q", outcome.Status))
 	}
 }
 
@@ -377,6 +379,8 @@ func (env *imageTaskProcessorEnv) processCancelDrain(summary *ImageTaskProcessor
 		env.finalizeCancelled(summary, "upstream failed during cancel drain: "+outcome.Message)
 	case ImagePollRunning:
 		env.backoffCancelDrain(summary)
+	default:
+		markManualReview(summary, env.adv, fmt.Sprintf("cancel drain returned unsupported status %q", outcome.Status))
 	}
 }
 
@@ -471,8 +475,9 @@ func (env *imageTaskProcessorEnv) finalizeTerminal(summary *ImageTaskProcessorSu
 // upstream message never overflows manual_review_reason varchar(255).
 func truncateReviewReason(reason string) string {
 	const capLen = 250
-	if len(reason) <= capLen {
+	runes := []rune(reason)
+	if len(runes) <= capLen {
 		return reason
 	}
-	return reason[:capLen]
+	return string(runes[:capLen])
 }

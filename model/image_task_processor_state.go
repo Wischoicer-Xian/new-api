@@ -160,6 +160,48 @@ func ListDueImageTaskExecutions(now int64, limit int) ([]ImageTaskExecution, err
 	return execs, err
 }
 
+// ListFairDueImageTaskExecutions returns a bounded, owner-fair candidate page.
+// Owners are ordered by their oldest due execution, then each owner contributes
+// at most perOwnerLimit rows. This prevents one hot owner from filling the
+// global page and starving due work belonging to other owners.
+func ListFairDueImageTaskExecutions(now int64, limit, perOwnerLimit int) ([]ImageTaskExecution, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if perOwnerLimit <= 0 {
+		perOwnerLimit = 1
+	}
+	type dueOwner struct {
+		OwnerUserID int   `gorm:"column:owner_user_id"`
+		FirstDueAt  int64 `gorm:"column:first_due_at"`
+	}
+	var owners []dueOwner
+	err := DB.Model(&ImageTaskExecution{}).
+		Select("owner_user_id, MIN(next_run_at) AS first_due_at").
+		Where("next_run_at <= ? AND (lease_until = 0 OR lease_until < ?) AND state IN ?", now, now, claimableImageTaskStates).
+		Group("owner_user_id").Order("first_due_at ASC, owner_user_id ASC").Limit(limit).Scan(&owners).Error
+	if err != nil {
+		return nil, err
+	}
+	execs := make([]ImageTaskExecution, 0, min(limit, len(owners)*perOwnerLimit))
+	for _, owner := range owners {
+		if len(execs) >= limit {
+			break
+		}
+		ownerLimit := perOwnerLimit
+		if remaining := limit - len(execs); ownerLimit > remaining {
+			ownerLimit = remaining
+		}
+		var ownerExecs []ImageTaskExecution
+		if err := DB.Where("owner_user_id = ? AND next_run_at <= ? AND (lease_until = 0 OR lease_until < ?) AND state IN ?", owner.OwnerUserID, now, now, claimableImageTaskStates).
+			Order("next_run_at ASC, id ASC").Limit(ownerLimit).Find(&ownerExecs).Error; err != nil {
+			return nil, err
+		}
+		execs = append(execs, ownerExecs...)
+	}
+	return execs, nil
+}
+
 // HasDueImageTaskExecutions reports whether any execution is due and claimable.
 // It backs the image_task_processor system task's Enabled() gate so an idle or
 // gated-off system schedules no rows: the scheduler only creates a task row when

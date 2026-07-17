@@ -18,6 +18,7 @@ import (
 var (
 	httpClient              *http.Client
 	ssrfProtectedHTTPClient *http.Client
+	strictSSRFHTTPClient    *http.Client
 	proxyClientLock         sync.Mutex
 	proxyClients            = make(map[string]*http.Client)
 )
@@ -78,6 +79,13 @@ func InitHttpClient() {
 		}
 	}
 	ssrfProtectedHTTPClient = newProtectedFetchHTTPClient()
+	strictSSRFHTTPClient = newStrictSSRFProtectedHTTPClient()
+}
+
+// GetStrictSSRFProtectedHTTPClient is reserved for untrusted external resource
+// URLs whose safety must not depend on the operator's generic fetch toggle.
+func GetStrictSSRFProtectedHTTPClient() *http.Client {
+	return strictSSRFHTTPClient
 }
 
 // GetHttpClient returns the general outbound client used by relay/provider

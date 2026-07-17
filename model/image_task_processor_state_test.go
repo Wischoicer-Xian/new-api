@@ -104,6 +104,26 @@ func TestHasDueImageTaskExecutions(t *testing.T) {
 	assert.True(t, HasDueImageTaskExecutions())
 }
 
+func TestListFairDueImageTaskExecutionsDoesNotStarveOwners(t *testing.T) {
+	truncateImageTaskExecutions(t)
+	for i := 0; i < 60; i++ {
+		exec := insertClaimableExecution(t, ImageTaskStateQueued, int64(i+1), 0, "")
+		require.NoError(t, DB.Model(exec).Update("owner_user_id", 1).Error)
+	}
+	other := insertClaimableExecution(t, ImageTaskStateQueued, 1000, 0, "")
+	require.NoError(t, DB.Model(other).Update("owner_user_id", 2).Error)
+
+	execs, err := ListFairDueImageTaskExecutions(2000, 50, 3)
+	require.NoError(t, err)
+	require.Len(t, execs, 4)
+	ownerCounts := map[int]int{}
+	for _, exec := range execs {
+		ownerCounts[exec.OwnerUserID]++
+	}
+	assert.Equal(t, 3, ownerCounts[1])
+	assert.Equal(t, 1, ownerCounts[2], "a hot owner must not hide another due owner")
+}
+
 // TestHasNonTerminalImageTaskExecutions verifies the data source of the §14.1
 // second readiness gate: it reports true only when a non-terminal execution
 // exists. Every non-terminal state counts — including manual_review, which is

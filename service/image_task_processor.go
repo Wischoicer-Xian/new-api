@@ -52,7 +52,7 @@ func imageTaskProcessorLeaseOwner() string {
 func RunImageTaskProcessorOnce(ctx context.Context) ImageTaskProcessorSummary {
 	summary := ImageTaskProcessorSummary{}
 	listNow := imageTaskProcessorClock()
-	candidates, err := model.ListDueImageTaskExecutions(listNow, constant.ImageTaskProcessorDuePageSize)
+	candidates, err := model.ListFairDueImageTaskExecutions(listNow, constant.ImageTaskProcessorDuePageSize, constant.MaxImageTasksInFlightPerUser)
 	if err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("image task processor: list due candidates: %v", err))
 		return summary

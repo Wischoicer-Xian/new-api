@@ -95,6 +95,13 @@ const ImageTaskProcessorDuePageSize = 50
 // result store (§7.6).
 const ImageTaskResultMaxBytes = 25 * 1024 * 1024 // 25 MiB
 
+// ImageTaskResultMaxDimension and ImageTaskResultMaxPixels bound decoded image
+// geometry independently of compressed byte size to reject decompression bombs.
+const (
+	ImageTaskResultMaxDimension = 16_384
+	ImageTaskResultMaxPixels    = 64 * 1024 * 1024
+)
+
 // ImageTaskProviderResponseMaxBytes bounds provider submit/poll JSON bodies.
 // Provider error pages are untrusted too and must not be read without a limit.
 const ImageTaskProviderResponseMaxBytes = 1 * 1024 * 1024 // 1 MiB

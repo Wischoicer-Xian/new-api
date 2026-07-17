@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -65,6 +67,13 @@ func processorClockEnv(t *testing.T) func(newNow int64) {
 }
 
 type clockMutator struct{ now int64 }
+
+func TestTruncateReviewReasonPreservesUTF8(t *testing.T) {
+	reason := "原因" + strings.Repeat("错", 300)
+	got := truncateReviewReason(reason)
+	assert.True(t, utf8.ValidString(got))
+	assert.Len(t, []rune(got), 250)
+}
 
 // seedReservedProcessorExecution creates a real reserved image-task execution
 // (valid V1 snapshot, applied reserve ledger) backed by a test-adapter channel,
@@ -390,7 +399,7 @@ func TestProcessorFairnessCapsPerUser(t *testing.T) {
 
 	summary := RunImageTaskProcessorOnce(context.Background())
 	assert.Equal(t, 1, summary.Claimed, "per-user cap=1 must process only one execution per pass")
-	assert.Equal(t, 1, summary.FairnessSkipped)
+	assert.Equal(t, 0, summary.FairnessSkipped, "fair candidate selection excludes excess owner rows before claiming")
 	// One of the two advanced to polling; the other stayed queued.
 	_ = exec1
 	_ = outcome

@@ -213,6 +213,20 @@ func TestGetSSRFProtectedHTTPClientFallsBackToDefaultClientWhenProtectionDisable
 	require.Same(t, expected, GetSSRFProtectedHTTPClient())
 }
 
+func TestCurrentStrictFetchProtectionIgnoresUnsafeGlobalToggles(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	fetchSetting := system_setting.GetFetchSetting()
+	fetchSetting.EnableSSRFProtection = false
+	fetchSetting.AllowPrivateIp = true
+	fetchSetting.ApplyIPFilterForDomain = false
+
+	protection, enabled, err := currentStrictFetchProtection()
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.False(t, protection.AllowPrivateIp)
+	require.True(t, protection.ApplyIPFilterForDomain)
+}
+
 func TestProtectedFetchRoundTripperUsesConfiguredProxy(t *testing.T) {
 	configureSSRFTestFetchSetting(t)
 	proxyURL := mustParseURL(t, "http://127.0.0.1:3128")
