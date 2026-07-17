@@ -246,7 +246,7 @@ func trySelectImageTaskChannel(ch *model.Channel, op ImageOperation, modelName s
 	if !ok || caps == nil {
 		return imageTaskChannelSelection{}, false
 	}
-	_, ok = ImageAdapterVersion(apiType)
+	expectedAdapterVersion, ok := ImageAdapterVersion(apiType)
 	if !ok {
 		return imageTaskChannelSelection{}, false
 	}
@@ -257,7 +257,7 @@ func trySelectImageTaskChannel(ch *model.Channel, op ImageOperation, modelName s
 		}
 		return imageTaskChannelSelection{}, false
 	}
-	if rev.AdapterVersion == "" {
+	if rev.AdapterVersion == "" || rev.AdapterVersion != expectedAdapterVersion {
 		return imageTaskChannelSelection{}, false
 	}
 	frozenConfig, err := model.ImageExecutionConfigFromRevision(rev)

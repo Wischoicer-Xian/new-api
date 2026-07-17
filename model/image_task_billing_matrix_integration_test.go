@@ -238,6 +238,10 @@ func TestFundMatrix_RealDB(t *testing.T) {
 		require.NoError(t, DB.First(&u, owner).Error)
 		assert.Equal(t, 100, u.Quota, "wallet untouched")
 	})
+
+	// The same critical token/cap/snapshot/rollback cases also run on SQLite
+	// via TestFundMatrix_SQLite in image_task_billing_fund_shared_test.go.
+	runImageTaskCriticalFundCases(t)
 }
 
 // --- helpers for the fund matrix ---

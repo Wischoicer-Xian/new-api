@@ -179,6 +179,26 @@ func TestCreateImageTask_MissingRevisionSkipsCandidate(t *testing.T) {
 	assert.Equal(t, 503, reqErr.StatusCode)
 }
 
+func TestCreateImageTask_MismatchedAdapterRevisionSkipsCandidate(t *testing.T) {
+	setupCreateTest(t)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"dall-e-3":0.04}`))
+	cfg := `{"defaults":{"generation":"sync"}}`
+	seedImageChannelForCreate(t, 7151, "default", "dall-e-3", cfg)
+	require.NoError(t, model.DB.Where("channel_id = ?", 7151).Delete(&model.ChannelRevision{}).Error)
+	require.NoError(t, model.DB.Create(&model.ChannelRevision{
+		ChannelID: 7151, RevisionNumber: 2, Endpoint: "https://api.openai.com",
+		CredentialRef: "channel:7151", AdapterVersion: "legacy-image-adapter/v0",
+		Settings: mustImageRevisionSettings(t, cfg),
+	}).Error)
+	_, _, _, err := CreateImageTask(context.Background(), ImageTaskCreateInput{
+		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
+		OwnerUserID: 1, IdempotencyKey: "adapter-mismatch", UsingGroup: "default", UserBaseGroup: "default",
+	})
+	reqErr := dto.AsImageTaskRequestError(err)
+	require.NotNil(t, reqErr)
+	assert.Equal(t, 503, reqErr.StatusCode)
+}
+
 func TestCreateImageTask_UnsupportedConfigSkipsCandidate(t *testing.T) {
 	setupCreateTest(t)
 	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"dall-e-3":0.04}`))
