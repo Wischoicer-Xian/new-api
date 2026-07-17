@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // TestLedgerCASGates_RealDB runs the §5.4 four CAS gates on real MySQL8 /
@@ -262,15 +263,19 @@ func reserveRaw(owner int, key string, price *ImageTaskPriceResolution) (ImageTa
 func reserveRawWithPref(owner int, key string, price *ImageTaskPriceResolution, pref string) (ImageTaskReserveOutcome, error) {
 	channelID := owner + 100000
 	channel := Channel{Id: channelID, Type: constant.ChannelTypeOpenAI, Status: 1, Name: "integration-image"}
-	if err := DB.FirstOrCreate(&channel, channelID).Error; err != nil {
+	if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&channel).Error; err != nil {
 		return ImageTaskReserveOutcome{}, err
 	}
 	revisionSettings := []byte(`{"schema_version":1,"execution_config":"{\"defaults\":{\"generation\":\"sync\"}}"}`)
 	if !json.Valid(revisionSettings) {
 		return ImageTaskReserveOutcome{}, fmt.Errorf("invalid integration revision settings")
 	}
-	revision := ChannelRevision{ChannelID: channelID, RevisionNumber: 1, AdapterVersion: "integration/v1", Settings: revisionSettings}
-	if err := DB.FirstOrCreate(&revision, ChannelRevision{ChannelID: channelID, RevisionNumber: 1}).Error; err != nil {
+	revisionSeed := ChannelRevision{ChannelID: channelID, RevisionNumber: 1, AdapterVersion: "integration/v1", Settings: revisionSettings}
+	if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&revisionSeed).Error; err != nil {
+		return ImageTaskReserveOutcome{}, err
+	}
+	var revision ChannelRevision
+	if err := DB.Where("channel_id = ? AND revision_number = ?", channelID, 1).First(&revision).Error; err != nil {
 		return ImageTaskReserveOutcome{}, err
 	}
 	cmd := ImageTaskReserveCommand{
