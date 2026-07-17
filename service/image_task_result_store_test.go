@@ -104,6 +104,17 @@ func TestPersistImageTaskResultRejectsNonImage(t *testing.T) {
 	assert.Equal(t, ImageErrResultStore, perr.Kind)
 }
 
+func TestPersistImageTaskResultRejectsSpoofedImageContentType(t *testing.T) {
+	truncate(t)
+	exec := seedExecutionForResultStore(t)
+	useResultDownloader(t, ImageTaskResultDownload{Body: []byte("<html>not an image</html>"), ContentType: "image/png"}, nil)
+
+	_, err := PersistImageTaskResult(context.Background(), exec, "https://x")
+	perr := AsImageProviderError(err)
+	require.NotNil(t, perr)
+	assert.Equal(t, ImageErrResultStore, perr.Kind)
+}
+
 func TestPersistImageTaskResultRejectsEmpty(t *testing.T) {
 	truncate(t)
 	exec := seedExecutionForResultStore(t)

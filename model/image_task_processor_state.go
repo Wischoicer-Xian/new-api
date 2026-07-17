@@ -68,6 +68,82 @@ func AdvanceImageTaskExecutionCAS(adv ImageTaskAdvance, apply func(tx *gorm.DB) 
 	return won, err
 }
 
+// RecordImageTaskSubmitAcceptedCAS records the upstream handle after the
+// provider accepted a submit. A concurrent cancel request during the HTTP call
+// is represented by cancel_requested_at while the row remains submitting; this
+// transition therefore chooses cancel_requested instead of polling when that
+// flag is present. The lease fence prevents a stale submitter from attaching an
+// upstream task to a row claimed by another worker.
+func RecordImageTaskSubmitAcceptedCAS(adv ImageTaskAdvance, upstreamTaskID string, nextRunAt int64) (won bool, cancelled bool, err error) {
+	if adv.LeaseOwner == "" {
+		return false, false, errors.New("record image task submit: empty lease owner")
+	}
+	if upstreamTaskID == "" {
+		return false, false, errors.New("record image task submit: empty upstream task id")
+	}
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&ImageTaskExecution{}).
+			Where("id = ? AND state = ? AND lease_owner = ? AND lease_generation = ? AND lease_until >= ?",
+				adv.ID, ImageTaskStateSubmitting, adv.LeaseOwner, adv.ExpectedGeneration, adv.Now).
+			Updates(map[string]any{
+				"state": gorm.Expr("CASE WHEN cancel_requested_at > 0 THEN ? ELSE ? END",
+					ImageTaskStateCancelRequested, ImageTaskStatePolling),
+				"client_submission_id": upstreamTaskID,
+				"submission_state":     "accepted",
+				"next_run_at":          nextRunAt,
+				"updated_at":           adv.Now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		var current ImageTaskExecution
+		if err := tx.Select("state").First(&current, adv.ID).Error; err != nil {
+			return err
+		}
+		won = true
+		cancelled = current.State == ImageTaskStateCancelRequested
+		return nil
+	})
+	return won, cancelled, err
+}
+
+// RequeueImageTaskSubmitCAS records an explicit provider rejection such as 429.
+// Because the provider did not accept the task, a cancel request that arrived
+// during the HTTP call wins and moves directly to cancel_requested; otherwise
+// the execution returns to queued for a bounded retry.
+func RequeueImageTaskSubmitCAS(adv ImageTaskAdvance, submitErrorCount int, nextRunAt int64) (won bool, cancelled bool, err error) {
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&ImageTaskExecution{}).
+			Where("id = ? AND state = ? AND lease_owner = ? AND lease_generation = ? AND lease_until >= ?",
+				adv.ID, ImageTaskStateSubmitting, adv.LeaseOwner, adv.ExpectedGeneration, adv.Now).
+			Updates(map[string]any{
+				"state": gorm.Expr("CASE WHEN cancel_requested_at > 0 THEN ? ELSE ? END",
+					ImageTaskStateCancelRequested, ImageTaskStateQueued),
+				"submit_error_count": submitErrorCount,
+				"submission_state":   "rate_limited",
+				"next_run_at":        nextRunAt,
+				"updated_at":         adv.Now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		var current ImageTaskExecution
+		if err := tx.Select("state").First(&current, adv.ID).Error; err != nil {
+			return err
+		}
+		won = true
+		cancelled = current.State == ImageTaskStateCancelRequested
+		return nil
+	})
+	return won, cancelled, err
+}
+
 // ListDueImageTaskExecutions returns claimable executions whose next_run_at has
 // arrived and whose lease is free or expired, in due-order (next_run_at, id).
 // It is the candidate feed for the processor's bounded due-work pass; the caller

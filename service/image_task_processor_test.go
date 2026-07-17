@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -21,14 +22,18 @@ const procTestAdapterVersion = "test-image-adapter/v1"
 type processorMockAdapter struct {
 	submitID  string
 	submitErr error
+	submitFn  func(context.Context) (string, error)
 	poll      ImageAdapterPollOutcome
 	pollErr   error
 	submits   int
 	polls     int
 }
 
-func (m *processorMockAdapter) Submit(context.Context, *model.ChannelRevision, string, ImageProviderRequest) (string, error) {
+func (m *processorMockAdapter) Submit(ctx context.Context, _ *model.ChannelRevision, _ string, _ ImageProviderRequest) (string, error) {
 	m.submits++
+	if m.submitFn != nil {
+		return m.submitFn(ctx)
+	}
 	return m.submitID, m.submitErr
 }
 
@@ -142,6 +147,60 @@ func TestProcessorSubmitAcceptedMovesToPolling(t *testing.T) {
 	got := reloadExec(t, exec.ID)
 	assert.Equal(t, model.ImageTaskStatePolling, got.State)
 	assert.Equal(t, "task_proc_001", got.ClientSubmissionID)
+}
+
+func TestProcessorPersistsSubmitIntentAndPreservesConcurrentCancel(t *testing.T) {
+	exec := seedReservedProcessorExecution(t, 5003, 5004)
+	mock := &processorMockAdapter{}
+	mock.submitFn = func(context.Context) (string, error) {
+		current := reloadExec(t, exec.ID)
+		assert.Equal(t, model.ImageTaskStateSubmitting, current.State, "submit intent must be durable before the provider call")
+		won, _, err := model.RequestImageTaskCancelCAS(exec.PublicTaskID, exec.OwnerUserID, 2_000_000_101)
+		require.NoError(t, err)
+		require.True(t, won)
+		return "task_cancel_race", nil
+	}
+	useProcessorMock(t, mock)
+	setNow := processorClockEnv(t)
+	setNow(2_000_000_100)
+
+	RunImageTaskProcessorOnce(context.Background())
+	got := reloadExec(t, exec.ID)
+	assert.Equal(t, model.ImageTaskStateCancelRequested, got.State)
+	assert.Equal(t, "task_cancel_race", got.ClientSubmissionID, "accepted upstream id must survive a concurrent cancel")
+	assert.NotZero(t, got.CancelRequestedAt)
+}
+
+func TestProcessorProviderStepTimeoutRoutesSubmissionUnknown(t *testing.T) {
+	exec := seedReservedProcessorExecution(t, 5005, 5006)
+	previousTimeout := imageTaskProcessorStepTimeout
+	imageTaskProcessorStepTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { imageTaskProcessorStepTimeout = previousTimeout })
+	mock := &processorMockAdapter{submitFn: func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", networkSubmitError(ImageProviderStageSubmit, ctx.Err())
+	}}
+	useProcessorMock(t, mock)
+	setNow := processorClockEnv(t)
+	setNow(2_000_000_100)
+
+	RunImageTaskProcessorOnce(context.Background())
+	got := reloadExec(t, exec.ID)
+	assert.Equal(t, model.ImageTaskStateSubmissionUnknown, got.State)
+}
+
+func TestProcessorCorruptOperationFailsClosedBeforeSubmit(t *testing.T) {
+	exec := seedReservedProcessorExecution(t, 5007, 5008)
+	require.NoError(t, model.DB.Model(&model.ImageTaskExecution{}).Where("id = ?", exec.ID).Update("operation", "corrupt").Error)
+	mock := &processorMockAdapter{submitID: "must-not-submit"}
+	useProcessorMock(t, mock)
+	setNow := processorClockEnv(t)
+	setNow(2_000_000_100)
+
+	RunImageTaskProcessorOnce(context.Background())
+	got := reloadExec(t, exec.ID)
+	assert.Equal(t, model.ImageTaskStateManualReview, got.State)
+	assert.Zero(t, mock.submits)
 }
 
 func TestProcessorSubmit429RetriesThenAccepts(t *testing.T) {

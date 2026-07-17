@@ -35,6 +35,8 @@ func GetImageTaskResult(c *gin.Context) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "private, immutable")
 	c.Data(http.StatusOK, contentType, blob.Content)
 }
 

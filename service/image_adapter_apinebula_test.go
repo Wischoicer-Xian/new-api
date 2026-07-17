@@ -257,8 +257,8 @@ func TestResolveImageTaskAdapterRegistered(t *testing.T) {
 
 func TestNormalizeApinebulaStatusTable(t *testing.T) {
 	tests := []struct {
-		raw   string
-		want  apinebulaStatusKind
+		raw  string
+		want apinebulaStatusKind
 	}{
 		{"queued", apinebulaStatusRunning},
 		{"QUEUED", apinebulaStatusRunning},
@@ -270,8 +270,8 @@ func TestNormalizeApinebulaStatusTable(t *testing.T) {
 		{"failed", apinebulaStatusFailed},
 		{"cancelled", apinebulaStatusFailed},
 		{"canceled", apinebulaStatusFailed},
-		{"", apinebulaStatusRunning},  // unrecognized → keep polling (fail-safe)
-		{"weird-state", apinebulaStatusRunning},
+		{"", apinebulaStatusUnknown},
+		{"weird-state", apinebulaStatusUnknown},
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.want, normalizeApinebulaStatus(tt.raw), tt.raw)

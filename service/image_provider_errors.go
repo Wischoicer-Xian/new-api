@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/QuantumNous/new-api/constant"
 )
 
 // ImageProviderStage names the provider-execution step an error originated from.
@@ -197,9 +199,12 @@ func resultStoreError(err error) *ImageProviderError {
 // treated consistently with a transport failure for the originating stage.
 func readBodyClose(resp *http.Response, networkErr func(error) *ImageProviderError) ([]byte, *ImageProviderError) {
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, constant.ImageTaskProviderResponseMaxBytes+1))
 	if err != nil {
 		return nil, networkErr(err)
+	}
+	if int64(len(body)) > constant.ImageTaskProviderResponseMaxBytes {
+		return nil, networkErr(fmt.Errorf("provider response exceeds %d bytes", constant.ImageTaskProviderResponseMaxBytes))
 	}
 	return body, nil
 }

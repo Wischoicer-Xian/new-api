@@ -29,6 +29,10 @@ type ImageTaskProcessorSummary struct {
 // tests override it for deterministic backoff/SLA assertions.
 var imageTaskProcessorClock = common.GetTimestamp
 
+// imageTaskProcessorStepTimeout is a test seam for the per-network-step
+// deadline. Production keeps it below the execution lease.
+var imageTaskProcessorStepTimeout = constant.ImageTaskProcessorStepTimeout
+
 // imageTaskProcessorLeaseOwner returns the stable worker identity that holds
 // execution leases during one pass. It is node-scoped so two masters do not
 // share a lease owner; the per-row lease_generation is the fencing token.
@@ -47,8 +51,8 @@ func imageTaskProcessorLeaseOwner() string {
 // here, so unit tests can drive the pass directly.
 func RunImageTaskProcessorOnce(ctx context.Context) ImageTaskProcessorSummary {
 	summary := ImageTaskProcessorSummary{}
-	now := imageTaskProcessorClock()
-	candidates, err := model.ListDueImageTaskExecutions(now, constant.ImageTaskProcessorDuePageSize)
+	listNow := imageTaskProcessorClock()
+	candidates, err := model.ListDueImageTaskExecutions(listNow, constant.ImageTaskProcessorDuePageSize)
 	if err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("image task processor: list due candidates: %v", err))
 		return summary
@@ -59,7 +63,6 @@ func RunImageTaskProcessorOnce(ctx context.Context) ImageTaskProcessorSummary {
 	}
 
 	owner := imageTaskProcessorLeaseOwner()
-	leaseUntil := now + int64(constant.ImageTaskProcessorClaimLease.Seconds())
 	perUserLeased := make(map[int]int)
 
 	for i := range candidates {
@@ -68,6 +71,8 @@ func RunImageTaskProcessorOnce(ctx context.Context) ImageTaskProcessorSummary {
 			summary.FairnessSkipped++
 			continue
 		}
+		now := imageTaskProcessorClock()
+		leaseUntil := now + int64(constant.ImageTaskProcessorClaimLease.Seconds())
 		won, exec, claimErr := model.TryClaimImageTaskExecution(model.ImageTaskLeaseClaim{
 			ExecutionID: candidate.ID, Owner: owner, Now: now, LeaseUntil: leaseUntil,
 		})
@@ -188,11 +193,19 @@ func markManualReview(summary *ImageTaskProcessorSummary, adv model.ImageTaskAdv
 }
 
 // operationFromExecution maps the stored operation string onto the service-layer
-// ImageOperation. It falls back to generation so a corrupt row still submits a
-// well-formed (if likely provider-rejected) request rather than crashing.
-func operationFromExecution(op string) ImageOperation {
-	if op == string(ImageOperationEdit) {
-		return ImageOperationEdit
+// ImageOperation. Unknown persisted values fail closed before any provider
+// request so a corrupt edit row can never be submitted as a generation.
+func operationFromExecution(op string) (ImageOperation, error) {
+	switch op {
+	case string(ImageOperationGeneration):
+		return ImageOperationGeneration, nil
+	case string(ImageOperationEdit):
+		return ImageOperationEdit, nil
+	default:
+		return "", fmt.Errorf("unsupported stored image operation %q", op)
 	}
-	return ImageOperationGeneration
+}
+
+func (env *imageTaskProcessorEnv) stepContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(env.ctx, imageTaskProcessorStepTimeout)
 }

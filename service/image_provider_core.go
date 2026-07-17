@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -124,8 +125,8 @@ func ResolveChannelCredential(ref string) (string, error) {
 	if idStr == "" {
 		return "", fmt.Errorf("credential ref %q has no channel id", ref)
 	}
-	var id int
-	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
 		return "", fmt.Errorf("credential ref %q has an invalid channel id", ref)
 	}
 	channel, err := model.GetChannelById(id, true)

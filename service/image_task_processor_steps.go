@@ -55,12 +55,22 @@ func (env *imageTaskProcessorEnv) processSubmit(summary *ImageTaskProcessorSumma
 		markManualReview(summary, env.adv, fmt.Sprintf("load backing task: %v", err))
 		return
 	}
-	req, err := BuildImageProviderRequest(operationFromExecution(env.exec.Operation), task.Data)
+	operation, err := operationFromExecution(env.exec.Operation)
+	if err != nil {
+		markManualReview(summary, env.adv, err.Error())
+		return
+	}
+	req, err := BuildImageProviderRequest(operation, task.Data)
 	if err != nil {
 		markManualReview(summary, env.adv, fmt.Sprintf("build provider request: %v", err))
 		return
 	}
-	upstreamID, err := env.adapter.Submit(env.ctx, env.rev, env.credential, req)
+	if !env.beginSubmit(summary) {
+		return
+	}
+	stepCtx, cancel := env.stepContext()
+	defer cancel()
+	upstreamID, err := env.adapter.Submit(stepCtx, env.rev, env.credential, req)
 	if err == nil {
 		env.acceptSubmit(summary, upstreamID)
 		return
@@ -86,19 +96,38 @@ func (env *imageTaskProcessorEnv) processSubmit(summary *ImageTaskProcessorSumma
 	}
 }
 
+// beginSubmit persists the submission intent immediately before the external
+// call. If the process exits after this CAS, recovery treats submitting as an
+// unknown outcome and never blindly re-submits.
+func (env *imageTaskProcessorEnv) beginSubmit(summary *ImageTaskProcessorSummary) bool {
+	adv := env.adv
+	adv.To = model.ImageTaskStateSubmitting
+	won, err := model.AdvanceImageTaskExecutionCAS(adv, func(tx *gorm.DB) error {
+		return tx.Model(&model.ImageTaskExecution{}).Where("id = ?", env.exec.ID).
+			Updates(map[string]any{
+				"submission_state": "intent_persisted",
+				"next_run_at":      env.now,
+			}).Error
+	})
+	if err != nil {
+		logger.LogWarn(env.ctx, fmt.Sprintf("image task processor: persist submit intent execution %d: %v", env.exec.ID, err))
+		return false
+	}
+	if !won {
+		summary.ClaimLost++
+		return false
+	}
+	env.exec.State = model.ImageTaskStateSubmitting
+	env.adv.From = model.ImageTaskStateSubmitting
+	env.adv.To = model.ImageTaskStateSubmitting
+	return true
+}
+
 // acceptSubmit records the accepted upstream task id and moves to polling. The
 // first poll is scheduled one initial-backoff out so the upstream has time to
 // begin processing before the first (likely running) poll.
 func (env *imageTaskProcessorEnv) acceptSubmit(summary *ImageTaskProcessorSummary, upstreamID string) {
-	adv := env.adv
-	adv.To = model.ImageTaskStatePolling
-	won, err := model.AdvanceImageTaskExecutionCAS(adv, func(tx *gorm.DB) error {
-		return tx.Model(&model.ImageTaskExecution{}).Where("id = ?", env.exec.ID).Updates(map[string]any{
-			"client_submission_id": upstreamID,
-			"submission_state":     "accepted",
-			"next_run_at":          env.now + imageTaskBackoffSeconds(1),
-		}).Error
-	})
+	won, _, err := model.RecordImageTaskSubmitAcceptedCAS(env.adv, upstreamID, env.now+imageTaskBackoffSeconds(1))
 	if err != nil {
 		logger.LogWarn(env.ctx, fmt.Sprintf("image task processor: accept submit advance execution %d: %v", env.exec.ID, err))
 		return
@@ -117,13 +146,7 @@ func (env *imageTaskProcessorEnv) retrySubmitRateLimited(summary *ImageTaskProce
 		markManualReview(summary, env.adv, "submit 429 retry budget exhausted")
 		return
 	}
-	won, err := model.AdvanceImageTaskExecutionCAS(env.adv, func(tx *gorm.DB) error {
-		return tx.Model(&model.ImageTaskExecution{}).Where("id = ?", env.exec.ID).Updates(map[string]any{
-			"submit_error_count": count,
-			"submission_state":   "rate_limited",
-			"next_run_at":        env.now + imageTaskBackoffSeconds(count),
-		}).Error
-	})
+	won, _, err := model.RequeueImageTaskSubmitCAS(env.adv, count, env.now+imageTaskBackoffSeconds(count))
 	if err != nil {
 		logger.LogWarn(env.ctx, fmt.Sprintf("image task processor: 429 backoff execution %d: %v", env.exec.ID, err))
 		return
@@ -204,7 +227,9 @@ func (env *imageTaskProcessorEnv) processPoll(summary *ImageTaskProcessorSummary
 		env.resumeResultStore(summary, env.exec.Result.ContentURL)
 		return
 	}
-	outcome, err := env.adapter.Poll(env.ctx, env.rev, env.credential, env.exec.ClientSubmissionID)
+	stepCtx, cancel := env.stepContext()
+	defer cancel()
+	outcome, err := env.adapter.Poll(stepCtx, env.rev, env.credential, env.exec.ClientSubmissionID)
 	if err != nil {
 		env.handlePollError(summary, err)
 		return
@@ -220,7 +245,9 @@ func (env *imageTaskProcessorEnv) processPoll(summary *ImageTaskProcessorSummary
 }
 
 func (env *imageTaskProcessorEnv) persistAndFinalize(summary *ImageTaskProcessorSummary, downloadURL string) {
-	locator, err := PersistImageTaskResult(env.ctx, env.exec, downloadURL)
+	stepCtx, cancel := env.stepContext()
+	defer cancel()
+	locator, err := PersistImageTaskResult(stepCtx, env.exec, downloadURL)
 	if err != nil {
 		env.recordPendingResultAndBackoff(summary, downloadURL, err)
 		return
@@ -229,7 +256,9 @@ func (env *imageTaskProcessorEnv) persistAndFinalize(summary *ImageTaskProcessor
 }
 
 func (env *imageTaskProcessorEnv) resumeResultStore(summary *ImageTaskProcessorSummary, downloadURL string) {
-	locator, err := PersistImageTaskResult(env.ctx, env.exec, downloadURL)
+	stepCtx, cancel := env.stepContext()
+	defer cancel()
+	locator, err := PersistImageTaskResult(stepCtx, env.exec, downloadURL)
 	if err != nil {
 		env.recordPendingResultAndBackoff(summary, downloadURL, err)
 		return
@@ -322,11 +351,17 @@ func (env *imageTaskProcessorEnv) processCancelDrain(summary *ImageTaskProcessor
 		env.finalizeCompleted(summary, env.exec.Result)
 		return
 	}
+	if env.exec.ClientSubmissionID == "" {
+		env.finalizeCancelled(summary, "cancelled before provider acceptance")
+		return
+	}
 	if env.exec.CancelRequestedAt != 0 && env.now-env.exec.CancelRequestedAt >= cancelDrainSLASeconds() {
 		env.finalizeCancelled(summary, "cancel drain SLA exceeded, upstream not terminal")
 		return
 	}
-	outcome, err := env.adapter.Poll(env.ctx, env.rev, env.credential, env.exec.ClientSubmissionID)
+	stepCtx, cancel := env.stepContext()
+	defer cancel()
+	outcome, err := env.adapter.Poll(stepCtx, env.rev, env.credential, env.exec.ClientSubmissionID)
 	if err != nil {
 		// Transient poll errors during drain keep draining under the SLA; a
 		// manual_review-class poll error (4xx) also keeps draining rather than

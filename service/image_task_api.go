@@ -85,7 +85,7 @@ func projectImageTaskObject(exec *model.ImageTaskExecution) *dto.ImageTaskObject
 	obj := &dto.ImageTaskObject{
 		ID:        exec.PublicTaskID,
 		Object:    imageTaskObjectKind,
-		Status:    projectImageTaskPublicStatus(exec.State),
+		Status:    projectImageTaskPublicStatusForExecution(exec),
 		CreatedAt: exec.CreatedAt,
 		UpdatedAt: exec.UpdatedAt,
 	}
@@ -105,6 +105,13 @@ func projectImageTaskObject(exec *model.ImageTaskExecution) *dto.ImageTaskObject
 		}
 	}
 	return obj
+}
+
+func projectImageTaskPublicStatusForExecution(exec *model.ImageTaskExecution) dto.ImageTaskPublicStatus {
+	if exec != nil && exec.CancelRequestedAt != 0 && !model.IsTerminalImageTaskState(exec.State) {
+		return dto.ImageTaskStatusCancelRequested
+	}
+	return projectImageTaskPublicStatus(exec.State)
 }
 
 // projectImageTaskPublicStatus maps the nine-state execution lifecycle onto

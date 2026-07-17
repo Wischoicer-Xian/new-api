@@ -45,6 +45,15 @@ func TestProjectImageTaskPublicStatus_UnknownStateFoldsToFailed(t *testing.T) {
 	assert.Equal(t, dto.ImageTaskStatusFailed, projectImageTaskPublicStatus("bogus_state"))
 }
 
+func TestProjectImageTaskObject_SubmittingCancelIntentIsPubliclyAcknowledged(t *testing.T) {
+	exec := &model.ImageTaskExecution{
+		PublicTaskID:      "imgtask_cancel_during_submit",
+		State:             model.ImageTaskStateSubmitting,
+		CancelRequestedAt: 1700000000,
+	}
+	assert.Equal(t, dto.ImageTaskStatusCancelRequested, projectImageTaskObject(exec).Status)
+}
+
 func TestProjectImageTaskObject_PopulatesResultOnlyOnCompleted(t *testing.T) {
 	result := model.ImageTaskResult{ContentURL: "https://x/y.png", MimeType: "image/png", SizeBytes: 10}
 

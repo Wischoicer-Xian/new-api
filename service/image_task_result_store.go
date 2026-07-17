@@ -42,7 +42,7 @@ func defaultImageTaskResultDownloader(ctx context.Context, url string) (ImageTas
 	}
 	client := GetSSRFProtectedHTTPClient()
 	if client == nil {
-		client = http.DefaultClient
+		return ImageTaskResultDownload{}, errors.New("SSRF-protected result download client is not initialized")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -124,17 +124,16 @@ func validateImageTaskResultDownload(download ImageTaskResultDownload) (string, 
 	if int64(len(download.Body)) > constant.ImageTaskResultMaxBytes {
 		return "", fmt.Errorf("image result body exceeds %d bytes", constant.ImageTaskResultMaxBytes)
 	}
-	mime := strings.TrimSpace(strings.ToLower(strings.Split(download.ContentType, ";")[0]))
-	if !strings.HasPrefix(mime, "image/") {
-		sniffed := http.DetectContentType(download.Body)
-		sniffed = strings.TrimSpace(strings.ToLower(strings.Split(sniffed, ";")[0]))
-		if strings.HasPrefix(sniffed, "image/") {
-			mime = sniffed
-		} else {
-			return "", fmt.Errorf("image result content type %q is not an image", download.ContentType)
-		}
+	declared := strings.TrimSpace(strings.ToLower(strings.Split(download.ContentType, ";")[0]))
+	sniffed := http.DetectContentType(download.Body)
+	sniffed = strings.TrimSpace(strings.ToLower(strings.Split(sniffed, ";")[0]))
+	if !strings.HasPrefix(sniffed, "image/") {
+		return "", fmt.Errorf("image result bytes are %q, not an image (declared %q)", sniffed, download.ContentType)
 	}
-	return mime, nil
+	if strings.HasPrefix(declared, "image/") && declared != sniffed {
+		return "", fmt.Errorf("image result content type mismatch: declared %q, detected %q", declared, sniffed)
+	}
+	return sniffed, nil
 }
 
 // locatorFromBlob maps the durable blob row onto the execution's result locator.

@@ -78,6 +78,12 @@ var MaxImageTasksInFlightPerUser int
 // worker's execution is reclaimed promptly.
 const ImageTaskProcessorClaimLease = 90 * time.Second
 
+// ImageTaskProcessorStepTimeout bounds one provider HTTP or result download
+// step below the execution lease. This leaves time for the fenced DB write
+// after a timed-out network call and prevents a worker from hanging past its
+// lease when RELAY_TIMEOUT is disabled.
+const ImageTaskProcessorStepTimeout = 60 * time.Second
+
 // ImageTaskProcessorDuePageSize bounds one due-work pass's candidate fetch. The
 // pass claims at most this many candidates per tick, then processes each; the
 // 15 s scheduler is the fallback that re-runs the pass.
@@ -88,3 +94,7 @@ const ImageTaskProcessorDuePageSize = 50
 // processor downloads, validates, and persists up to this size into the durable
 // result store (§7.6).
 const ImageTaskResultMaxBytes = 25 * 1024 * 1024 // 25 MiB
+
+// ImageTaskProviderResponseMaxBytes bounds provider submit/poll JSON bodies.
+// Provider error pages are untrusted too and must not be read without a limit.
+const ImageTaskProviderResponseMaxBytes = 1 * 1024 * 1024 // 1 MiB

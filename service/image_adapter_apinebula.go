@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -127,8 +128,8 @@ func (a *apinebulaAdapter) Poll(ctx context.Context, rev *model.ChannelRevision,
 			UpstreamMessage: "poll attempted with empty upstream task id",
 		}
 	}
-	url := joinApinebulaURL(rev.Endpoint, fmt.Sprintf("/v1/image-tasks/%s?detail=true", upstreamTaskID))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	pollURL := joinApinebulaURL(rev.Endpoint, fmt.Sprintf("/v1/image-tasks/%s?detail=true", url.PathEscape(upstreamTaskID)))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
 	if err != nil {
 		return ImageAdapterPollOutcome{}, networkPollError(err)
 	}
@@ -153,6 +154,12 @@ func (a *apinebulaAdapter) Poll(ctx context.Context, rev *model.ChannelRevision,
 	}
 	if classified := classifyPollHTTP(resp.StatusCode, apinebulaErrorMessage(parsed.Error)); classified != nil {
 		return ImageAdapterPollOutcome{}, classified
+	}
+	if normalizeApinebulaStatus(parsed.Status) == apinebulaStatusUnknown {
+		return ImageAdapterPollOutcome{}, &ImageProviderError{
+			Kind: ImageErrManualReview, Stage: ImageProviderStagePoll,
+			Status: resp.StatusCode, UpstreamMessage: fmt.Sprintf("unknown provider task status %q", parsed.Status),
+		}
 	}
 	return foldApinebulaStatus(parsed), nil
 }
@@ -213,8 +220,8 @@ const (
 
 // normalizeApinebulaStatus lower-cases and trims the raw status, then folds the
 // documented vocabulary and its attested synonyms onto one of four kinds. An
-// unrecognized value is running (fail-safe: keep polling rather than wrongly
-// finalizing a still-pending task).
+// unrecognized value stays unknown so Poll can fail closed into manual_review
+// rather than polling an unsupported protocol state forever.
 func normalizeApinebulaStatus(status string) apinebulaStatusKind {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "queued", "waiting", "running", "in_progress":
@@ -224,7 +231,7 @@ func normalizeApinebulaStatus(status string) apinebulaStatusKind {
 	case "failed", "cancelled", "canceled":
 		return apinebulaStatusFailed
 	default:
-		return apinebulaStatusRunning
+		return apinebulaStatusUnknown
 	}
 }
 
