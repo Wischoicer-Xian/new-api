@@ -136,15 +136,12 @@ func setupWischoicerIntegrationDB(t *testing.T) {
 		&ImageTaskExecution{},
 		&TaskBillingLedger{},
 		&ChannelRevision{},
-		// Task is the legacy provider/billing projection that image tasks extend
-		// (§7.3). Migrated so the poller-isolation integration test can seed real
-		// Task rows and prove the legacy fetch + image-platform exclusion hold on
-		// each database.
 		&Task{},
-		// Token, UserSubscription, SubscriptionPlan back the tx-aware image-task
-		// reserve aggregate (P1-1): token deduction + funding-source choice. The
-		// default subscription_first path queries user_subscriptions, so the
-		// integration DB must migrate these for the concurrency matrix.
+		// Token, UserSubscription, SubscriptionPlan back the §5.5/§5.6
+		// image-task billing aggregate funding matrix: token deduction + funding
+		// source choice requires these tables on every database. The default
+		// subscription_first path queries user_subscriptions, so the integration
+		// DB must migrate these for the concurrency matrix.
 		&Token{},
 		&UserSubscription{},
 		&SubscriptionPlan{},

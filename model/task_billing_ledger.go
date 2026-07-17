@@ -124,6 +124,59 @@ func RecordBillingStage(tx *gorm.DB, intent TaskBillingStageIntent) (created boo
 // quota/subscription/token mutation, and flips the ledger to applied in the
 // same transaction. The callback must perform all writes through tx. Replays
 // of an already-applied stage return won=false without invoking the callback.
+// ApplyBillingStageTx runs the pending→applying→applied CAS inside a
+// caller-supplied transaction. It does NOT call Transaction/Begin/Commit/
+// Rollback or access the global DB; the caller owns the transaction boundary
+// (§5.4 of the frozen billing-aggregate RFC). The CAS, already-applied replay
+// semantics, and callback invocation rules are the single implementation;
+// ApplyBillingStage delegates to this via db.Transaction.
+func ApplyBillingStageTx(tx *gorm.DB, id int64, apply func(tx *gorm.DB, ledger *TaskBillingLedger) error) (won bool, err error) {
+	if tx == nil {
+		return false, fmt.Errorf("apply billing stage tx: nil transaction")
+	}
+	if apply == nil {
+		return false, fmt.Errorf("apply billing stage tx: nil callback")
+	}
+	claim := tx.Model(&TaskBillingLedger{}).
+		Where("id = ? AND state = ?", id, BillingStatePending).
+		Update("state", BillingStateApplying)
+	if claim.Error != nil {
+		return false, claim.Error
+	}
+	if claim.RowsAffected != 1 {
+		var state string
+		if err := tx.Model(&TaskBillingLedger{}).Select("state").Where("id = ?", id).Scan(&state).Error; err != nil {
+			return false, err
+		}
+		if state == BillingStateApplied {
+			return false, nil // already-applied replay: callback not invoked
+		}
+		if state == "" {
+			return false, gorm.ErrRecordNotFound
+		}
+		return false, fmt.Errorf("apply billing stage tx: ledger %d is in state %q", id, state)
+	}
+	ledger := &TaskBillingLedger{}
+	if err := tx.First(ledger, id).Error; err != nil {
+		return false, err
+	}
+	if err := apply(tx, ledger); err != nil {
+		return false, err
+	}
+	result := tx.Model(&TaskBillingLedger{}).
+		Where("id = ? AND state = ?", id, BillingStateApplying).
+		Update("state", BillingStateApplied)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return false, fmt.Errorf("apply billing stage tx: ledger %d lost applying state", id)
+	}
+	return true, nil
+}
+
+// ApplyBillingStage is the compatibility wrapper: it opens one transaction and
+// delegates the CAS to ApplyBillingStageTx. No second CAS copy exists.
 func ApplyBillingStage(db *gorm.DB, id int64, apply func(tx *gorm.DB, ledger *TaskBillingLedger) error) (won bool, err error) {
 	if db == nil {
 		return false, fmt.Errorf("apply billing stage: nil database")
