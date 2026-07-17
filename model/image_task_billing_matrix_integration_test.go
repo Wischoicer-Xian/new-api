@@ -3,6 +3,8 @@
 package model
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -263,7 +265,11 @@ func reserveRawWithPref(owner int, key string, price *ImageTaskPriceResolution, 
 	if err := DB.FirstOrCreate(&channel, channelID).Error; err != nil {
 		return ImageTaskReserveOutcome{}, err
 	}
-	revision := ChannelRevision{ChannelID: channelID, RevisionNumber: 1, AdapterVersion: "integration/v1", Settings: []byte(`{"schema_version":1,"execution_config":"{\\"defaults\\":{\\"generation\\":\\"sync\\"}}"}`)}
+	revisionSettings := []byte(`{"schema_version":1,"execution_config":"{\"defaults\":{\"generation\":\"sync\"}}"}`)
+	if !json.Valid(revisionSettings) {
+		return ImageTaskReserveOutcome{}, fmt.Errorf("invalid integration revision settings")
+	}
+	revision := ChannelRevision{ChannelID: channelID, RevisionNumber: 1, AdapterVersion: "integration/v1", Settings: revisionSettings}
 	if err := DB.FirstOrCreate(&revision, ChannelRevision{ChannelID: channelID, RevisionNumber: 1}).Error; err != nil {
 		return ImageTaskReserveOutcome{}, err
 	}

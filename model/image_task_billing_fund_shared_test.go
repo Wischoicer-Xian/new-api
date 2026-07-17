@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -132,9 +133,11 @@ func seedCriticalFundOwner(t *testing.T, owner, tokenID, status int, expiredAt i
 	}).Error)
 	channelID := owner + 20000
 	require.NoError(t, DB.Create(&Channel{Id: channelID, Name: "fund-image", Status: common.ChannelStatusEnabled}).Error)
+	revisionSettings := []byte(`{"schema_version":1,"execution_config":"{\"defaults\":{\"generation\":\"sync\"}}"}`)
+	require.True(t, json.Valid(revisionSettings))
 	require.NoError(t, DB.Create(&ChannelRevision{
 		ChannelID: channelID, RevisionNumber: 1, AdapterVersion: "integration/v1",
-		Settings: []byte(`{"schema_version":1,"execution_config":"{\\"defaults\\":{\\"generation\\":\\"sync\\"}}"}`),
+		Settings: revisionSettings,
 	}).Error)
 }
 
