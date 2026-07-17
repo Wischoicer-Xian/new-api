@@ -126,6 +126,20 @@ func TestChannel_BuildImageChannelRevision(t *testing.T) {
 	})
 }
 
+func TestImageExecutionConfigFromRevision_UsesFrozenSnapshot(t *testing.T) {
+	liveConfig := `{"defaults":{"generation":"async_task"}}`
+	frozenConfig := `{"defaults":{"generation":"sync"}}`
+	channel := Channel{ImageExecutionConfig: &liveConfig}
+	revisionInput, err := (&Channel{ImageExecutionConfig: &frozenConfig}).BuildImageChannelRevision("openai-image-adapter/v1")
+	require.NoError(t, err)
+	revision := &ChannelRevision{Settings: revisionInput.Settings}
+
+	got, err := ImageExecutionConfigFromRevision(revision)
+	require.NoError(t, err)
+	assert.JSONEq(t, frozenConfig, string(got))
+	assert.NotEqual(t, string(channel.ImageExecutionConfigBytes()), string(got))
+}
+
 func TestImageRevision_FreezesOverrideSecretAtRestParity(t *testing.T) {
 	// At-rest parity (P1-1 scheme A): a secret placed in the live channel's
 	// HeaderOverride is frozen verbatim into the revision snapshot, exactly as

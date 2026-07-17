@@ -205,3 +205,18 @@ func DeleteChannelRevision(revisionID int64) error {
 		return tx.Delete(&revision).Error
 	})
 }
+
+// GetLatestChannelRevisionByChannelID returns the most recent immutable
+// revision for a channel — the frozen config a new image task runs against
+// (§7.2). Revision numbers are per-channel and monotonically increasing, so
+// the highest number is the latest. A channel without any revision is reported
+// as gorm.ErrRecordNotFound; the create path treats that as "this channel has
+// no frozen image config and must not host tasks".
+func GetLatestChannelRevisionByChannelID(channelID int) (*ChannelRevision, error) {
+	var rev ChannelRevision
+	err := DB.Where("channel_id = ?", channelID).Order("revision_number DESC").First(&rev).Error
+	if err != nil {
+		return nil, err
+	}
+	return &rev, nil
+}

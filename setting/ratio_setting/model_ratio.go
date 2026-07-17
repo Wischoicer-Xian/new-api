@@ -358,27 +358,31 @@ func UpdateModelPriceByJSONString(jsonStr string) error {
 
 // GetModelPrice 返回模型的价格，如果模型不存在则返回-1，false
 func GetModelPrice(name string, printErr bool) (float64, bool) {
+	price, _, ok := GetModelPriceWithMatchedName(name)
+	if !ok && printErr {
+		common.SysError("model price not found: " + name)
+	}
+	return price, ok
+}
+
+// GetModelPriceWithMatchedName returns the live configured price and the key
+// that actually matched. It deliberately does not fall back to built-in
+// defaults, matching GetModelPrice and the synchronous pricing helper.
+func GetModelPriceWithMatchedName(name string) (float64, string, bool) {
 	name = FormatMatchingModelName(name)
 
 	if price, ok := modelPriceMap.Get(name); ok {
-		return price, true
+		return price, name, true
 	}
 
 	if strings.HasSuffix(name, CompactModelSuffix) {
 		price, ok := modelPriceMap.Get(CompactWildcardModelKey)
 		if !ok {
-			if printErr {
-				common.SysError("model price not found: " + name)
-			}
-			return -1, false
+			return -1, "", false
 		}
-		return price, true
+		return price, CompactWildcardModelKey, true
 	}
-
-	if printErr {
-		common.SysError("model price not found: " + name)
-	}
-	return -1, false
+	return -1, "", false
 }
 
 func UpdateModelRatioByJSONString(jsonStr string) error {

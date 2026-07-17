@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func truncateChannelRevisions(t *testing.T) {
@@ -209,4 +210,40 @@ func TestDeleteChannelRevision_ConcurrentExecutionCreateCannotOrphanReference(t 
 	var count int64
 	require.NoError(t, DB.Model(&ImageTaskExecution{}).Where("channel_revision_id = ?", revision.ID).Count(&count).Error)
 	assert.Zero(t, count)
+}
+
+func TestGetLatestChannelRevisionByChannelID_ReturnsHighestNumber(t *testing.T) {
+	truncateChannelRevisions(t)
+	const ch = 9101
+	insertRevisionChannel(t, ch)
+	// Insert out of order so ORDER BY revision_number DESC is actually exercised.
+	require.NoError(t, DB.Create(&ChannelRevision{ChannelID: ch, RevisionNumber: 1}).Error)
+	require.NoError(t, DB.Create(&ChannelRevision{ChannelID: ch, RevisionNumber: 3}).Error)
+	require.NoError(t, DB.Create(&ChannelRevision{ChannelID: ch, RevisionNumber: 2}).Error)
+
+	got, err := GetLatestChannelRevisionByChannelID(ch)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.RevisionNumber)
+	assert.Equal(t, ch, got.ChannelID)
+}
+
+func TestGetLatestChannelRevisionByChannelID_IsolatesPerChannel(t *testing.T) {
+	truncateChannelRevisions(t)
+	const chA = 9102
+	const chB = 9103
+	insertRevisionChannel(t, chA)
+	insertRevisionChannel(t, chB)
+	require.NoError(t, DB.Create(&ChannelRevision{ChannelID: chA, RevisionNumber: 5}).Error)
+	require.NoError(t, DB.Create(&ChannelRevision{ChannelID: chB, RevisionNumber: 1}).Error)
+	require.NoError(t, DB.Create(&ChannelRevision{ChannelID: chB, RevisionNumber: 2}).Error)
+
+	got, err := GetLatestChannelRevisionByChannelID(chB)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.RevisionNumber)
+}
+
+func TestGetLatestChannelRevisionByChannelID_NoRevisionIsNotFound(t *testing.T) {
+	truncateChannelRevisions(t)
+	_, err := GetLatestChannelRevisionByChannelID(9199)
+	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
 }

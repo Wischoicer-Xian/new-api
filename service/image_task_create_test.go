@@ -18,7 +18,7 @@ func TestImageTaskCreateAllowed(t *testing.T) {
 	assert.False(t, ImageTaskCreateAllowed(), "create is fail-closed by default (§14.1 placeholder off)")
 
 	constant.ImageTaskCreateEnabled = true
-	assert.True(t, ImageTaskCreateAllowed(), "create allowed when the switch is on")
+	assert.False(t, ImageTaskCreateAllowed(), "a global switch cannot bypass the missing processor and allowlist")
 }
 
 // TestImageTaskInFlightStatusOf proves the READ-ONLY status primitive returns

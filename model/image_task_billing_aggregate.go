@@ -39,6 +39,7 @@ type ImageTaskReserveCommand struct {
 	CreationTokenID   int
 	Price             *ImageTaskPriceResolution
 	Attribution       json.RawMessage
+	RequestData       json.RawMessage
 	RequestID         string
 	UpstreamRequestID string
 	Now               int64
@@ -100,7 +101,7 @@ func ReserveImageTask(ctx context.Context, cmd ImageTaskReserveCommand) (ImageTa
 			// Step 2: Lock owner user (first DB statement; MySQL/PG FOR UPDATE,
 			// SQLite serial writer). This is the snapshot-establishing fence.
 			var fence User
-			if err := lockForUpdate(tx).Select("id").First(&fence, cmd.OwnerUserID).Error; err != nil {
+			if err := lockForUpdate(tx).Select("id", "setting").First(&fence, cmd.OwnerUserID).Error; err != nil {
 				return fmt.Errorf("reserve image task: lock owner fence: %w", err)
 			}
 
@@ -113,6 +114,22 @@ func ReserveImageTask(ctx context.Context, cmd ImageTaskReserveCommand) (ImageTa
 			}
 			if !errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("%w: idempotency lookup: %v", ErrImageTaskBillingData, lookup.Error)
+			}
+
+			// Freeze the revision reference under the same fence used by deletion.
+			var revisionCandidate ChannelRevision
+			if err := tx.Select("id", "channel_id").First(&revisionCandidate, cmd.ChannelRevisionID).Error; err != nil {
+				return fmt.Errorf("%w: find channel revision: %v", ErrImageTaskBillingData, err)
+			}
+			if err := lockImageChannelRevisionFence(tx, revisionCandidate.ChannelID); err != nil {
+				return fmt.Errorf("%w: lock channel revision fence: %v", ErrImageTaskBillingData, err)
+			}
+			var revision ChannelRevision
+			if err := lockForUpdate(tx).Where("channel_id = ?", revisionCandidate.ChannelID).First(&revision, cmd.ChannelRevisionID).Error; err != nil {
+				return fmt.Errorf("%w: lock channel revision: %v", ErrImageTaskBillingData, err)
+			}
+			if revision.AdapterVersion != cmd.AdapterVersion {
+				return fmt.Errorf("%w: channel revision adapter version changed", ErrImageTaskBillingData)
 			}
 
 			// Step 4: In-flight cap (§6.1).
@@ -167,6 +184,8 @@ func ReserveImageTask(ctx context.Context, cmd ImageTaskReserveCommand) (ImageTa
 				Progress:   "0%",
 				SubmitTime: now,
 				Quota:      cmd.Price.FormulaReserveQuota(),
+				ChannelId:  revision.ChannelID,
+				Data:       append(json.RawMessage(nil), cmd.RequestData...),
 			}
 			if err := tx.Create(task).Error; err != nil {
 				return fmt.Errorf("%w: create task: %v", ErrImageTaskBillingData, err)
@@ -262,6 +281,9 @@ func ReserveImageTask(ctx context.Context, cmd ImageTaskReserveCommand) (ImageTa
 			stored := &ImageTaskExecution{}
 			if e := DB.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?",
 				cmd.OwnerUserID, cmd.Operation, cmd.IdempotencyKey).First(stored).Error; e == nil {
+				if stored.RequestHash != cmd.RequestHash {
+					return ImageTaskReserveOutcome{}, ErrImageTaskIdempotencyConflict
+				}
 				outcome.Task = &Task{}
 				if e := DB.First(outcome.Task, stored.TaskDBID).Error; e == nil {
 					outcome.Execution = stored
@@ -331,6 +353,18 @@ func validateReserveCommand(cmd ImageTaskReserveCommand) error {
 	if cmd.Price == nil {
 		return errors.New("reserve image task: price resolution required")
 	}
+	if cmd.ChannelRevisionID <= 0 {
+		return errors.New("reserve image task: channel_revision_id required")
+	}
+	if cmd.ExecutionMode != "sync" && cmd.ExecutionMode != "async_task" {
+		return fmt.Errorf("reserve image task: invalid execution_mode %q", cmd.ExecutionMode)
+	}
+	if cmd.AdapterVersion == "" {
+		return errors.New("reserve image task: adapter_version required")
+	}
+	if len(cmd.RequestData) == 0 {
+		return errors.New("reserve image task: request_data required")
+	}
 	return nil
 }
 
@@ -371,8 +405,8 @@ func lockAndValidateToken(tx *gorm.DB, cmd ImageTaskReserveCommand, now int64) (
 // accessed_time for a limited token. Called inside ApplyBillingStageTx callback.
 // Returns nil for unlimited (no deduction, owner/status/expiry already validated).
 func deductLimitedTokenInTx(tx *gorm.DB, tokenID, ownerUserID, amount int, now int64) error {
-	if amount <= 0 {
-		return nil
+	if amount < 0 {
+		return fmt.Errorf("%w: negative token deduction", ErrImageTaskBillingData)
 	}
 	var token Token
 	if err := tx.Where("id = ? AND user_id = ?", tokenID, ownerUserID).First(&token).Error; err != nil {
@@ -382,7 +416,8 @@ func deductLimitedTokenInTx(tx *gorm.DB, tokenID, ownerUserID, amount int, now i
 		return nil
 	}
 	res := tx.Model(&Token{}).
-		Where("id = ? AND remain_quota >= ?", tokenID, amount).
+		Where("id = ? AND user_id = ? AND status = ? AND (expired_time = ? OR expired_time > ?) AND remain_quota >= ?",
+			tokenID, ownerUserID, common.TokenStatusEnabled, -1, now, amount).
 		Updates(map[string]any{
 			"remain_quota":  gorm.Expr("remain_quota - ?", amount),
 			"used_quota":    gorm.Expr("used_quota + ?", amount),

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net"
 	"net/url"
 	"strings"
 
@@ -119,6 +120,16 @@ const (
 	ImageTaskErrIdempotencyConflict  ImageTaskErrorCode = "IDEMPOTENCY_CONFLICT"
 	ImageTaskErrTooManyRequests      ImageTaskErrorCode = "TOO_MANY_REQUESTS"
 	ImageTaskErrNotFound             ImageTaskErrorCode = "NOT_FOUND"
+	// ImageTaskErrInsufficientQuota covers every funding refusal surfaced at
+	// reserve time (wallet, subscription, no active subscription): §6.1 folds
+	// them onto one 402 so the client retry path is uniform.
+	ImageTaskErrInsufficientQuota ImageTaskErrorCode = "INSUFFICIENT_QUOTA"
+	ImageTaskErrUnauthorized      ImageTaskErrorCode = "UNAUTHORIZED"
+	ImageTaskErrInternal          ImageTaskErrorCode = "INTERNAL_ERROR"
+	// ImageTaskErrServiceUnavailable is the fail-closed status when no
+	// image-capable channel can serve the request or the cache safety guard
+	// rejects the reserve (§5.8.1).
+	ImageTaskErrServiceUnavailable ImageTaskErrorCode = "SERVICE_UNAVAILABLE"
 )
 
 // ImageTaskRequestError carries the public code and the HTTP status the handler
@@ -305,6 +316,13 @@ func validateImageURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.Hostname() == "" {
 		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must be an absolute https URL with a host")
+	}
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must not target localhost")
+	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && common.IsPrivateOrReservedIP(ip) {
+		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must not target a private or reserved IP")
 	}
 	return nil
 }

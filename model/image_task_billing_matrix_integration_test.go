@@ -3,6 +3,8 @@
 package model
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // TestLedgerCASGates_RealDB runs the §5.4 four CAS gates on real MySQL8 /
@@ -238,6 +241,10 @@ func TestFundMatrix_RealDB(t *testing.T) {
 		require.NoError(t, DB.First(&u, owner).Error)
 		assert.Equal(t, 100, u.Quota, "wallet untouched")
 	})
+
+	// The same critical token/cap/snapshot/rollback cases also run on SQLite
+	// via TestFundMatrix_SQLite in image_task_billing_fund_shared_test.go.
+	runImageTaskCriticalFundCases(t)
 }
 
 // --- helpers for the fund matrix ---
@@ -254,13 +261,34 @@ func reserveRaw(owner int, key string, price *ImageTaskPriceResolution) (ImageTa
 }
 
 func reserveRawWithPref(owner int, key string, price *ImageTaskPriceResolution, pref string) (ImageTaskReserveOutcome, error) {
+	channelID := owner + 100000
+	channel := Channel{Id: channelID, Type: constant.ChannelTypeOpenAI, Status: 1, Name: "integration-image"}
+	if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&channel).Error; err != nil {
+		return ImageTaskReserveOutcome{}, err
+	}
+	revisionSettings := []byte(`{"schema_version":1,"execution_config":"{\"defaults\":{\"generation\":\"sync\"}}"}`)
+	if !json.Valid(revisionSettings) {
+		return ImageTaskReserveOutcome{}, fmt.Errorf("invalid integration revision settings")
+	}
+	revisionSeed := ChannelRevision{ChannelID: channelID, RevisionNumber: 1, AdapterVersion: "integration/v1", Settings: revisionSettings}
+	if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&revisionSeed).Error; err != nil {
+		return ImageTaskReserveOutcome{}, err
+	}
+	var revision ChannelRevision
+	if err := DB.Where("channel_id = ? AND revision_number = ?", channelID, 1).First(&revision).Error; err != nil {
+		return ImageTaskReserveOutcome{}, err
+	}
 	cmd := ImageTaskReserveCommand{
-		OwnerUserID:    owner,
-		Operation:      ImageTaskOperationGeneration,
-		IdempotencyKey: key,
-		RequestHash:    "h-" + key,
-		Price:          price,
-		Now:            1_700_000_000,
+		OwnerUserID:       owner,
+		Operation:         ImageTaskOperationGeneration,
+		IdempotencyKey:    key,
+		RequestHash:       "h-" + key,
+		Price:             price,
+		Now:               1_700_000_000,
+		ChannelRevisionID: revision.ID,
+		ExecutionMode:     "sync",
+		AdapterVersion:    "integration/v1",
+		RequestData:       []byte(`{"model":"img-v1","prompt":"integration"}`),
 	}
 	_ = pref // preference is read from locked user setting, not command (§5.5)
 	return ReserveImageTask(nil, cmd)

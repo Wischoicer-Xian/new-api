@@ -94,7 +94,7 @@ jobs:
           cache: true
       - run: go mod download
       - name: Image billing SQLite tests
-        run: go test -count=1 -race ./model/ -run 'ImageTaskPriceResolution|ImageTaskBillingSnapshot|ApplyBillingStageTx'
+        run: go test -count=1 -race ./model/ -run 'ImageTaskPriceResolution|ImageTaskBillingSnapshot|ApplyBillingStageTx|FundMatrix_SQLite'
       - name: Vet model
         run: go vet ./model/
 

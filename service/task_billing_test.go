@@ -49,6 +49,9 @@ func TestMain(m *testing.M) {
 		&model.Token{},
 		&model.Log{},
 		&model.Channel{},
+		&model.Ability{},
+		&model.ChannelRevision{},
+		&model.TaskBillingLedger{},
 		&model.TopUp{},
 		&model.UserSubscription{},
 		&model.SystemTask{},
@@ -78,6 +81,12 @@ func truncate(t *testing.T) {
 		model.DB.Exec("DELETE FROM user_subscriptions")
 		model.DB.Exec("DELETE FROM system_task_locks")
 		model.DB.Exec("DELETE FROM system_tasks")
+		// GORM Delete lets the inferred table name track the model rather than
+		// hard-coding dialect-specific table names for the image-task tables.
+		model.DB.Where("1=1").Delete(&model.ImageTaskExecution{})
+		model.DB.Where("1=1").Delete(&model.TaskBillingLedger{})
+		model.DB.Where("1=1").Delete(&model.ChannelRevision{})
+		model.DB.Where("1=1").Delete(&model.Ability{})
 	})
 }
 
