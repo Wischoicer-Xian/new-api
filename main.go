@@ -325,6 +325,20 @@ func InitResources() error {
 		common.FatalLog("failed to initialize database: " + err.Error())
 		return err
 	}
+	// §14.1 second readiness gate (DB-backed): when non-terminal image task
+	// executions exist, the processor must stay on so in-flight work keeps
+	// draining (non-terminal tasks/ledger => read && processor, and new-api
+	// read GET is always on, so the gate reduces to processor). The first gate
+	// (create => processor) is a pure config check in common/init.go that runs
+	// before the DB is open; this one runs after model.InitDB so it can inspect
+	// the executions table. A confirmed illegal combination fails fast at
+	// startup rather than silently leaving tasks stuck; a query error is
+	// advisory and does not block startup.
+	if has, gateErr := model.HasNonTerminalImageTaskExecutions(); gateErr != nil {
+		common.SysError("image task processor gate check skipped: " + gateErr.Error())
+	} else if has && !constant.ImageTaskProcessorEnabled {
+		log.Fatal("non-terminal image task executions exist but IMAGE_TASK_PROCESSOR_ENABLED is off (§14.1: non-terminal tasks => read && processor; read is always on)")
+	}
 	if err = authz.Init(model.DB); err != nil {
 		common.FatalLog("failed to initialize authorization: " + err.Error())
 		return err
