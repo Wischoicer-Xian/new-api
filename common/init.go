@@ -166,6 +166,9 @@ func initConstantEnv() {
 	// §14.1 create-allowlist placeholder for the public single-image task API.
 	// Defaults off (fail-closed) until P3-I wires the real allowlist.
 	constant.ImageTaskCreateEnabled = GetEnvOrDefaultBool("IMAGE_TASK_CREATE_ENABLED", false)
+	// §14.1 processor gate for the image task processor (P3). Independent of
+	// create so read + processor can drain in-flight tasks while create is off.
+	constant.ImageTaskProcessorEnabled = GetEnvOrDefaultBool("IMAGE_TASK_PROCESSOR_ENABLED", false)
 	// §6.1 per-user in-flight image task cap. Must be positive; 0/negative/
 	// non-numeric fail startup (fail-closed) so the mandatory cap is never
 	// silently disabled. Default is a dormant provisional value, not a closed
@@ -175,6 +178,11 @@ func initConstantEnv() {
 		log.Fatal("image task in-flight cap config invalid: " + err.Error())
 	}
 	constant.MaxImageTasksPerUser = parsedCap
+	parsedInFlight, err := ParseMaxImageTasksInFlightPerUser(os.Getenv("MAX_IMAGE_TASKS_IN_FLIGHT_PER_USER"))
+	if err != nil {
+		log.Fatal("image task in-flight per-user cap config invalid: " + err.Error())
+	}
+	constant.MaxImageTasksInFlightPerUser = parsedInFlight
 
 	soraPatchStr := GetEnvOrDefaultString("TASK_PRICE_PATCH", "")
 	if soraPatchStr != "" {
