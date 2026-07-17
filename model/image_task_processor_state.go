@@ -99,6 +99,27 @@ func HasDueImageTaskExecutions() bool {
 	return count > 0
 }
 
+// HasNonTerminalImageTaskExecutions reports whether any image task execution is
+// in a non-terminal state. It backs the §14.1 second readiness gate: when
+// in-flight work exists, the processor must stay on so those executions keep
+// draining (accept/create => read && processor, and new-api read GET is always
+// on, so the gate reduces to processor).
+//
+// Every non-terminal state counts, including manual_review (awaiting an
+// operator ruling) and submission_unknown (awaiting reconcile), because each is
+// still owed a worker transition; only completed/failed/cancelled are terminal.
+// terminalImageTaskStateStrings is reused so the terminal set stays the single
+// source of truth defined next to the state constants.
+func HasNonTerminalImageTaskExecutions() (bool, error) {
+	var count int64
+	if err := DB.Model(&ImageTaskExecution{}).
+		Where("state NOT IN ?", terminalImageTaskStateStrings).
+		Limit(1).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // MarkImageTaskManualReviewCAS is the fenced transition into manual_review. It is
 // the terminal-ish outcome for an execution the processor cannot safely advance
 // (submission_unknown past the reconcile SLA, a poll 4xx, an exhausted budget).

@@ -103,3 +103,32 @@ func TestHasDueImageTaskExecutions(t *testing.T) {
 	insertClaimableExecution(t, ImageTaskStatePolling, now-100, 0, "")
 	assert.True(t, HasDueImageTaskExecutions())
 }
+
+// TestHasNonTerminalImageTaskExecutions verifies the data source of the §14.1
+// second readiness gate: it reports true only when a non-terminal execution
+// exists. Every non-terminal state counts — including manual_review, which is
+// excluded from the claimable set but is still non-terminal and owed an
+// operator ruling, so the processor must stay on to drain it. Only
+// completed/failed/cancelled are terminal and do not count.
+func TestHasNonTerminalImageTaskExecutions(t *testing.T) {
+	truncateImageTaskExecutions(t)
+
+	has, err := HasNonTerminalImageTaskExecutions()
+	require.NoError(t, err)
+	assert.False(t, has, "empty table → no non-terminal executions")
+
+	// All terminal states → still false.
+	insertClaimableExecution(t, ImageTaskStateCompleted, 0, 0, "")
+	insertClaimableExecution(t, ImageTaskStateFailed, 0, 0, "")
+	insertClaimableExecution(t, ImageTaskStateCancelled, 0, 0, "")
+	has, err = HasNonTerminalImageTaskExecutions()
+	require.NoError(t, err)
+	assert.False(t, has, "terminal-only executions → no non-terminal work")
+
+	// A non-terminal state → true. manual_review is non-terminal (§6.1) even
+	// though it is not claimable, so it must keep the processor on.
+	insertClaimableExecution(t, ImageTaskStateManualReview, 0, 0, "")
+	has, err = HasNonTerminalImageTaskExecutions()
+	require.NoError(t, err)
+	assert.True(t, has, "a non-terminal execution exists → must keep processor on")
+}
