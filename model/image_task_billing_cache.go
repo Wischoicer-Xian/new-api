@@ -48,6 +48,9 @@ func cacheDeleteTokenByDigest(digest string) error {
 // caller must only invoke this after the reserve transaction has committed and
 // only for a Created (non-replay) outcome.
 func ApplyCacheEffect(effect ImageTaskCacheEffect, deleter ImageTaskBillingCacheDeleter) {
+	if !common.RedisEnabled {
+		return
+	}
 	if deleter == nil {
 		deleter = &prodImageTaskCacheDeleter{}
 	}
