@@ -66,6 +66,31 @@ func TestDecodeImageTaskEditRequest(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "loopback literal rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://127.0.0.1/a.png"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "localhost rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://localhost/a.png"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "localhost trailing dot rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://localhost./a.png"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "cloud metadata literal rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://169.254.169.254/latest/meta-data"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "ipv6 loopback literal rejected",
+			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":"https://[::1]/a.png"}]}`,
+			wantErr: true,
+		},
+		{
 			name:    "empty image url rejected",
 			body:    `{"model":"gpt-image-1","prompt":"p","images":[{"image_url":""}]}`,
 			wantErr: true,

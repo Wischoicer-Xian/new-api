@@ -45,6 +45,27 @@ type imageChannelRevisionSnapshot struct {
 	StatusCodeMapping  string `json:"status_code_mapping,omitempty"` // error-class / retry mapping
 }
 
+// ImageExecutionConfigFromRevision returns the execution configuration frozen
+// in a revision. New task selection must use this value, never the mutable
+// channel cache, so mode and provider settings share one immutable version.
+func ImageExecutionConfigFromRevision(revision *ChannelRevision) ([]byte, error) {
+	if revision == nil || len(revision.Settings) == 0 {
+		return nil, fmt.Errorf("image channel revision settings are required")
+	}
+	var snapshot imageChannelRevisionSnapshot
+	if err := common.Unmarshal(revision.Settings, &snapshot); err != nil {
+		return nil, fmt.Errorf("decode image channel revision settings: %w", err)
+	}
+	if snapshot.SchemaVersion != imageRevisionSnapshotSchemaVersion {
+		return nil, fmt.Errorf("unsupported image channel revision schema version %d", snapshot.SchemaVersion)
+	}
+	config := strings.TrimSpace(snapshot.ExecutionConfig)
+	if config == "" {
+		return nil, fmt.Errorf("image channel revision execution config is required")
+	}
+	return []byte(config), nil
+}
+
 // recalcMultiKeySize recomputes MultiKeySize (and trims stale per-key status)
 // for multi-key channels. It is shared by Channel.Update and the transactional
 // image-revision save path so both apply identical bookkeeping.

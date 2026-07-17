@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
@@ -91,65 +92,19 @@ func TestCreateImageTaskGeneration_GateOffIs404(t *testing.T) {
 	assert.Equal(t, "NOT_FOUND", parseImageTaskBody(t, w)["code"])
 }
 
-func TestCreateImageTaskGeneration_BadContentTypeIs415(t *testing.T) {
+func TestCreateImageTaskGeneration_RuntimeSwitchCannotOpenRoute(t *testing.T) {
 	setupImageTaskCreateControllerDB(t)
 	enableImageTaskCreate(t)
 	c, w := newCreateGenerationCtx(`{"model":"dall-e-3","prompt":"a cat"}`)
-	c.Request.Header.Set("Content-Type", "text/plain")
 	CreateImageTaskGeneration(c)
-	require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
-	assert.Equal(t, "UNSUPPORTED_MEDIA_TYPE", parseImageTaskBody(t, w)["code"])
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, "NOT_FOUND", parseImageTaskBody(t, w)["code"])
 }
 
-func TestCreateImageTaskGeneration_MissingIdempotencyKeyIs400(t *testing.T) {
-	setupImageTaskCreateControllerDB(t)
-	enableImageTaskCreate(t)
-	c, w := newCreateGenerationCtx(`{"model":"dall-e-3","prompt":"a cat"}`)
-	c.Request.Header.Del("Idempotency-Key")
-	CreateImageTaskGeneration(c)
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Equal(t, "INVALID_REQUEST", parseImageTaskBody(t, w)["code"])
-}
-
-func TestCreateImageTaskGeneration_SizeIs422(t *testing.T) {
-	setupImageTaskCreateControllerDB(t)
-	enableImageTaskCreate(t)
-	c, w := newCreateGenerationCtx(`{"model":"dall-e-3","prompt":"a cat","size":"1024x1024"}`)
-	CreateImageTaskGeneration(c)
-	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
-	assert.Equal(t, "UNSUPPORTED_PARAMETER", parseImageTaskBody(t, w)["code"])
-}
-
-func TestCreateImageTaskGeneration_Accepted202AndReplayHeader(t *testing.T) {
-	setupImageTaskCreateControllerDB(t)
-	enableImageTaskCreate(t)
-	// The reserve path needs a positive cap (no env parse in tests) and the DB
-	// channel path so ListImageCapableChannelsForGroupModel queries the seeded
-	// ability directly.
-	prevCap := constant.MaxImageTasksPerUser
-	constant.MaxImageTasksPerUser = constant.DefaultMaxImageTasksPerUser
-	t.Cleanup(func() { constant.MaxImageTasksPerUser = prevCap })
-	prevMem := common.MemoryCacheEnabled
-	common.MemoryCacheEnabled = false
-	t.Cleanup(func() { common.MemoryCacheEnabled = prevMem })
-	seedAcceptedImageTask(t)
-
-	body := `{"model":"dall-e-3","prompt":"a cat"}`
-	c, w := newCreateGenerationCtx(body)
-	CreateImageTaskGeneration(c)
-	require.Equal(t, http.StatusAccepted, w.Code)
-	assert.Empty(t, w.Header().Get("Idempotency-Replayed"), "first create is not a replay")
-	m := parseImageTaskBody(t, w)
-	require.Equal(t, "image.task", m["object"])
-	require.Equal(t, "queued", m["status"])
-	publicID, _ := m["id"].(string)
-	require.NotEmpty(t, publicID)
-
-	// Same Idempotency-Key + body → replay: same id, header set.
-	c2, w2 := newCreateGenerationCtx(body)
-	CreateImageTaskGeneration(c2)
-	require.Equal(t, http.StatusAccepted, w2.Code)
-	assert.Equal(t, "true", w2.Header().Get("Idempotency-Replayed"))
-	m2 := parseImageTaskBody(t, w2)
-	assert.Equal(t, publicID, m2["id"], "replay returns the original task id")
+func TestReadImageTaskRawBody_RejectsOversizedBody(t *testing.T) {
+	c, _ := newCreateGenerationCtx(strings.Repeat("x", (1<<20)+1))
+	_, err := readImageTaskRawBody(c)
+	reqErr := dto.AsImageTaskRequestError(err)
+	require.NotNil(t, reqErr)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, reqErr.StatusCode)
 }

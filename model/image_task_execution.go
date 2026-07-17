@@ -144,6 +144,28 @@ type ImageTaskExecution struct {
 // a different canonical request hash.
 var ErrIdempotencyConflict = errors.New("idempotency key reused with a different request")
 
+// FindImageTaskReplay performs the lock-free replay preflight used before
+// mutable channel and pricing resolution. The reserve transaction remains the
+// authoritative convergence point for concurrent creates.
+func FindImageTaskReplay(ownerUserID int, operation, idempotencyKey, requestHash string) (*ImageTaskExecution, *Task, error) {
+	var exec ImageTaskExecution
+	err := DB.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?", ownerUserID, operation, idempotencyKey).First(&exec).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if exec.RequestHash != requestHash {
+		return nil, nil, ErrIdempotencyConflict
+	}
+	var task Task
+	if err := DB.First(&task, exec.TaskDBID).Error; err != nil {
+		return nil, nil, err
+	}
+	return &exec, &task, nil
+}
+
 // CreateOrGetImageTaskExecution inserts a new execution, or — when the
 // idempotency namespace (owner, operation, key) already exists — returns the
 // stored row. The unique index idx_image_task_idem is the convergence point
@@ -303,7 +325,7 @@ func RequestImageTaskCancelCAS(publicTaskID string, ownerUserID int, now int64) 
 			return nil
 		}
 		result := tx.Model(&ImageTaskExecution{}).
-			Where("id = ? AND state NOT IN ?", current.ID, terminalImageTaskStateStrings).
+			Where("id = ? AND state = ?", current.ID, current.State).
 			Updates(map[string]any{
 				"state":               string(ImageTaskStateCancelRequested),
 				"cancel_requested_at": now,
@@ -313,9 +335,16 @@ func RequestImageTaskCancelCAS(publicTaskID string, ownerUserID int, now int64) 
 			return result.Error
 		}
 		won = result.RowsAffected == 1
-		current.State = ImageTaskStateCancelRequested
-		current.CancelRequestedAt = now
-		current.UpdatedAt = now
+		if won {
+			current.State = ImageTaskStateCancelRequested
+			current.CancelRequestedAt = now
+			current.UpdatedAt = now
+			exec = &current
+			return nil
+		}
+		if err := tx.First(&current, current.ID).Error; err != nil {
+			return err
+		}
 		exec = &current
 		return nil
 	})

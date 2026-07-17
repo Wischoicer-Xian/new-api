@@ -92,14 +92,29 @@ func createImageTask(c *gin.Context, operation service.ImageOperation) {
 		return
 	}
 	input := service.ImageTaskCreateInput{
-		RawBody:         rawBody,
-		Operation:       operation,
-		OwnerUserID:     c.GetInt("id"),
-		CreationTokenID: c.GetInt("token_id"),
-		IdempotencyKey:  idempotencyKey,
-		UsingGroup:      common.GetContextKeyString(c, constant.ContextKeyUsingGroup),
-		UserBaseGroup:   common.GetContextKeyString(c, constant.ContextKeyUserGroup),
-		RequestID:       c.GetString(common.RequestIdKey),
+		RawBody:                rawBody,
+		Operation:              operation,
+		OwnerUserID:            c.GetInt("id"),
+		CreationTokenID:        c.GetInt("token_id"),
+		IdempotencyKey:         idempotencyKey,
+		UsingGroup:             common.GetContextKeyString(c, constant.ContextKeyUsingGroup),
+		UserBaseGroup:          common.GetContextKeyString(c, constant.ContextKeyUserGroup),
+		RequestID:              c.GetString(common.RequestIdKey),
+		TokenModelLimitEnabled: common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled),
+	}
+	if raw, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit); ok {
+		input.TokenModelLimit, _ = raw.(map[string]bool)
+	}
+	if raw := c.GetString("specific_channel_id"); raw != "" {
+		channelID, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || channelID <= 0 {
+			writeImageTaskError(c, &dto.ImageTaskRequestError{Code: dto.ImageTaskErrInvalidRequest, StatusCode: http.StatusBadRequest, Message: "invalid specific channel id"})
+			return
+		}
+		input.SpecificChannelID = channelID
+	}
+	if setting, ok := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting); ok {
+		input.AcceptUnsetRatioModel = setting.AcceptUnsetRatioModel
 	}
 	if attr := common.ParseWischoicerAttribution(c.Request.Header); attr != nil {
 		if payload, mErr := common.Marshal(attr); mErr == nil {
@@ -121,12 +136,34 @@ func createImageTask(c *gin.Context, operation service.ImageOperation) {
 // so the same bytes feed both the canonical hash and the strict decode. A
 // missing or unreadable body is a 400, not a 500.
 func readImageTaskRawBody(c *gin.Context) ([]byte, error) {
+	const maxImageTaskBodyBytes = 1 << 20
+	if c.Request.ContentLength > maxImageTaskBodyBytes {
+		return nil, &dto.ImageTaskRequestError{
+			Code: dto.ImageTaskErrInvalidRequest, StatusCode: http.StatusRequestEntityTooLarge,
+			Message: "request body exceeds 1 MiB",
+		}
+	}
+	// Decompression middleware has already replaced Request.Body, so this limit
+	// applies to decompressed bytes before BodyStorage performs any full read.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxImageTaskBodyBytes)
 	storage, err := common.GetBodyStorage(c)
 	if err != nil {
+		if common.IsRequestBodyTooLargeError(err) {
+			return nil, &dto.ImageTaskRequestError{
+				Code: dto.ImageTaskErrInvalidRequest, StatusCode: http.StatusRequestEntityTooLarge,
+				Message: "request body exceeds 1 MiB",
+			}
+		}
 		return nil, &dto.ImageTaskRequestError{
 			Code:       dto.ImageTaskErrInvalidRequest,
 			StatusCode: http.StatusBadRequest,
 			Message:    "request body is required",
+		}
+	}
+	if storage.Size() > maxImageTaskBodyBytes {
+		return nil, &dto.ImageTaskRequestError{
+			Code: dto.ImageTaskErrInvalidRequest, StatusCode: http.StatusRequestEntityTooLarge,
+			Message: "request body exceeds 1 MiB",
 		}
 	}
 	body, err := storage.Bytes()

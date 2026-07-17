@@ -32,7 +32,7 @@ func TestResolveImageTaskPrice_ModeSourcePrecedence(t *testing.T) {
 
 	t.Run("explicit model_price wins", func(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"img-explicit":0.02}`))
-		v, err := resolveImageTaskPrice("img-explicit", "default", "default")
+		v, err := resolveImageTaskPrice("img-explicit", "default", "default", false)
 		require.NoError(t, err)
 		assert.True(t, v.IsFixedMode())
 		assert.Equal(t, "model_price", v.PricingSourceRaw())
@@ -40,21 +40,35 @@ func TestResolveImageTaskPrice_ModeSourcePrecedence(t *testing.T) {
 		assert.Equal(t, "default", v.ResolvedGroup())
 	})
 
-	t.Run("default_model_price fallback when live map misses", func(t *testing.T) {
-		// Clearing the live map exposes the built-in default map; dall-e-3 is
-		// priced there (0.04) but absent from the now-empty live map.
+	t.Run("built-in default price follows synchronous helper", func(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
-		v, err := resolveImageTaskPrice("dall-e-3", "default", "default")
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"dall-e-3":3}`))
+		v, err := resolveImageTaskPrice("dall-e-3", "default", "default", false)
 		require.NoError(t, err)
 		assert.True(t, v.IsFixedMode())
 		assert.Equal(t, "default_model_price", v.PricingSourceRaw())
 		assert.Equal(t, 0.04, v.ModelPrice())
+		expected, qErr := common.QuotaFromFloatStrict(0.04 * common.QuotaPerUnit)
+		require.NoError(t, qErr)
+		assert.Equal(t, expected, v.FormulaReserveQuota())
+	})
+
+	t.Run("accepted unset ratio preserves synchronous fallback value", func(t *testing.T) {
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
+		v, err := resolveImageTaskPrice("no-such-model", "default", "default", true)
+		require.NoError(t, err)
+		assert.True(t, v.IsRatioMode())
+		assert.Equal(t, 37.5, v.ModelRatio())
+		expected, qErr := common.QuotaFromFloatStrict(37.5 / 2 * common.QuotaPerUnit)
+		require.NoError(t, qErr)
+		assert.Equal(t, expected, v.FormulaReserveQuota())
 	})
 
 	t.Run("model_ratio when neither live nor default price hits", func(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
 		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"img-ratio":2.5}`))
-		v, err := resolveImageTaskPrice("img-ratio", "default", "vip")
+		v, err := resolveImageTaskPrice("img-ratio", "default", "vip", false)
 		require.NoError(t, err)
 		assert.True(t, v.IsRatioMode())
 		assert.Equal(t, "model_ratio", v.PricingSourceRaw())
@@ -65,7 +79,7 @@ func TestResolveImageTaskPrice_ModeSourcePrecedence(t *testing.T) {
 	t.Run("unconfigured model fails closed with pricing sentinel", func(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
 		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
-		_, err := resolveImageTaskPrice("no-such-model", "default", "default")
+		_, err := resolveImageTaskPrice("no-such-model", "default", "default", false)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, model.ErrUnsupportedImageTaskPricingFacts)
 	})
@@ -78,7 +92,7 @@ func TestResolveImageTaskPrice_GroupRatioFallback(t *testing.T) {
 	// No group-group or group ratio configured: GetUserGroupRatio falls back to
 	// GetGroupRatio, whose default is 1. This locks the fallback chain that
 	// keeps the frozen fingerprint's group ratio consistent with the relay path.
-	v, err := resolveImageTaskPrice("img-g", "default", "default")
+	v, err := resolveImageTaskPrice("img-g", "default", "default", false)
 	require.NoError(t, err)
 	assert.Equal(t, 1.0, v.GroupRatio())
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net"
 	"net/url"
 	"strings"
 
@@ -315,6 +316,13 @@ func validateImageURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.Hostname() == "" {
 		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must be an absolute https URL with a host")
+	}
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must not target localhost")
+	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && common.IsPrivateOrReservedIP(ip) {
+		return imageTaskError(ImageTaskErrInvalidRequest, 400, "images[].image_url must not target a private or reserved IP")
 	}
 	return nil
 }

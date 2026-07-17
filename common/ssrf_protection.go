@@ -133,6 +133,12 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
+// IsPrivateOrReservedIP reports whether ip is unsafe for an outbound fetch.
+// Callers must still apply the same check after DNS resolution in the dialer.
+func IsPrivateOrReservedIP(ip net.IP) bool {
+	return isPrivateIP(ip)
+}
+
 // parsePortRanges 解析端口范围配置
 // 支持格式: "80", "443", "8000-9000"
 func parsePortRanges(portConfigs []string) ([]int, error) {

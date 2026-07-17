@@ -14,21 +14,20 @@ import (
 // ModelPriceHelperPerCall so an async image task prices identically to the
 // synchronous per-call path (MJ / task):
 //
-//	model_price (explicit) -> default_model_price -> model_ratio
+//	model_price (live configuration) -> default_model_price -> model_ratio
 //
 // A model with no configured price AND no configured ratio is a
-// misconfiguration: the returned error wraps the pricing sentinel so the
-// create orchestration maps it onto 500 INTERNAL_ERROR (fail closed, never a
-// zero-charge guess). resolvedGroup is the concrete group the channel was
+// misconfiguration unless the owner explicitly accepts unset ratios, matching
+// the synchronous path. resolvedGroup is the concrete group the channel was
 // selected from; userBaseGroup supplies the user×group ratio dimension and is
 // the non-"auto" group even when selection expanded an auto group.
 //
 // otherRatios is always nil: the §5.2 price VO rejects non-empty other-ratio
 // maps (Option A fail-closed), and image tasks have no multiplier axes beyond
 // the per-unit price.
-func resolveImageTaskPrice(originModel, userBaseGroup, resolvedGroup string) (*model.ImageTaskPriceResolution, error) {
-	if price, ok := ratio_setting.GetModelPrice(originModel, false); ok {
-		return newImageTaskPrice("model_price", "model_price", originModel, originModel,
+func resolveImageTaskPrice(originModel, userBaseGroup, resolvedGroup string, acceptUnsetRatio bool) (*model.ImageTaskPriceResolution, error) {
+	if price, matchedName, ok := ratio_setting.GetModelPriceWithMatchedName(originModel); ok {
+		return newImageTaskPrice("model_price", "model_price", originModel, matchedName,
 			resolvedGroup, userBaseGroup, price, 0)
 	}
 	if defaultPrice, ok := ratio_setting.GetDefaultModelPriceMap()[originModel]; ok {
@@ -37,8 +36,11 @@ func resolveImageTaskPrice(originModel, userBaseGroup, resolvedGroup string) (*m
 	}
 	ratio, ratioOk, matchedName := ratio_setting.GetModelRatio(originModel)
 	if !ratioOk {
-		return nil, fmt.Errorf("%w: model %q has no price or ratio configured",
-			model.ErrUnsupportedImageTaskPricingFacts, originModel)
+		if !acceptUnsetRatio {
+			return nil, fmt.Errorf("%w: model %q has no price or ratio configured",
+				model.ErrUnsupportedImageTaskPricingFacts, originModel)
+		}
+		matchedName = originModel
 	}
 	return newImageTaskPrice("model_ratio", "model_ratio", originModel, matchedName,
 		resolvedGroup, userBaseGroup, 0, ratio)

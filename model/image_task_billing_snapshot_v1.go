@@ -66,6 +66,9 @@ func (s *ImageTaskBillingSnapshotV1) Validate() error {
 	if s.OriginModel == "" {
 		return fmt.Errorf("billing snapshot: origin_model required")
 	}
+	if s.ChannelRevisionID <= 0 {
+		return fmt.Errorf("billing snapshot: channel_revision_id required")
+	}
 	if s.PricingFingerprint == "" {
 		return fmt.Errorf("billing snapshot: pricing_fingerprint required")
 	}

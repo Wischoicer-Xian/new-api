@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"math/rand"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"gorm.io/gorm"
 )
@@ -26,15 +27,19 @@ import (
 // user's non-"auto" group (constant.ContextKeyUserGroup) and supplies the
 // user×group ratio dimension as well as the auto-expansion input.
 type ImageTaskCreateInput struct {
-	RawBody         []byte
-	Operation       ImageOperation
-	OwnerUserID     int
-	CreationTokenID int
-	IdempotencyKey  string
-	UsingGroup      string
-	UserBaseGroup   string
-	RequestID       string
-	Attribution     json.RawMessage // nil when no Wischoicer attribution is present
+	RawBody                []byte
+	Operation              ImageOperation
+	OwnerUserID            int
+	CreationTokenID        int
+	IdempotencyKey         string
+	UsingGroup             string
+	UserBaseGroup          string
+	RequestID              string
+	Attribution            json.RawMessage // nil when no Wischoicer attribution is present
+	TokenModelLimitEnabled bool
+	TokenModelLimit        map[string]bool
+	SpecificChannelID      int
+	AcceptUnsetRatioModel  bool
 }
 
 // imageTaskChannelSelection is the resolved channel a create will reserve
@@ -64,6 +69,28 @@ func CreateImageTask(ctx context.Context, in ImageTaskCreateInput) (obj *dto.Ima
 		return nil, false, 0, dErr
 	}
 
+	// Replay must not depend on mutable channel, capability, token-scope or
+	// pricing configuration. The aggregate repeats this check under the owner
+	// fence to converge concurrent first creates.
+	replayExec, _, replayErr := model.FindImageTaskReplay(in.OwnerUserID, string(in.Operation), in.IdempotencyKey, hash)
+	if replayErr != nil {
+		if errors.Is(replayErr, model.ErrIdempotencyConflict) {
+			return nil, false, 0, mapImageTaskReserveError(model.ErrImageTaskIdempotencyConflict)
+		}
+		return nil, false, 0, mapImageTaskReserveError(model.ErrImageTaskBillingData)
+	}
+	if replayExec != nil {
+		return projectImageTaskObject(replayExec), true, 0, nil
+	}
+
+	if in.TokenModelLimitEnabled {
+		matched := ratio_setting.FormatMatchingModelName(modelName)
+		if in.TokenModelLimit == nil || !in.TokenModelLimit[matched] {
+			return nil, false, 0, imageTaskReqError(dto.ImageTaskErrUnauthorized, 403,
+				"creation token is not allowed to use this model")
+		}
+	}
+
 	// Size guard: the current capability model carries no per-size support
 	// matrix, so a present size cannot be proven supported and must be rejected
 	// rather than silently dropped (§6.1). ApiNebula's async adapter will add a
@@ -73,17 +100,12 @@ func CreateImageTask(ctx context.Context, in ImageTaskCreateInput) (obj *dto.Ima
 			"size is not supported on this route")
 	}
 
-	resolvedGroup, candidates, selErr := selectImageTaskCandidates(in.UsingGroup, in.UserBaseGroup, modelName)
-	if selErr != nil {
-		return nil, false, 0, selErr
-	}
-
-	selected, pErr := pickImageTaskChannel(candidates, in.Operation, modelName)
+	resolvedGroup, selected, pErr := selectAndPickImageTaskChannel(in.UsingGroup, in.UserBaseGroup, modelName, in.Operation, in.SpecificChannelID)
 	if pErr != nil {
 		return nil, false, 0, pErr
 	}
 
-	price, prErr := resolveImageTaskPrice(modelName, in.UserBaseGroup, resolvedGroup)
+	price, prErr := resolveImageTaskPrice(modelName, in.UserBaseGroup, resolvedGroup, in.AcceptUnsetRatioModel)
 	if prErr != nil {
 		return nil, false, 0, mapImageTaskReserveError(prErr)
 	}
@@ -99,6 +121,7 @@ func CreateImageTask(ctx context.Context, in ImageTaskCreateInput) (obj *dto.Ima
 		CreationTokenID:   in.CreationTokenID,
 		Price:             price,
 		Attribution:       in.Attribution,
+		RequestData:       append(json.RawMessage(nil), in.RawBody...),
 		RequestID:         in.RequestID,
 		UpstreamRequestID: "", // §7.4: upstream id is filled by the processor at submit
 		Now:               time.Now().Unix(),
@@ -108,6 +131,75 @@ func CreateImageTask(ctx context.Context, in ImageTaskCreateInput) (obj *dto.Ima
 		return nil, false, 0, mapImageTaskReserveError(err)
 	}
 	return projectImageTaskObject(outcome.Execution), outcome.Replayed, 0, nil
+}
+
+func selectAndPickImageTaskChannel(usingGroup, userBaseGroup, modelName string, op ImageOperation, specificChannelID int) (string, imageTaskChannelSelection, error) {
+	groups := []string{usingGroup}
+	if usingGroup == "auto" {
+		groups = GetUserAutoGroup(userBaseGroup)
+	}
+	for _, group := range groups {
+		candidates := model.ListImageCapableChannelsForGroupModel(group, modelName)
+		if specificChannelID > 0 {
+			filtered := candidates[:0]
+			for _, candidate := range candidates {
+				if candidate.Id == specificChannelID {
+					filtered = append(filtered, candidate)
+				}
+			}
+			candidates = filtered
+		}
+		valid := make([]imageTaskChannelSelection, 0, len(candidates))
+		for _, candidate := range candidates {
+			if selection, ok := trySelectImageTaskChannel(candidate, op, modelName); ok {
+				valid = append(valid, selection)
+			}
+		}
+		if len(valid) == 0 {
+			continue
+		}
+		return group, weightedImageTaskSelection(valid, rand.Intn), nil
+	}
+	return "", imageTaskChannelSelection{}, imageTaskReqError(dto.ImageTaskErrServiceUnavailable, 503,
+		"no image-capable channel available for model")
+}
+
+func weightedImageTaskSelection(candidates []imageTaskChannelSelection, draw func(int) int) imageTaskChannelSelection {
+	highest := candidates[0].Channel.GetPriority()
+	for _, candidate := range candidates[1:] {
+		if candidate.Channel.GetPriority() > highest {
+			highest = candidate.Channel.GetPriority()
+		}
+	}
+	pool := make([]imageTaskChannelSelection, 0, len(candidates))
+	total := 0
+	for _, candidate := range candidates {
+		if candidate.Channel.GetPriority() != highest {
+			continue
+		}
+		pool = append(pool, candidate)
+		weight := candidate.Channel.GetWeight()
+		if weight > 0 {
+			total += weight
+		}
+	}
+	if total == 0 {
+		total = len(pool) * 100
+		index := draw(total) / 100
+		return pool[index]
+	}
+	value := draw(total)
+	for _, candidate := range pool {
+		weight := candidate.Channel.GetWeight()
+		if weight <= 0 {
+			continue
+		}
+		value -= weight
+		if value < 0 {
+			return candidate
+		}
+	}
+	return pool[len(pool)-1]
 }
 
 // decodeAndHash strict-decodes the raw body for one operation and computes the
@@ -138,59 +230,6 @@ func decodeAndHash(operation ImageOperation, rawBody []byte) (modelName string, 
 	return modelName, hasSize, hash, nil
 }
 
-// selectImageTaskCandidates resolves the effective group and enumerates its
-// image-capable candidates for the model. "auto" expands into the user's auto
-// group list and picks the FIRST group with candidates (resolvedGroup becomes
-// that concrete group for ratio/fingerprint); a concrete group is tried
-// directly. There is no cross-group fan-out — the image task path must not
-// Distribute (§7.5). Candidates are sorted by priority before returning so the
-// picker is deterministic.
-func selectImageTaskCandidates(usingGroup, userBaseGroup, modelName string) (string, []*model.Channel, error) {
-	groupsToTry := []string{usingGroup}
-	if usingGroup == "auto" {
-		groupsToTry = GetUserAutoGroup(userBaseGroup)
-	}
-	for _, g := range groupsToTry {
-		raw := model.ListImageCapableChannelsForGroupModel(g, modelName)
-		if len(raw) == 0 {
-			continue
-		}
-		return g, sortImageTaskCandidates(raw), nil
-	}
-	return "", nil, imageTaskReqError(dto.ImageTaskErrServiceUnavailable, 503,
-		"no image-capable channel available for model")
-}
-
-// sortImageTaskCandidates returns a priority-descending copy of candidates,
-// breaking ties by ascending channel id for stable, testable selection. The
-// input slice is not mutated.
-func sortImageTaskCandidates(candidates []*model.Channel) []*model.Channel {
-	sorted := make([]*model.Channel, len(candidates))
-	copy(sorted, candidates)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		pi, pj := sorted[i].GetPriority(), sorted[j].GetPriority()
-		if pi != pj {
-			return pi > pj
-		}
-		return sorted[i].Id < sorted[j].Id
-	})
-	return sorted
-}
-
-// pickImageTaskChannel walks the sorted candidates and returns the first one
-// that clears the adapter capability, execution-config, execution-resolution
-// and revision gates. Any candidate that fails one gate is skipped; exhausting
-// the list is a fail-closed 503.
-func pickImageTaskChannel(candidates []*model.Channel, op ImageOperation, modelName string) (imageTaskChannelSelection, error) {
-	for _, ch := range candidates {
-		if sel, ok := trySelectImageTaskChannel(ch, op, modelName); ok {
-			return sel, nil
-		}
-	}
-	return imageTaskChannelSelection{}, imageTaskReqError(dto.ImageTaskErrServiceUnavailable, 503,
-		"no image-capable channel available for model")
-}
-
 // trySelectImageTaskChannel resolves one candidate to a selection. The bool is
 // false when the channel cannot serve this operation+model (unsupported
 // adapter, unparseable config, unsupported mode, or no frozen revision). A
@@ -207,15 +246,7 @@ func trySelectImageTaskChannel(ch *model.Channel, op ImageOperation, modelName s
 	if !ok || caps == nil {
 		return imageTaskChannelSelection{}, false
 	}
-	adapterVersion, ok := ImageAdapterVersion(apiType)
-	if !ok {
-		return imageTaskChannelSelection{}, false
-	}
-	cfg, err := ParseImageChannelExecutionConfig(ch.ImageExecutionConfigBytes())
-	if err != nil {
-		return imageTaskChannelSelection{}, false
-	}
-	res, ok := ResolveImageExecution(caps, cfg, op, modelName)
+	_, ok = ImageAdapterVersion(apiType)
 	if !ok {
 		return imageTaskChannelSelection{}, false
 	}
@@ -226,11 +257,26 @@ func trySelectImageTaskChannel(ch *model.Channel, op ImageOperation, modelName s
 		}
 		return imageTaskChannelSelection{}, false
 	}
+	if rev.AdapterVersion == "" {
+		return imageTaskChannelSelection{}, false
+	}
+	frozenConfig, err := model.ImageExecutionConfigFromRevision(rev)
+	if err != nil {
+		return imageTaskChannelSelection{}, false
+	}
+	cfg, err := ParseImageChannelExecutionConfig(frozenConfig)
+	if err != nil {
+		return imageTaskChannelSelection{}, false
+	}
+	res, ok := ResolveImageExecution(caps, cfg, op, modelName)
+	if !ok {
+		return imageTaskChannelSelection{}, false
+	}
 	return imageTaskChannelSelection{
 		Channel:        ch,
 		Revision:       rev,
 		Mode:           res.Mode,
-		AdapterVersion: adapterVersion,
+		AdapterVersion: rev.AdapterVersion,
 	}, true
 }
 

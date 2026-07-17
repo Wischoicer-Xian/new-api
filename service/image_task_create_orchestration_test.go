@@ -67,7 +67,18 @@ func seedImageChannelForCreate(t *testing.T, id int, group, modelName, cfg strin
 		Endpoint:       "https://api.openai.com",
 		CredentialRef:  fmt.Sprintf("channel:%d", id),
 		AdapterVersion: "openai-image-adapter/v1",
+		Settings:       mustImageRevisionSettings(t, cfg),
 	}).Error)
+}
+
+func mustImageRevisionSettings(t *testing.T, executionConfig string) []byte {
+	t.Helper()
+	payload, err := common.Marshal(map[string]any{
+		"schema_version":   1,
+		"execution_config": executionConfig,
+	})
+	require.NoError(t, err)
+	return payload
 }
 
 func TestMapImageTaskReserveError(t *testing.T) {
@@ -103,6 +114,18 @@ func TestMapImageTaskReserveError(t *testing.T) {
 	// as a generic 500 instead of masquerading as a mapped code.
 	unknown := errors.New("boom")
 	assert.Same(t, unknown, mapImageTaskReserveError(unknown))
+}
+
+func TestWeightedImageTaskSelection_HonorsPriorityAndWeight(t *testing.T) {
+	priorityHigh, priorityLow := int64(10), int64(1)
+	weightOne, weightNine := uint(1), uint(9)
+	candidates := []imageTaskChannelSelection{
+		{Channel: &model.Channel{Id: 1, Priority: &priorityLow, Weight: &weightNine}},
+		{Channel: &model.Channel{Id: 2, Priority: &priorityHigh, Weight: &weightOne}},
+		{Channel: &model.Channel{Id: 3, Priority: &priorityHigh, Weight: &weightNine}},
+	}
+	assert.Equal(t, 2, weightedImageTaskSelection(candidates, func(int) int { return 0 }).Channel.Id)
+	assert.Equal(t, 3, weightedImageTaskSelection(candidates, func(total int) int { return total - 1 }).Channel.Id)
 }
 
 func TestCreateImageTask_RejectsSizeAs422(t *testing.T) {
@@ -167,7 +190,7 @@ func TestCreateImageTask_UnsupportedConfigSkipsCandidate(t *testing.T) {
 		Group: "default", Models: "dall-e-3", Key: "sk", ImageExecutionConfig: &cfg,
 	}).Error)
 	require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "dall-e-3", ChannelId: 7201, Enabled: true}).Error)
-	require.NoError(t, model.DB.Create(&model.ChannelRevision{ChannelID: 7201, RevisionNumber: 1, Endpoint: "https://api.openai.com", CredentialRef: "channel:7201", AdapterVersion: "openai-image-adapter/v1"}).Error)
+	require.NoError(t, model.DB.Create(&model.ChannelRevision{ChannelID: 7201, RevisionNumber: 1, Endpoint: "https://api.openai.com", CredentialRef: "channel:7201", AdapterVersion: "openai-image-adapter/v1", Settings: mustImageRevisionSettings(t, cfg)}).Error)
 
 	_, _, _, err := CreateImageTask(context.Background(), ImageTaskCreateInput{
 		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
@@ -201,12 +224,54 @@ func TestCreateImageTask_ReservesAndProjectsAccepted(t *testing.T) {
 	assert.Equal(t, dto.ImageTaskStatusQueued, obj.Status)
 	assert.NotEmpty(t, obj.ID)
 	assert.False(t, replayed)
+	var storedExecution model.ImageTaskExecution
+	require.NoError(t, model.DB.Where("public_task_id = ?", obj.ID).First(&storedExecution).Error)
+	var storedTask model.Task
+	require.NoError(t, model.DB.First(&storedTask, storedExecution.TaskDBID).Error)
+	assert.JSONEq(t, string(in.RawBody), string(storedTask.Data))
+	assert.Equal(t, 7001, storedTask.ChannelId)
 
 	// Same idempotency key + body → replay: same public id, replayed true.
 	obj2, replayed2, _, err := CreateImageTask(context.Background(), in)
 	require.NoError(t, err)
 	assert.True(t, replayed2)
 	assert.Equal(t, obj.ID, obj2.ID)
+}
+
+func TestCreateImageTask_TokenModelLimitFailsClosed(t *testing.T) {
+	setupCreateTest(t)
+	_, _, _, err := CreateImageTask(context.Background(), ImageTaskCreateInput{
+		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
+		OwnerUserID: 5101, IdempotencyKey: "scope-denied", UsingGroup: "default", UserBaseGroup: "default",
+		TokenModelLimitEnabled: true, TokenModelLimit: map[string]bool{"gpt-image-1": true},
+	})
+	reqErr := dto.AsImageTaskRequestError(err)
+	require.NotNil(t, reqErr)
+	assert.Equal(t, 403, reqErr.StatusCode)
+	assert.Equal(t, dto.ImageTaskErrUnauthorized, reqErr.Code)
+}
+
+func TestCreateImageTask_ReplaySurvivesChannelAndPriceChanges(t *testing.T) {
+	setupCreateTest(t)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"dall-e-3":0.04}`))
+	seedUser(t, 5102, 1000000)
+	seedTokenForImage(t, 6102, 5102, "sk-replay", 1000000)
+	seedImageChannelForCreate(t, 7102, "default", "dall-e-3", `{"defaults":{"generation":"sync"}}`)
+	in := ImageTaskCreateInput{
+		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
+		OwnerUserID: 5102, CreationTokenID: 6102, IdempotencyKey: "replay-after-change",
+		UsingGroup: "default", UserBaseGroup: "default",
+	}
+	first, replayed, _, err := CreateImageTask(context.Background(), in)
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", 7102).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
+	second, replayed, _, err := CreateImageTask(context.Background(), in)
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	assert.Equal(t, first.ID, second.ID)
 }
 
 func TestCreateImageTask_WalletInsufficientIs402(t *testing.T) {
@@ -225,4 +290,79 @@ func TestCreateImageTask_WalletInsufficientIs402(t *testing.T) {
 	require.NotNil(t, reqErr)
 	assert.Equal(t, 402, reqErr.StatusCode)
 	assert.Equal(t, dto.ImageTaskErrInsufficientQuota, reqErr.Code)
+}
+
+func TestCreateImageTask_SubscriptionOnlyDoesNotFallBackToWallet(t *testing.T) {
+	setupCreateTest(t)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"dall-e-3":0.04}`))
+	seedUser(t, 5003, 1000000)
+	var user model.User
+	require.NoError(t, model.DB.First(&user, 5003).Error)
+	setting := user.GetSetting()
+	setting.BillingPreference = "subscription_only"
+	user.SetSetting(setting)
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", 5003).Update("setting", user.Setting).Error)
+	seedTokenForImage(t, 6003, 5003, "sk-tok3", 1000000)
+	seedImageChannelForCreate(t, 7003, "default", "dall-e-3", `{"defaults":{"generation":"sync"}}`)
+
+	_, _, _, err := CreateImageTask(context.Background(), ImageTaskCreateInput{
+		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
+		OwnerUserID: 5003, CreationTokenID: 6003, IdempotencyKey: "subscription-only",
+		UsingGroup: "default", UserBaseGroup: "default",
+	})
+	reqErr := dto.AsImageTaskRequestError(err)
+	require.NotNil(t, reqErr)
+	assert.Equal(t, 402, reqErr.StatusCode)
+	var after model.User
+	require.NoError(t, model.DB.First(&after, 5003).Error)
+	assert.Equal(t, 1000000, after.Quota)
+}
+
+func TestCreateImageTask_TokenInsufficientRollsBackAggregate(t *testing.T) {
+	setupCreateTest(t)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"dall-e-3":0.04}`))
+	seedUser(t, 5004, 1000000)
+	seedTokenForImage(t, 6004, 5004, "sk-low", 1)
+	seedImageChannelForCreate(t, 7004, "default", "dall-e-3", `{"defaults":{"generation":"sync"}}`)
+	_, _, _, err := CreateImageTask(context.Background(), ImageTaskCreateInput{
+		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
+		OwnerUserID: 5004, CreationTokenID: 6004, IdempotencyKey: "token-low",
+		UsingGroup: "default", UserBaseGroup: "default",
+	})
+	reqErr := dto.AsImageTaskRequestError(err)
+	require.NotNil(t, reqErr)
+	assert.Equal(t, 401, reqErr.StatusCode)
+	var taskCount, ledgerCount int64
+	require.NoError(t, model.DB.Model(&model.Task{}).Where("user_id = ?", 5004).Count(&taskCount).Error)
+	require.NoError(t, model.DB.Model(&model.TaskBillingLedger{}).Count(&ledgerCount).Error)
+	assert.Zero(t, taskCount)
+	assert.Zero(t, ledgerCount)
+	var after model.User
+	require.NoError(t, model.DB.First(&after, 5004).Error)
+	assert.Equal(t, 1000000, after.Quota)
+}
+
+func TestCreateImageTask_InFlightCapRejectsWithoutBilling(t *testing.T) {
+	setupCreateTest(t)
+	constant.MaxImageTasksPerUser = 1
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"dall-e-3":0.04}`))
+	seedUser(t, 5005, 1000000)
+	seedTokenForImage(t, 6005, 5005, "sk-cap", 1000000)
+	seedImageChannelForCreate(t, 7005, "default", "dall-e-3", `{"defaults":{"generation":"sync"}}`)
+	require.NoError(t, model.DB.Create(&model.ImageTaskExecution{
+		PublicTaskID: "imgtask_existing", TaskDBID: 99999, OwnerUserID: 5005,
+		Operation: model.ImageTaskOperationGeneration, IdempotencyKey: "existing", RequestHash: "h",
+		State: model.ImageTaskStateQueued,
+	}).Error)
+	_, _, _, err := CreateImageTask(context.Background(), ImageTaskCreateInput{
+		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
+		OwnerUserID: 5005, CreationTokenID: 6005, IdempotencyKey: "cap-new",
+		UsingGroup: "default", UserBaseGroup: "default",
+	})
+	reqErr := dto.AsImageTaskRequestError(err)
+	require.NotNil(t, reqErr)
+	assert.Equal(t, 429, reqErr.StatusCode)
+	var after model.User
+	require.NoError(t, model.DB.First(&after, 5005).Error)
+	assert.Equal(t, 1000000, after.Quota)
 }

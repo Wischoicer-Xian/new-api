@@ -40,12 +40,12 @@ func planFunding(
 	pref := common.NormalizeBillingPreference(fence.GetSetting().BillingPreference)
 
 	// Helper: try wallet (check quota, don't deduct).
-	walletOK := func() bool {
+	walletOK := func() (bool, error) {
 		var u User
 		if e := tx.Select("quota").First(&u, cmd.OwnerUserID).Error; e != nil {
-			return false
+			return false, fmt.Errorf("%w: wallet lookup: %v", ErrImageTaskBillingData, e)
 		}
-		return u.Quota > 0 && u.Quota-W >= 0
+		return u.Quota > 0 && u.Quota-W >= 0, nil
 	}
 
 	// Helper: lock + plan subscriptions (don't deduct).
@@ -83,7 +83,11 @@ func planFunding(
 
 	switch pref {
 	case "wallet_only":
-		if !walletOK() {
+		ok, e := walletOK()
+		if e != nil {
+			return "", 0, 0, nil, e
+		}
+		if !ok {
 			return "", 0, 0, nil, ErrImageTaskWalletInsufficient
 		}
 		return FundingSourceWallet, 0, W, nil, nil
@@ -102,7 +106,11 @@ func planFunding(
 		return FundingSourceSubscription, sub.Id, S, sub, nil
 
 	case "wallet_first":
-		if walletOK() {
+		ok, e := walletOK()
+		if e != nil {
+			return "", 0, 0, nil, e
+		}
+		if ok {
 			return FundingSourceWallet, 0, W, nil, nil
 		}
 		// Wallet insufficient → try subscription.
@@ -139,7 +147,11 @@ func planFunding(
 		// All allow → wallet fallback.
 	}
 	// Wallet fallback (reached from subscription_first no-active or allow-overflow).
-	if !walletOK() {
+	ok, e := walletOK()
+	if e != nil {
+		return "", 0, 0, nil, e
+	}
+	if !ok {
 		return "", 0, 0, nil, ErrImageTaskWalletInsufficient
 	}
 	return FundingSourceWallet, 0, W, nil, nil

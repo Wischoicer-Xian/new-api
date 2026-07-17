@@ -254,13 +254,26 @@ func reserveRaw(owner int, key string, price *ImageTaskPriceResolution) (ImageTa
 }
 
 func reserveRawWithPref(owner int, key string, price *ImageTaskPriceResolution, pref string) (ImageTaskReserveOutcome, error) {
+	channelID := owner + 100000
+	channel := Channel{Id: channelID, Type: constant.ChannelTypeOpenAI, Status: 1, Name: "integration-image"}
+	if err := DB.FirstOrCreate(&channel, channelID).Error; err != nil {
+		return ImageTaskReserveOutcome{}, err
+	}
+	revision := ChannelRevision{ChannelID: channelID, RevisionNumber: 1, AdapterVersion: "integration/v1", Settings: []byte(`{"schema_version":1,"execution_config":"{\\"defaults\\":{\\"generation\\":\\"sync\\"}}"}`)}
+	if err := DB.FirstOrCreate(&revision, ChannelRevision{ChannelID: channelID, RevisionNumber: 1}).Error; err != nil {
+		return ImageTaskReserveOutcome{}, err
+	}
 	cmd := ImageTaskReserveCommand{
-		OwnerUserID:    owner,
-		Operation:      ImageTaskOperationGeneration,
-		IdempotencyKey: key,
-		RequestHash:    "h-" + key,
-		Price:          price,
-		Now:            1_700_000_000,
+		OwnerUserID:       owner,
+		Operation:         ImageTaskOperationGeneration,
+		IdempotencyKey:    key,
+		RequestHash:       "h-" + key,
+		Price:             price,
+		Now:               1_700_000_000,
+		ChannelRevisionID: revision.ID,
+		ExecutionMode:     "sync",
+		AdapterVersion:    "integration/v1",
+		RequestData:       []byte(`{"model":"img-v1","prompt":"integration"}`),
 	}
 	_ = pref // preference is read from locked user setting, not command (§5.5)
 	return ReserveImageTask(nil, cmd)

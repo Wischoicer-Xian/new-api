@@ -8,11 +8,13 @@ import (
 )
 
 // ImageTaskCreateAllowed reports whether the public single-image task create
-// routes may create tasks. It reads the §14.1 create-allowlist placeholder,
-// which defaults off (fail-closed: no task is created) until P3-I wires the
-// real principal/channel/model allowlist.
+// routes may create tasks. Creation stays fail-closed until P3-I wires both the
+// processor and the real principal/channel/model allowlist.
 func ImageTaskCreateAllowed() bool {
-	return constant.ImageTaskCreateEnabled
+	// The processor and principal/channel/model allowlist are not implemented
+	// yet. A process-wide environment switch is not an authorization boundary,
+	// so creation remains unconditionally fail-closed until P3-I lands both.
+	return false
 }
 
 // ImageTaskInFlightStatus is a READ-ONLY snapshot of a user's in-flight image
