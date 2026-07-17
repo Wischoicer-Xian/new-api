@@ -139,7 +139,9 @@ func setupWischoicerIntegrationDB(t *testing.T) {
 		&Task{},
 		// Token, UserSubscription, SubscriptionPlan back the §5.5/§5.6
 		// image-task billing aggregate funding matrix: token deduction + funding
-		// source choice requires these tables on every database.
+		// source choice requires these tables on every database. The default
+		// subscription_first path queries user_subscriptions, so the integration
+		// DB must migrate these for the concurrency matrix.
 		&Token{},
 		&UserSubscription{},
 		&SubscriptionPlan{},
