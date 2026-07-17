@@ -119,6 +119,16 @@ const (
 	ImageTaskErrIdempotencyConflict  ImageTaskErrorCode = "IDEMPOTENCY_CONFLICT"
 	ImageTaskErrTooManyRequests      ImageTaskErrorCode = "TOO_MANY_REQUESTS"
 	ImageTaskErrNotFound             ImageTaskErrorCode = "NOT_FOUND"
+	// ImageTaskErrInsufficientQuota covers every funding refusal surfaced at
+	// reserve time (wallet, subscription, no active subscription): §6.1 folds
+	// them onto one 402 so the client retry path is uniform.
+	ImageTaskErrInsufficientQuota ImageTaskErrorCode = "INSUFFICIENT_QUOTA"
+	ImageTaskErrUnauthorized      ImageTaskErrorCode = "UNAUTHORIZED"
+	ImageTaskErrInternal          ImageTaskErrorCode = "INTERNAL_ERROR"
+	// ImageTaskErrServiceUnavailable is the fail-closed status when no
+	// image-capable channel can serve the request or the cache safety guard
+	// rejects the reserve (§5.8.1).
+	ImageTaskErrServiceUnavailable ImageTaskErrorCode = "SERVICE_UNAVAILABLE"
 )
 
 // ImageTaskRequestError carries the public code and the HTTP status the handler

@@ -263,3 +263,61 @@ func FinalizeImageTaskExecutionCAS(db *gorm.DB, transition ImageTaskTerminalTran
 	}
 	return won, nil
 }
+
+// GetImageTaskExecutionByPublicTaskID loads an execution by its public
+// imgtask_* id, scoped to ownerUserID. A task owned by another user (or a
+// missing one) is reported as gorm.ErrRecordNotFound so the GET/cancel
+// handlers map it to 404 without leaking existence across accounts (§6.1:
+// GET/cancel follow new-api's existing user-level task ownership).
+func GetImageTaskExecutionByPublicTaskID(publicTaskID string, ownerUserID int) (*ImageTaskExecution, error) {
+	var exec ImageTaskExecution
+	err := DB.Where("public_task_id = ? AND owner_user_id = ?", publicTaskID, ownerUserID).First(&exec).Error
+	if err != nil {
+		return nil, err
+	}
+	return &exec, nil
+}
+
+// RequestImageTaskCancelCAS marks a non-terminal execution as cancel-requested.
+// It is the only state transition the public cancel handler performs; the
+// actual provider cancellation and terminal settle/refund are the processor's
+// job (§9.2 cancel_guard: once cancel_requested, submit/failover and
+// next-generation are forbidden; only poll/cancel/reconcile/settle proceed).
+//
+// A terminal execution (completed/failed/cancelled) or one already in
+// cancel_requested is an idempotent no-op: won is false and the current row is
+// returned so the handler can report the present state. manual_review remains
+// cancellable (§6.1: the state is non-terminal and "裁决前允许取消"), so only
+// the terminal set blocks the transition.
+//
+// The row is locked before the state check so concurrent cancel requests and a
+// processor transition serialize on the same fence.
+func RequestImageTaskCancelCAS(publicTaskID string, ownerUserID int, now int64) (won bool, exec *ImageTaskExecution, err error) {
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var current ImageTaskExecution
+		if err := lockForUpdate(tx).Where("public_task_id = ? AND owner_user_id = ?", publicTaskID, ownerUserID).First(&current).Error; err != nil {
+			return err
+		}
+		if IsTerminalImageTaskState(current.State) || current.State == ImageTaskStateCancelRequested {
+			exec = &current
+			return nil
+		}
+		result := tx.Model(&ImageTaskExecution{}).
+			Where("id = ? AND state NOT IN ?", current.ID, terminalImageTaskStateStrings).
+			Updates(map[string]any{
+				"state":               string(ImageTaskStateCancelRequested),
+				"cancel_requested_at": now,
+				"updated_at":          now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		won = result.RowsAffected == 1
+		current.State = ImageTaskStateCancelRequested
+		current.CancelRequestedAt = now
+		current.UpdatedAt = now
+		exec = &current
+		return nil
+	})
+	return won, exec, err
+}
