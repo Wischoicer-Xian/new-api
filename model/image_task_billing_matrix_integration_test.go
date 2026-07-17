@@ -244,7 +244,7 @@ func TestFundMatrix_RealDB(t *testing.T) {
 
 func mustPrice(t *testing.T, mode, source string, mp, mr, gr float64, freePrec bool) *ImageTaskPriceResolution {
 	t.Helper()
-	v, err := NewImageTaskPriceResolution(mode, source, "img-v1", "img-v1", "default", mp, mr, gr, 500000, freePrec)
+	v, err := NewImageTaskPriceResolution(mode, source, "img-v1", "img-v1", "default", mp, mr, gr, 500000, freePrec, nil)
 	require.NoError(t, err)
 	return v
 }
