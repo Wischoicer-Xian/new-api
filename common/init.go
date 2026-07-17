@@ -169,6 +169,13 @@ func initConstantEnv() {
 	// §14.1 processor gate for the image task processor (P3). Independent of
 	// create so read + processor can drain in-flight tasks while create is off.
 	constant.ImageTaskProcessorEnabled = GetEnvOrDefaultBool("IMAGE_TASK_PROCESSOR_ENABLED", false)
+	// §14.1 accept/create => read && processor. new-api read (GET) is always on,
+	// so create requires processor (in-flight tasks must keep draining). An
+	// illegal combination fails fast at startup rather than silently accepting
+	// work the processor cannot advance.
+	if constant.ImageTaskCreateEnabled && !constant.ImageTaskProcessorEnabled {
+		log.Fatal("IMAGE_TASK_CREATE_ENABLED requires IMAGE_TASK_PROCESSOR_ENABLED (§14.1: accept/create => read && processor)")
+	}
 	// §6.1 per-user in-flight image task cap. Must be positive; 0/negative/
 	// non-numeric fail startup (fail-closed) so the mandatory cap is never
 	// silently disabled. Default is a dormant provisional value, not a closed

@@ -211,6 +211,7 @@ func SetRelayRouter(router *gin.Engine) {
 	imageTaskRouter.Use(middleware.TokenAuth())
 	{
 		imageTaskRouter.GET("/:task_id", controller.GetImageTask)
+		imageTaskRouter.GET("/:task_id/result", controller.GetImageTaskResult)
 		imageTaskRouter.POST("/:task_id/cancel", controller.CancelImageTask)
 		// Create routes (§6.1). Mounted behind the §14.1 create-allowlist gate;
 		// the service fails closed with 404 until the switch is on, so no traffic
