@@ -17,15 +17,15 @@ import (
 // GORM's type:bytes tag. The table is additive (P3); existing image task tables
 // are unchanged.
 type ImageTaskResultBlob struct {
-	ID          int64  `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
-	ExecutionID int64  `json:"execution_id" gorm:"uniqueIndex"`
+	ID           int64  `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
+	ExecutionID  int64  `json:"execution_id" gorm:"uniqueIndex"`
 	PublicTaskID string `json:"public_task_id" gorm:"type:varchar(64);index"`
-	MimeType    string `json:"mime_type" gorm:"type:varchar(100)"`
-	SizeBytes   int64  `json:"size_bytes"`
-	SHA256      string `json:"sha256" gorm:"type:varchar(64);index"`
-	Content     []byte `json:"-" gorm:"type:bytes"`
-	ExpiresAt   int64  `json:"expires_at" gorm:"index"`
-	CreatedAt   int64  `json:"created_at" gorm:"index"`
+	MimeType     string `json:"mime_type" gorm:"type:varchar(100)"`
+	SizeBytes    int64  `json:"size_bytes"`
+	SHA256       string `json:"sha256" gorm:"type:varchar(64);index"`
+	Content      []byte `json:"-" gorm:"type:bytes"`
+	ExpiresAt    int64  `json:"expires_at" gorm:"index"`
+	CreatedAt    int64  `json:"created_at" gorm:"index"`
 }
 
 // ErrImageTaskResultBlobConflict is returned when a blob already exists for an

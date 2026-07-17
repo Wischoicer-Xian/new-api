@@ -16,12 +16,12 @@ import (
 // manual_review routing); terminal steps go through FinalizeImageTask, which
 // owns the billing settle/refund in the same fenced transaction.
 type ImageTaskAdvance struct {
-	ID                int64
-	LeaseOwner        string
+	ID                 int64
+	LeaseOwner         string
 	ExpectedGeneration int
-	Now               int64
-	From              ImageTaskExecutionState
-	To                ImageTaskExecutionState
+	Now                int64
+	From               ImageTaskExecutionState
+	To                 ImageTaskExecutionState
 }
 
 // AdvanceImageTaskExecutionCAS performs a fenced non-terminal state transition

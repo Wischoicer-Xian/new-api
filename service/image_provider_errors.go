@@ -61,12 +61,12 @@ const (
 // Status/Stage/TaskID/UpstreamMessage carry the audit detail the processor
 // writes into the execution row's submission_state / manual_review_reason.
 type ImageProviderError struct {
-	Kind           ImageProviderErrorKind
-	Stage          ImageProviderStage
-	Status         int    // HTTP status; 0 when the failure is not HTTP-shaped.
-	TaskID         string // upstream task id, when the outcome still yielded one.
+	Kind            ImageProviderErrorKind
+	Stage           ImageProviderStage
+	Status          int    // HTTP status; 0 when the failure is not HTTP-shaped.
+	TaskID          string // upstream task id, when the outcome still yielded one.
 	UpstreamMessage string // provider error message or network error text.
-	Err            error  // wrapped cause; nil when the error is purely classified.
+	Err             error  // wrapped cause; nil when the error is purely classified.
 }
 
 func (e *ImageProviderError) Error() string {

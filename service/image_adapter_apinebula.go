@@ -15,10 +15,10 @@ import (
 // apinebulaSubmitResponse is the subset of the ApiNebula submit response the
 // adapter consumes. task_id is preferred; id is the fallback handle.
 type apinebulaSubmitResponse struct {
-	TaskID string                 `json:"task_id"`
-	ID     string                 `json:"id"`
-	Status string                 `json:"status"`
-	Error  *apinebulaErrorBody    `json:"error"`
+	TaskID string              `json:"task_id"`
+	ID     string              `json:"id"`
+	Status string              `json:"status"`
+	Error  *apinebulaErrorBody `json:"error"`
 }
 
 // apinebulaPollResponse is the subset of the GET ?detail=true response the

@@ -78,8 +78,8 @@ type ImageTaskAdapter interface {
 // was created against (§7.2): a revision created under apinebula-image-adapter/v1
 // is always served by the v1 implementation, never a future incompatible one.
 type imageAdapterImpl struct {
-	adapter  ImageTaskAdapter
-	version  string
+	adapter ImageTaskAdapter
+	version string
 }
 
 // imageAdapterImplRegistry is the closed set of adapter implementations, keyed
@@ -160,8 +160,8 @@ func BuildImageProviderRequest(operation ImageOperation, requestData []byte) (Im
 		return newProviderRequest(ImageOperationGeneration, req.Model, req.Prompt, req.Quality, nil), nil
 	case ImageOperationEdit:
 		var req struct {
-			Model   string `json:"model"`
-			Prompt  string `json:"prompt"`
+			Model   string  `json:"model"`
+			Prompt  string  `json:"prompt"`
 			Quality *string `json:"quality"`
 			Images  []struct {
 				ImageURL string `json:"image_url"`

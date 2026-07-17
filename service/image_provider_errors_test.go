@@ -11,12 +11,12 @@ import (
 
 func TestClassifySubmitHTTP(t *testing.T) {
 	tests := []struct {
-		name       string
-		status     int
-		hasTaskID  bool
-		upstream   string
-		wantKind   ImageProviderErrorKind
-		wantNil    bool
+		name      string
+		status    int
+		hasTaskID bool
+		upstream  string
+		wantKind  ImageProviderErrorKind
+		wantNil   bool
 	}{
 		{name: "2xx with task id accepted", status: 200, hasTaskID: true, wantNil: true},
 		{name: "201 accepted", status: 201, hasTaskID: true, wantNil: true},
