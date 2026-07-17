@@ -21,6 +21,7 @@ var (
 	ErrImageTaskNoActiveSubscription     = errors.New("no active subscription for image task reserve")
 	ErrImageTaskTokenInvalid             = errors.New("creation token is invalid, disabled, expired, or not owned by the user")
 	ErrImageTaskBillingData              = errors.New("billing data query or update error")
+	ErrImageTaskBillingRetryExhausted    = errors.New("image task billing aggregate retry exhausted")
 )
 
 // ImageTaskReserveCommand is the immutable command (§5.5). It contains ONLY
@@ -58,7 +59,8 @@ type ImageTaskReserveOutcome struct {
 // ImageTaskCacheEffect captures which Redis keys need invalidation after commit.
 type ImageTaskCacheEffect struct {
 	DeleteUserQuota bool   // delete user:<id> if wallet was deducted
-	DeleteTokenKey  string // delete token:<digest> if limited token was deducted
+	OwnerUserID     int    // user ID for user quota cache key
+	DeleteTokenKey  string // HMAC digest of token key for token cache deletion
 }
 
 // ReserveImageTask is the single aggregate entry point (§5.5). It executes the
@@ -73,6 +75,11 @@ func ReserveImageTask(ctx context.Context, cmd ImageTaskReserveCommand) (ImageTa
 		return ImageTaskReserveOutcome{}, err
 	}
 
+	// Step 0: fail-closed if Redis enabled but TTL invalid (§5.8.1).
+	if err := CheckCacheSafety(); err != nil {
+		return ImageTaskReserveOutcome{}, err
+	}
+
 	// Freeze now from command (do not call time.Now() inside the tx).
 	now := cmd.Now
 	if now == 0 {
@@ -82,169 +89,205 @@ func ReserveImageTask(ctx context.Context, cmd ImageTaskReserveCommand) (ImageTa
 	outcome := ImageTaskReserveOutcome{}
 	var cacheEffect ImageTaskCacheEffect
 
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		// Step 2: Lock owner user (first DB statement; MySQL/PG FOR UPDATE,
-		// SQLite serial writer). This is the snapshot-establishing fence.
-		var fence User
-		if err := lockForUpdate(tx).Select("id").First(&fence, cmd.OwnerUserID).Error; err != nil {
-			return fmt.Errorf("reserve image task: lock owner fence: %w", err)
+	const maxAttempts = 3
+	backoffs := []int64{0, 50, 100} // ms; first attempt no delay
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 && backoffs[attempt] > 0 {
+			time.Sleep(time.Duration(backoffs[attempt]) * time.Millisecond)
 		}
-
-		// Step 3: Idempotency current read under fence.
-		stored := &ImageTaskExecution{}
-		lookup := tx.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?",
-			cmd.OwnerUserID, cmd.Operation, cmd.IdempotencyKey).First(stored)
-		if lookup.Error == nil {
-			return resolveReplayOrConflict(tx, stored, cmd, &outcome)
-		}
-		if !errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("%w: idempotency lookup: %v", ErrImageTaskBillingData, lookup.Error)
-		}
-
-		// Step 4: In-flight cap (§6.1).
-		count, err := CountInFlightImageTasksByOwner(tx, cmd.OwnerUserID)
-		if err != nil {
-			return fmt.Errorf("%w: count in-flight: %v", ErrImageTaskBillingData, err)
-		}
-		if count >= int64(constant.MaxImageTasksPerUser) {
-			return ErrImageTaskInFlightCapReached
-		}
-
-		// Step 5: Token lock + validate (reserve=0 also executes).
-		tokenKey, tokenDigest, err := lockAndValidateToken(tx, cmd, now)
-		if err != nil {
-			return err
-		}
-
-		// Steps 6-7: Funding plan (no balance changes) + snapshot construction.
-		fundingSource, subscriptionID, appliedReserve, selectedSub, ferr :=
-			planFunding(tx, cmd, fence, now)
-		if ferr != nil {
-			return ferr
-		}
-
-		// Build snapshot from price + resolved funding (§5.3).
-		attribution, err := parseAttribution(cmd.Attribution)
-		if err != nil {
-			return err
-		}
-		snapshot, err := buildSnapshotFromPriceAndFunding(
-			cmd.Price, cmd.OwnerUserID, cmd.CreationTokenID, cmd.Operation,
-			cmd.ChannelRevisionID, tokenDigest, attribution,
-			cmd.RequestID, cmd.UpstreamRequestID,
-			fundingSource, subscriptionID, appliedReserve,
-		)
-		if err != nil {
-			return err
-		}
-		snapshotJSON, err := snapshot.Marshal()
-		if err != nil {
-			return fmt.Errorf("reserve image task: snapshot marshal: %w", err)
-		}
-
-		// Step 8: Create Task + execution + reserve ledger.
-		task := &Task{
-			TaskID:     GenerateTaskID(),
-			UserId:     cmd.OwnerUserID,
-			Group:      cmd.Price.ResolvedGroup(),
-			Platform:   constant.TaskPlatformWischoicerImage,
-			Action:     cmd.Operation,
-			Status:     TaskStatusNotStart,
-			Progress:   "0%",
-			SubmitTime: now,
-			Quota:      cmd.Price.FormulaReserveQuota(),
-		}
-		if err := tx.Create(task).Error; err != nil {
-			return fmt.Errorf("%w: create task: %v", ErrImageTaskBillingData, err)
-		}
-
-		exec := &ImageTaskExecution{
-			PublicTaskID:      GenerateImageTaskPublicID(),
-			TaskDBID:          task.ID,
-			OwnerUserID:       cmd.OwnerUserID,
-			CreationTokenID:   cmd.CreationTokenID,
-			Operation:         cmd.Operation,
-			IdempotencyKey:    cmd.IdempotencyKey,
-			RequestHash:       cmd.RequestHash,
-			State:             ImageTaskStateQueued,
-			ChannelRevisionID: cmd.ChannelRevisionID,
-			ExecutionMode:     cmd.ExecutionMode,
-			AdapterVersion:    cmd.AdapterVersion,
-			CreatedAt:         now,
-			UpdatedAt:         now,
-		}
-		if err := tx.Create(exec).Error; err != nil {
-			// Duplicate-key: unique loser. Return billing-data error; caller
-			// re-reads the winner outside the tx for replay/conflict.
-			return fmt.Errorf("%w: duplicate idempotency key: %v", ErrImageTaskBillingData, err)
-		}
-
-		// Step 9: Reserve ledger via ApplyBillingStageTx (§5.4 single CAS).
-		_, ledger, rErr := RecordBillingStage(tx, TaskBillingStageIntent{
-			TaskDBID:    task.ID,
-			Stage:       TaskBillingReserve,
-			Snapshot:    snapshotJSON,
-			QuotaAmount: appliedReserve,
-		})
-		if rErr != nil {
-			return fmt.Errorf("%w: record reserve stage: %v", ErrImageTaskBillingData, rErr)
-		}
-
-		_, aErr := ApplyBillingStageTx(tx, ledger.ID, func(t *gorm.DB, _ *TaskBillingLedger) error {
-			// §5.5 step 9 sub-steps:
-			if fundingSource == FundingSourceFree {
-				return nil // free: no fund/token deduction, amount=0 ledger
+		lastErr = DB.Transaction(func(tx *gorm.DB) error {
+			// Step 2: Lock owner user (first DB statement; MySQL/PG FOR UPDATE,
+			// SQLite serial writer). This is the snapshot-establishing fence.
+			var fence User
+			if err := lockForUpdate(tx).Select("id").First(&fence, cmd.OwnerUserID).Error; err != nil {
+				return fmt.Errorf("reserve image task: lock owner fence: %w", err)
 			}
-			// Token deduction (limited only; unlimited frozen in step 5).
-			if cmd.CreationTokenID != 0 && tokenKey != "" {
-				if err := deductLimitedTokenInTx(t, cmd.CreationTokenID, cmd.OwnerUserID, appliedReserve, now); err != nil {
-					return err
+
+			// Step 3: Idempotency current read under fence.
+			stored := &ImageTaskExecution{}
+			lookup := tx.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?",
+				cmd.OwnerUserID, cmd.Operation, cmd.IdempotencyKey).First(stored)
+			if lookup.Error == nil {
+				return resolveReplayOrConflict(tx, stored, cmd, &outcome)
+			}
+			if !errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: idempotency lookup: %v", ErrImageTaskBillingData, lookup.Error)
+			}
+
+			// Step 4: In-flight cap (§6.1).
+			count, err := CountInFlightImageTasksByOwner(tx, cmd.OwnerUserID)
+			if err != nil {
+				return fmt.Errorf("%w: count in-flight: %v", ErrImageTaskBillingData, err)
+			}
+			if count >= int64(constant.MaxImageTasksPerUser) {
+				return ErrImageTaskInFlightCapReached
+			}
+
+			// Step 5: Token lock + validate (reserve=0 also executes).
+			tokenKey, tokenDigest, err := lockAndValidateToken(tx, cmd, now)
+			if err != nil {
+				return err
+			}
+
+			// Steps 6-7: Funding plan (no balance changes) + snapshot construction.
+			fundingSource, subscriptionID, appliedReserve, selectedSub, ferr :=
+				planFunding(tx, cmd, fence, now)
+			if ferr != nil {
+				return ferr
+			}
+
+			// Build snapshot from price + resolved funding (§5.3).
+			attribution, err := parseAttribution(cmd.Attribution)
+			if err != nil {
+				return err
+			}
+			snapshot, err := buildSnapshotFromPriceAndFunding(
+				cmd.Price, cmd.OwnerUserID, cmd.CreationTokenID, cmd.Operation,
+				cmd.ChannelRevisionID, tokenDigest, attribution,
+				cmd.RequestID, cmd.UpstreamRequestID,
+				fundingSource, subscriptionID, appliedReserve,
+			)
+			if err != nil {
+				return err
+			}
+			snapshotJSON, err := snapshot.Marshal()
+			if err != nil {
+				return fmt.Errorf("reserve image task: snapshot marshal: %w", err)
+			}
+
+			// Step 8: Create Task + execution + reserve ledger.
+			task := &Task{
+				TaskID:     GenerateTaskID(),
+				UserId:     cmd.OwnerUserID,
+				Group:      cmd.Price.ResolvedGroup(),
+				Platform:   constant.TaskPlatformWischoicerImage,
+				Action:     cmd.Operation,
+				Status:     TaskStatusNotStart,
+				Progress:   "0%",
+				SubmitTime: now,
+				Quota:      cmd.Price.FormulaReserveQuota(),
+			}
+			if err := tx.Create(task).Error; err != nil {
+				return fmt.Errorf("%w: create task: %v", ErrImageTaskBillingData, err)
+			}
+
+			exec := &ImageTaskExecution{
+				PublicTaskID:      GenerateImageTaskPublicID(),
+				TaskDBID:          task.ID,
+				OwnerUserID:       cmd.OwnerUserID,
+				CreationTokenID:   cmd.CreationTokenID,
+				Operation:         cmd.Operation,
+				IdempotencyKey:    cmd.IdempotencyKey,
+				RequestHash:       cmd.RequestHash,
+				State:             ImageTaskStateQueued,
+				ChannelRevisionID: cmd.ChannelRevisionID,
+				ExecutionMode:     cmd.ExecutionMode,
+				AdapterVersion:    cmd.AdapterVersion,
+				CreatedAt:         now,
+				UpdatedAt:         now,
+			}
+			if err := tx.Create(exec).Error; err != nil {
+				// Duplicate-key: unique loser. Return billing-data error; caller
+				// re-reads the winner outside the tx for replay/conflict.
+				return fmt.Errorf("%w: duplicate idempotency key: %v", ErrImageTaskBillingData, err)
+			}
+
+			// Step 9: Reserve ledger via ApplyBillingStageTx (§5.4 single CAS).
+			_, ledger, rErr := RecordBillingStage(tx, TaskBillingStageIntent{
+				TaskDBID:    task.ID,
+				Stage:       TaskBillingReserve,
+				Snapshot:    snapshotJSON,
+				QuotaAmount: appliedReserve,
+			})
+			if rErr != nil {
+				return fmt.Errorf("%w: record reserve stage: %v", ErrImageTaskBillingData, rErr)
+			}
+
+			_, aErr := ApplyBillingStageTx(tx, ledger.ID, func(t *gorm.DB, _ *TaskBillingLedger) error {
+				// §5.5 step 9 sub-steps:
+				if fundingSource == FundingSourceFree {
+					return nil // free: no fund/token deduction, amount=0 ledger
 				}
+				// Token deduction (limited only; unlimited frozen in step 5).
+				if cmd.CreationTokenID != 0 && tokenKey != "" {
+					if err := deductLimitedTokenInTx(t, cmd.CreationTokenID, cmd.OwnerUserID, appliedReserve, now); err != nil {
+						return err
+					}
+				}
+				// Funding deduction.
+				switch fundingSource {
+				case FundingSourceWallet:
+					return deductWalletInAggregateTx(t, cmd.OwnerUserID, appliedReserve)
+				case FundingSourceSubscription:
+					return deductSubscriptionInAggregateTx(t, selectedSub, appliedReserve)
+				}
+				return nil
+			})
+			if aErr != nil {
+				return aErr
 			}
-			// Funding deduction.
-			switch fundingSource {
-			case FundingSourceWallet:
-				return deductWalletInAggregateTx(t, cmd.OwnerUserID, appliedReserve)
-			case FundingSourceSubscription:
-				return deductSubscriptionInAggregateTx(t, selectedSub, appliedReserve)
+
+			// Set Task.PrivateData compatibility projection (§5.3: derived, not truth).
+			task.PrivateData = TaskPrivateData{
+				BillingSource:  fundingSource,
+				TokenId:        cmd.CreationTokenID,
+				SubscriptionId: subscriptionID,
 			}
+			if err := tx.Model(task).Where("id = ?", task.ID).Update("private_data", task.PrivateData).Error; err != nil {
+				return fmt.Errorf("%w: update task projection: %v", ErrImageTaskBillingData, err)
+			}
+
+			outcome.Task = task
+			outcome.Execution = exec
+			outcome.FundingSource = fundingSource
+			outcome.AppliedReserveQuota = appliedReserve
+			outcome.SubscriptionID = subscriptionID
+
+			// Step 11 (cache effect, captured for post-commit).
+			if fundingSource == FundingSourceWallet && appliedReserve > 0 {
+				cacheEffect.DeleteUserQuota = true
+				cacheEffect.OwnerUserID = cmd.OwnerUserID
+			}
+			// Token HMAC digest for cache delete (lockAndValidateToken returns digest).
+			cacheEffect.DeleteTokenKey = tokenDigest
+
 			return nil
 		})
-		if aErr != nil {
-			return aErr
+		if lastErr == nil {
+			break // success
 		}
-
-		// Set Task.PrivateData compatibility projection (§5.3: derived, not truth).
-		task.PrivateData = TaskPrivateData{
-			BillingSource:  fundingSource,
-			TokenId:        cmd.CreationTokenID,
-			SubscriptionId: subscriptionID,
+		// Duplicate-key: unique loser — aggregate re-reads winner for replay/conflict.
+		if errors.Is(lastErr, ErrImageTaskBillingData) {
+			stored := &ImageTaskExecution{}
+			if e := DB.Where("owner_user_id = ? AND operation = ? AND idempotency_key = ?",
+				cmd.OwnerUserID, cmd.Operation, cmd.IdempotencyKey).First(stored).Error; e == nil {
+				outcome.Task = &Task{}
+				if e := DB.First(outcome.Task, stored.TaskDBID).Error; e == nil {
+					outcome.Execution = stored
+					outcome.Replayed = true
+					lastErr = nil
+					break
+				}
+			}
+			// Winner not found despite duplicate-key error: continue retry.
 		}
-		if err := tx.Model(task).Where("id = ?", task.ID).Update("private_data", task.PrivateData).Error; err != nil {
-			return fmt.Errorf("%w: update task projection: %v", ErrImageTaskBillingData, err)
+		// Business errors (typed sentinels) do NOT retry.
+		if isBusinessError(lastErr) {
+			break
 		}
-
-		outcome.Task = task
-		outcome.Execution = exec
-		outcome.FundingSource = fundingSource
-		outcome.AppliedReserveQuota = appliedReserve
-		outcome.SubscriptionID = subscriptionID
-
-		// Step 11 (cache effect, captured for post-commit).
-		if fundingSource == FundingSourceWallet && appliedReserve > 0 {
-			cacheEffect.DeleteUserQuota = true
+	}
+	if lastErr != nil {
+		if errors.Is(lastErr, ErrImageTaskBillingData) {
+			return ImageTaskReserveOutcome{}, ErrImageTaskBillingRetryExhausted
 		}
-		cacheEffect.DeleteTokenKey = tokenKey
-
-		return nil
-	})
-
-	if err != nil {
-		return ImageTaskReserveOutcome{}, err
+		return ImageTaskReserveOutcome{}, lastErr
 	}
 
-	// Post-commit: if duplicate-key was the error, re-read winner for replay.
-	// (Handled by caller checking ErrImageTaskBillingData + re-reading.)
+	// Post-commit cache delete (§5.8): only for Created (non-replay).
+	if outcome.Task != nil && !outcome.Replayed {
+		ApplyCacheEffect(cacheEffect, nil)
+	}
 	outcome.CacheEffect = cacheEffect
 	return outcome, nil
 }
@@ -253,6 +296,23 @@ func ReserveImageTask(ctx context.Context, cmd ImageTaskReserveCommand) (ImageTa
 func GenerateImageTaskPublicID() string {
 	key, _ := common.GenerateRandomCharsKey(24)
 	return "imgtask_" + key
+}
+
+// isBusinessError reports whether err is one of the typed billing sentinels
+// that must NOT be retried (§5.5 step 10: "业务错误不重试").
+func isBusinessError(err error) bool {
+	switch {
+	case errors.Is(err, ErrImageTaskIdempotencyConflict),
+		errors.Is(err, ErrImageTaskInFlightCapReached),
+		errors.Is(err, ErrImageTaskWalletInsufficient),
+		errors.Is(err, ErrImageTaskSubscriptionInsufficient),
+		errors.Is(err, ErrImageTaskNoActiveSubscription),
+		errors.Is(err, ErrImageTaskTokenInvalid),
+		errors.Is(err, ErrUnsupportedImageTaskPricingFacts),
+		errors.Is(err, ErrImageTaskCacheSafetyMisconfigured):
+		return true
+	}
+	return false
 }
 
 func validateReserveCommand(cmd ImageTaskReserveCommand) error {

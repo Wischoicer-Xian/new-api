@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -50,14 +51,16 @@ func ApplyCacheEffect(effect ImageTaskCacheEffect, deleter ImageTaskBillingCache
 	if deleter == nil {
 		deleter = &prodImageTaskCacheDeleter{}
 	}
-	if effect.DeleteUserQuota {
-		if err := deleter.DeleteUserQuotaKey(0); err != nil { // userID passed via caller
-			common.SysError(fmt.Sprintf("image task cache: user quota delete failed: %v", err))
+	if effect.DeleteUserQuota && effect.OwnerUserID > 0 {
+		if err := deleter.DeleteUserQuotaKey(effect.OwnerUserID); err != nil {
+			common.SysError(fmt.Sprintf("image task cache: user quota delete failed (user=%d): %v", effect.OwnerUserID, err))
 		}
 	}
-	// Token delete uses the raw key (not digest) — the effect carries the token
-	// key from lockAndValidateToken. The deleter deletes by digest for the
-	// reconciler path; immediate path uses the raw key.
+	if effect.DeleteTokenKey != "" {
+		if err := deleter.DeleteTokenDigestKey(effect.DeleteTokenKey); err != nil {
+			common.SysError(fmt.Sprintf("image task cache: token digest delete failed: %v", err))
+		}
+	}
 }
 
 // CheckCacheSafety verifies Redis configuration before accepting a reserve
@@ -94,15 +97,16 @@ func ReconcileImageTaskBillingCache(ctx context.Context, deleter ImageTaskBillin
 	if ttl <= 0 {
 		return 0, 0, ErrImageTaskCacheSafetyMisconfigured
 	}
-	_ = int64(ttl) + 35 // horizon: RedisKeyCacheSeconds + 35s; used by caller for cutoff filter
+	horizon := int64(ttl) + 35
 
-	// Scan applied reserve ledger rows with billing_snapshot within the horizon.
+	// Scan applied reserve ledger rows within the horizon window.
 	// Paginate by id > cursor, LIMIT 200, until exhausted.
+	cutoff := time.Now().Unix() - horizon
 	var cursor int64
 	for {
 		var ledgers []TaskBillingLedger
-		if e := DB.Where("state = ? AND stage = ? AND id > ?",
-			BillingStateApplied, TaskBillingReserve, cursor).
+		if e := DB.Where("state = ? AND stage = ? AND id > ? AND updated_at >= ?",
+			BillingStateApplied, TaskBillingReserve, cursor, cutoff).
 			Order("id").
 			Limit(200).
 			Find(&ledgers).Error; e != nil {
@@ -113,11 +117,17 @@ func ReconcileImageTaskBillingCache(ctx context.Context, deleter ImageTaskBillin
 		}
 		for _, l := range ledgers {
 			cursor = l.ID
-			// Decode snapshot to get token digest + owner.
+			// Decode snapshot to get token digest + owner + funding source.
 			var snap ImageTaskBillingSnapshotV1
 			if e := common.Unmarshal(l.BillingSnapshot, &snap); e != nil {
 				failed++
 				common.SysError(fmt.Sprintf("image task cache reconcile: decode snapshot for ledger %d: %v", l.ID, e))
+				continue
+			}
+			// Strict validation after decode (P1-4).
+			if e := snap.Validate(); e != nil {
+				failed++
+				common.SysError(fmt.Sprintf("image task cache reconcile: validate snapshot for ledger %d: %v", l.ID, e))
 				continue
 			}
 			// Re-delete user quota key (wallet source only).
