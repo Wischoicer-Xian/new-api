@@ -26,3 +26,21 @@ func ParseMaxImageTasksPerUser(raw string) (int, error) {
 	}
 	return cap, nil
 }
+
+// ParseMaxImageTasksInFlightPerUser validates the
+// MAX_IMAGE_TASKS_IN_FLIGHT_PER_USER env value. Empty returns the dormant
+// default. A non-empty value must be a positive integer; 0/negative/non-numeric
+// fail startup so the §7.5 fairness cap is never silently disabled.
+func ParseMaxImageTasksInFlightPerUser(raw string) (int, error) {
+	if raw == "" {
+		return constant.DefaultMaxImageTasksInFlightPerUser, nil
+	}
+	cap, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("MAX_IMAGE_TASKS_IN_FLIGHT_PER_USER=%q is not an integer", raw)
+	}
+	if cap <= 0 {
+		return 0, fmt.Errorf("MAX_IMAGE_TASKS_IN_FLIGHT_PER_USER must be a positive integer, got %d", cap)
+	}
+	return cap, nil
+}

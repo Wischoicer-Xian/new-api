@@ -313,6 +313,7 @@ func migrateDB() error {
 		&ImageTaskExecution{},
 		&TaskBillingLedger{},
 		&ChannelRevision{},
+		&ImageTaskResultBlob{},
 	)
 	if err != nil {
 		return err

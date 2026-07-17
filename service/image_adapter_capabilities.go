@@ -59,6 +59,21 @@ var imageAdapterRegistry = map[int]imageAdapterEntry{
 		},
 		version: "openai-image-adapter/v1",
 	},
+	// ApiNebula async image-task adapter: generation and edit are both
+	// async_task (submit returns a task id; the processor polls for completion).
+	constant.APITypeApiNebula: {
+		caps: staticImageAdapterCaps{
+			support: map[ImageOperation][]ImageExecutionMode{
+				ImageOperationGeneration: {ImageExecutionAsyncTask},
+				ImageOperationEdit:       {ImageExecutionAsyncTask},
+			},
+			defaults: map[ImageOperation]ImageExecutionMode{
+				ImageOperationGeneration: ImageExecutionAsyncTask,
+				ImageOperationEdit:       ImageExecutionAsyncTask,
+			},
+		},
+		version: "apinebula-image-adapter/v1",
+	},
 }
 
 // ImageAdapterCapabilities resolves the image task execution boundary for a

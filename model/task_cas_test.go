@@ -59,6 +59,7 @@ func TestMain(m *testing.M) {
 		&ImageTaskExecution{},
 		&TaskBillingLedger{},
 		&ChannelRevision{},
+		&ImageTaskResultBlob{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}

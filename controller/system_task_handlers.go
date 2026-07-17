@@ -22,6 +22,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(imageTaskProcessorHandler{})
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -149,6 +150,29 @@ func (asyncTaskPollHandler) NewPayload() any { return nil }
 
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// imageTaskProcessorHandler runs one Wischoicer image-task processor due-work
+// pass per scheduled run (§7.5). It is the image-task subsystem's own driver,
+// distinct from the legacy async_task_poll handler so image tasks never share a
+// lease or a queue with Suno/video. Enabled() folds in both the processor gate
+// (constant.ImageTaskProcessorEnabled) and the existence of due work, so an idle
+// or gated-off system schedules no rows.
+type imageTaskProcessorHandler struct{}
+
+func (imageTaskProcessorHandler) Type() string { return model.SystemTaskTypeImageTaskProcessor }
+
+func (imageTaskProcessorHandler) Enabled() bool {
+	return constant.ImageTaskProcessorEnabled && model.HasDueImageTaskExecutions()
+}
+
+func (imageTaskProcessorHandler) Interval() time.Duration { return 15 * time.Second }
+
+func (imageTaskProcessorHandler) NewPayload() any { return nil }
+
+func (imageTaskProcessorHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary := service.RunImageTaskProcessorOnce(ctx)
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 

@@ -86,6 +86,24 @@ func TestRequestImageTaskCancelCAS_AlreadyCancelRequestedIsIdempotent(t *testing
 	assert.Equal(t, int64(1700000000), got.CancelRequestedAt)
 }
 
+func TestRequestImageTaskCancelCAS_SubmittingPreservesIntentState(t *testing.T) {
+	truncateImageTaskExecutions(t)
+	exec := newImageTaskExecution(9007, ImageTaskOperationGeneration, "q-submitting", "hash")
+	exec.State = ImageTaskStateSubmitting
+	require.NoError(t, DB.Create(exec).Error)
+
+	won, got, err := RequestImageTaskCancelCAS(exec.PublicTaskID, 9007, 1700000100)
+	require.NoError(t, err)
+	assert.True(t, won)
+	assert.Equal(t, ImageTaskStateSubmitting, got.State, "submit intent must remain recoverable until the provider outcome is recorded")
+	assert.Equal(t, int64(1700000100), got.CancelRequestedAt)
+
+	var reloaded ImageTaskExecution
+	require.NoError(t, DB.First(&reloaded, exec.ID).Error)
+	assert.Equal(t, ImageTaskStateSubmitting, reloaded.State)
+	assert.Equal(t, int64(1700000100), reloaded.CancelRequestedAt)
+}
+
 func TestRequestImageTaskCancelCAS_ManualReviewIsCancellable(t *testing.T) {
 	truncateImageTaskExecutions(t)
 	// manual_review is non-terminal and cancellable per §6.1 ("裁决前允许取消").

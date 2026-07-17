@@ -25,6 +25,14 @@ var TaskTimeoutMinutes int
 // principal/channel/model allowlist. P3-C reads it; P3-I replaces it.
 var ImageTaskCreateEnabled bool
 
+// ImageTaskProcessorEnabled is the independent §14.1 gate for the image task
+// processor (P3). It defaults off: the processor system task stays dormant and
+// the scheduler creates no image_task_processor rows until an operator turns it
+// on. This is separate from ImageTaskCreateEnabled so read + processor can drain
+// in-flight tasks while create stays closed (§14.1: accept/create => read &&
+// processor; in-flight tasks require read && processor to stay on).
+var ImageTaskProcessorEnabled bool
+
 // DefaultMaxImageTasksPerUser is the dormant, provisional per-user in-flight
 // image task cap (§6.1). The final throttle value is a product-owner decision
 // that 夏洛克/Krislliu close before any create route goes live; until then this

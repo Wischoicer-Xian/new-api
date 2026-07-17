@@ -320,7 +320,23 @@ func RequestImageTaskCancelCAS(publicTaskID string, ownerUserID int, now int64) 
 		if err := lockForUpdate(tx).Where("public_task_id = ? AND owner_user_id = ?", publicTaskID, ownerUserID).First(&current).Error; err != nil {
 			return err
 		}
-		if IsTerminalImageTaskState(current.State) || current.State == ImageTaskStateCancelRequested {
+		if IsTerminalImageTaskState(current.State) || current.State == ImageTaskStateCancelRequested || current.CancelRequestedAt != 0 {
+			exec = &current
+			return nil
+		}
+		if current.State == ImageTaskStateSubmitting {
+			result := tx.Model(&ImageTaskExecution{}).
+				Where("id = ? AND state = ? AND cancel_requested_at = 0", current.ID, current.State).
+				Updates(map[string]any{
+					"cancel_requested_at": now,
+					"updated_at":          now,
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			won = result.RowsAffected == 1
+			current.CancelRequestedAt = now
+			current.UpdatedAt = now
 			exec = &current
 			return nil
 		}

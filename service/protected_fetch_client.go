@@ -59,6 +59,25 @@ func newProtectedFetchHTTPClient() *http.Client {
 	return newProtectedFetchHTTPClientWithDialer(nil, nil, nil)
 }
 
+func currentStrictFetchProtection() (*common.SSRFProtection, bool, error) {
+	fetchSetting := system_setting.GetFetchSetting()
+	protection, err := common.NewSSRFProtectionFromFetchSetting(
+		false,
+		fetchSetting.DomainFilterMode,
+		fetchSetting.IpFilterMode,
+		fetchSetting.DomainList,
+		fetchSetting.IpList,
+		fetchSetting.AllowedPorts,
+		true,
+	)
+	return protection, true, err
+}
+
+func newStrictSSRFProtectedHTTPClient() *http.Client {
+	noProxy := func(*http.Request) (*url.URL, error) { return nil, nil }
+	return newProtectedFetchHTTPClientWithProxy(nil, nil, currentStrictFetchProtection, noProxy)
+}
+
 func newProtectedFetchHTTPClientWithDialer(resolver ssrfResolver, dialContext func(ctx context.Context, network, address string) (net.Conn, error), getProtection func() (*common.SSRFProtection, bool, error)) *http.Client {
 	return newProtectedFetchHTTPClientWithProxy(resolver, dialContext, getProtection, http.ProxyFromEnvironment)
 }

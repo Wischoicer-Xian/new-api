@@ -58,6 +58,7 @@ func TestMain(m *testing.M) {
 		&model.SystemTaskLock{},
 		&model.WischoicerRechargeCredit{},
 		&model.ImageTaskExecution{},
+		&model.ImageTaskResultBlob{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -86,6 +87,7 @@ func truncate(t *testing.T) {
 		model.DB.Where("1=1").Delete(&model.ImageTaskExecution{})
 		model.DB.Where("1=1").Delete(&model.TaskBillingLedger{})
 		model.DB.Where("1=1").Delete(&model.ChannelRevision{})
+		model.DB.Where("1=1").Delete(&model.ImageTaskResultBlob{})
 		model.DB.Where("1=1").Delete(&model.Ability{})
 	})
 }
