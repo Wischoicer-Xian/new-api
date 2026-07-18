@@ -237,9 +237,13 @@ func imageTaskResultBaseURL() (string, error) {
 	// P2 (WIS-572 review): ServerAddress is a public origin. Reject components
 	// that would leak credentials into the locator (userinfo) or push the fixed
 	// result path into the wrong route (query/fragment). A sub-path is allowed
-	// to support reverse-proxy deployments, assuming the proxy does NOT strip
-	// the prefix — the result path /v1/image-tasks/{id}/result is appended
-	// verbatim to (scheme+host+subpath).
+	// ONLY for reverse-proxy deployments whose proxy STRIPS the prefix: e.g.
+	// ServerAddress https://host/newapi yields content_url
+	// https://host/newapi/v1/image-tasks/{id}/result, which the proxy must
+	// rewrite to the app root /v1/image-tasks/{id}/result (strip /newapi) —
+	// without that strip the request 404s. Whether subpath deploy is permitted
+	// and the strip-prefix config are a Jirui Zhao provision decision; until
+	// decided, provision should use a path-less public https origin.
 	if u.User != nil {
 		return "", fmt.Errorf("image task result base URL must not carry userinfo: got %q", u.User.String())
 	}
