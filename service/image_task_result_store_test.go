@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -43,14 +44,26 @@ func useResultDownloader(t *testing.T, download ImageTaskResultDownload, downloa
 	t.Cleanup(func() { imageTaskResultDownloader = original })
 }
 
+// useImageTaskResultBaseURL pins system_setting.ServerAddress for one test and
+// restores it on cleanup. imageTaskResultContentURL reads ServerAddress as the
+// public base; tests must set it explicitly because the package default is an
+// http://localhost placeholder that the new https-only contract rejects.
+func useImageTaskResultBaseURL(t *testing.T, serverAddress string) {
+	t.Helper()
+	original := system_setting.ServerAddress
+	system_setting.ServerAddress = serverAddress
+	t.Cleanup(func() { system_setting.ServerAddress = original })
+}
+
 func TestPersistImageTaskResultDownloadsAndStores(t *testing.T) {
 	truncate(t)
 	exec := seedExecutionForResultStore(t)
 	useResultDownloader(t, ImageTaskResultDownload{Body: pngFixture, ContentType: "image/png"}, nil)
+	useImageTaskResultBaseURL(t, "https://newapi.example.com")
 
 	locator, err := PersistImageTaskResult(context.Background(), exec, "https://fixtures.example.com/img.png")
 	require.NoError(t, err)
-	assert.Equal(t, "/v1/image-tasks/imgtask_result_1/result", locator.ContentURL)
+	assert.Equal(t, "https://newapi.example.com/v1/image-tasks/imgtask_result_1/result", locator.ContentURL)
 	assert.Equal(t, "image/png", locator.MimeType)
 	assert.Equal(t, int64(len(pngFixture)), locator.SizeBytes)
 
@@ -67,6 +80,7 @@ func TestPersistImageTaskResultDownloadsAndStores(t *testing.T) {
 func TestPersistImageTaskResultIdempotent(t *testing.T) {
 	truncate(t)
 	exec := seedExecutionForResultStore(t)
+	useImageTaskResultBaseURL(t, "https://newapi.example.com")
 	calls := 0
 	original := imageTaskResultDownloader
 	imageTaskResultDownloader = func(context.Context, string) (ImageTaskResultDownload, error) {
@@ -88,6 +102,7 @@ func TestPersistImageTaskResultSniffedImageType(t *testing.T) {
 	exec := seedExecutionForResultStore(t)
 	// Generic Content-Type but sniffable as image → sniffed MIME wins.
 	useResultDownloader(t, ImageTaskResultDownload{Body: pngFixture, ContentType: "application/octet-stream"}, nil)
+	useImageTaskResultBaseURL(t, "https://newapi.example.com")
 
 	locator, err := PersistImageTaskResult(context.Background(), exec, "https://x")
 	require.NoError(t, err)
@@ -191,4 +206,82 @@ func TestGetImageTaskResultBlobMissing(t *testing.T) {
 	truncate(t)
 	_, err := model.GetImageTaskResultBlob(999999)
 	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+}
+
+// TestImageTaskResultContentURL covers the locator builder directly (no DB).
+// WIS-572: the locator must be an absolute https URL built on
+// system_setting.ServerAddress; a missing or non-https base must fail fast
+// rather than emitting a path-only/http locator (which CW ValidateLocator
+// rejects and was the original ingest break).
+func TestImageTaskResultContentURL(t *testing.T) {
+	cases := []struct {
+		name        string
+		serverAddr  string
+		publicTask  string
+		wantURL     string
+		wantErr     bool
+		errContains string
+	}{
+		{name: "https absolute", serverAddr: "https://newapi.example.com", publicTask: "imgtask_x", wantURL: "https://newapi.example.com/v1/image-tasks/imgtask_x/result"},
+		{name: "https trailing slash trimmed", serverAddr: "https://newapi.example.com/", publicTask: "imgtask_x", wantURL: "https://newapi.example.com/v1/image-tasks/imgtask_x/result"},
+		{name: "https with port", serverAddr: "https://newapi.example.com:8443", publicTask: "imgtask_x", wantURL: "https://newapi.example.com:8443/v1/image-tasks/imgtask_x/result"},
+		{name: "empty publicTaskID returns empty no error", serverAddr: "https://newapi.example.com", publicTask: "", wantURL: ""},
+		{name: "missing ServerAddress fails fast", serverAddr: "", publicTask: "imgtask_x", wantErr: true, errContains: "ServerAddress"},
+		{name: "whitespace-only ServerAddress fails fast", serverAddr: "   ", publicTask: "imgtask_x", wantErr: true, errContains: "ServerAddress"},
+		{name: "http ServerAddress fails fast (https locked)", serverAddr: "http://newapi.example.com", publicTask: "imgtask_x", wantErr: true, errContains: "https"},
+		{name: "schemeless ServerAddress fails fast", serverAddr: "newapi.example.com", publicTask: "imgtask_x", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useImageTaskResultBaseURL(t, tc.serverAddr)
+			got, err := imageTaskResultContentURL(tc.publicTask)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, got, "fail-fast must not emit a usable path-only/http locator")
+				if tc.errContains != "" {
+					assert.Contains(t, err.Error(), tc.errContains)
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantURL, got)
+		})
+	}
+}
+
+// TestPersistImageTaskResultFailsFastWhenBaseURLMissing asserts a missing
+// ServerAddress surfaces as a result_store_error instead of a path-only
+// locator. The blob is still persisted, so provisioning ServerAddress later
+// recovers without re-downloading.
+func TestPersistImageTaskResultFailsFastWhenBaseURLMissing(t *testing.T) {
+	truncate(t)
+	exec := seedExecutionForResultStore(t)
+	useResultDownloader(t, ImageTaskResultDownload{Body: pngFixture, ContentType: "image/png"}, nil)
+	useImageTaskResultBaseURL(t, "")
+
+	_, err := PersistImageTaskResult(context.Background(), exec, "https://fixtures.example.com/img.png")
+	perr := AsImageProviderError(err)
+	require.NotNil(t, perr, "missing base URL must surface as a provider error")
+	assert.Equal(t, ImageErrResultStore, perr.Kind)
+	assert.Contains(t, err.Error(), "ServerAddress")
+
+	// Blob was persisted before the locator build; provisioning recovers later.
+	blob, err := model.GetImageTaskResultBlob(exec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, pngFixture, blob.Content, "bytes must be durable even when the locator cannot be built")
+}
+
+// TestPersistImageTaskResultFailsFastWhenBaseURLNotHTTPS asserts an http
+// ServerAddress is rejected (https locked), so the locator never degrades to
+// an http URL CW would also reject.
+func TestPersistImageTaskResultFailsFastWhenBaseURLNotHTTPS(t *testing.T) {
+	truncate(t)
+	exec := seedExecutionForResultStore(t)
+	useResultDownloader(t, ImageTaskResultDownload{Body: pngFixture, ContentType: "image/png"}, nil)
+	useImageTaskResultBaseURL(t, "http://newapi.example.com")
+
+	_, err := PersistImageTaskResult(context.Background(), exec, "https://fixtures.example.com/img.png")
+	perr := AsImageProviderError(err)
+	require.NotNil(t, perr)
+	assert.Equal(t, ImageErrResultStore, perr.Kind)
 }
