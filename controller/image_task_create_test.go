@@ -33,11 +33,21 @@ func setupImageTaskCreateControllerDB(t *testing.T) {
 	))
 }
 
-func enableImageTaskCreate(t *testing.T) {
+// setImageTaskReleaseGate sets the §14.1 create + processor release switches
+// and restores their previous values when the test ends. Tests set these
+// post-init to drive the gate function directly; the startup gate
+// (common/init.go) only enforces legal combinations at boot, so this does not
+// re-trigger it.
+func setImageTaskReleaseGate(t *testing.T, create, processor bool) {
 	t.Helper()
-	prev := constant.ImageTaskCreateEnabled
-	constant.ImageTaskCreateEnabled = true
-	t.Cleanup(func() { constant.ImageTaskCreateEnabled = prev })
+	prevCreate := constant.ImageTaskCreateEnabled
+	prevProc := constant.ImageTaskProcessorEnabled
+	constant.ImageTaskCreateEnabled = create
+	constant.ImageTaskProcessorEnabled = processor
+	t.Cleanup(func() {
+		constant.ImageTaskCreateEnabled = prevCreate
+		constant.ImageTaskProcessorEnabled = prevProc
+	})
 }
 
 // newCreateGenerationCtx builds a POST /v1/image-tasks/generations context with
@@ -83,22 +93,40 @@ func seedAcceptedImageTask(t *testing.T) {
 	}).Error)
 }
 
-func TestCreateImageTaskGeneration_GateOffIs404(t *testing.T) {
-	setupImageTaskCreateControllerDB(t)
-	// Gate defaults off; do not enable it.
-	c, w := newCreateGenerationCtx(`{"model":"dall-e-3","prompt":"a cat"}`)
-	CreateImageTaskGeneration(c)
-	require.Equal(t, http.StatusNotFound, w.Code)
-	assert.Equal(t, "NOT_FOUND", parseImageTaskBody(t, w)["code"])
-}
+// TestCreateImageTaskGeneration_ReleaseGateMatrix locks the §14.1 release gate at
+// the HTTP layer across the four create×processor combinations. The three closed
+// combinations stay 404 NOT_FOUND with the create-not-available message; only
+// on/on admits the request. Admission is proven by reaching the next guard — an
+// invalid Content-Type yields 415 UNSUPPORTED_MEDIA_TYPE rather than the gate's
+// 404 — instead of asserting a vague "not 404".
+func TestCreateImageTaskGeneration_ReleaseGateMatrix(t *testing.T) {
+	cases := []struct {
+		name                  string
+		create, processor     bool
+		contentType           string
+		wantStatus            int
+		wantCode, wantMessage string
+	}{
+		{"off/off 404", false, false, "application/json", http.StatusNotFound, "NOT_FOUND", "image task create is not available"},
+		{"off/on 404", false, true, "application/json", http.StatusNotFound, "NOT_FOUND", "image task create is not available"},
+		{"on/off 404", true, false, "application/json", http.StatusNotFound, "NOT_FOUND", "image task create is not available"},
+		{"on/on admitted, reaches Content-Type guard", true, true, "text/plain", http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupImageTaskCreateControllerDB(t)
+			setImageTaskReleaseGate(t, tc.create, tc.processor)
 
-func TestCreateImageTaskGeneration_RuntimeSwitchCannotOpenRoute(t *testing.T) {
-	setupImageTaskCreateControllerDB(t)
-	enableImageTaskCreate(t)
-	c, w := newCreateGenerationCtx(`{"model":"dall-e-3","prompt":"a cat"}`)
-	CreateImageTaskGeneration(c)
-	require.Equal(t, http.StatusNotFound, w.Code)
-	assert.Equal(t, "NOT_FOUND", parseImageTaskBody(t, w)["code"])
+			c, w := newCreateGenerationCtx(`{"model":"dall-e-3","prompt":"a cat"}`)
+			c.Request.Header.Set("Content-Type", tc.contentType)
+			CreateImageTaskGeneration(c)
+
+			require.Equal(t, tc.wantStatus, w.Code, "status")
+			m := parseImageTaskBody(t, w)
+			assert.Equal(t, tc.wantCode, m["code"], "code")
+			assert.Equal(t, tc.wantMessage, m["message"], "message")
+		})
+	}
 }
 
 func TestReadImageTaskRawBody_RejectsOversizedBody(t *testing.T) {
