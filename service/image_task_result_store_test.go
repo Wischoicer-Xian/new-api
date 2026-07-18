@@ -225,7 +225,7 @@ func TestImageTaskResultContentURL(t *testing.T) {
 		{name: "https absolute", serverAddr: "https://newapi.example.com", publicTask: "imgtask_x", wantURL: "https://newapi.example.com/v1/image-tasks/imgtask_x/result"},
 		{name: "https trailing slash trimmed", serverAddr: "https://newapi.example.com/", publicTask: "imgtask_x", wantURL: "https://newapi.example.com/v1/image-tasks/imgtask_x/result"},
 		{name: "https with port", serverAddr: "https://newapi.example.com:8443", publicTask: "imgtask_x", wantURL: "https://newapi.example.com:8443/v1/image-tasks/imgtask_x/result"},
-		{name: "empty publicTaskID returns empty no error", serverAddr: "https://newapi.example.com", publicTask: "", wantURL: ""},
+		{name: "empty publicTaskID fails fast", serverAddr: "https://newapi.example.com", publicTask: "", wantErr: true, errContains: "public task id"},
 		{name: "missing ServerAddress fails fast", serverAddr: "", publicTask: "imgtask_x", wantErr: true, errContains: "ServerAddress"},
 		{name: "whitespace-only ServerAddress fails fast", serverAddr: "   ", publicTask: "imgtask_x", wantErr: true, errContains: "ServerAddress"},
 		{name: "http ServerAddress fails fast (https locked)", serverAddr: "http://newapi.example.com", publicTask: "imgtask_x", wantErr: true, errContains: "https"},

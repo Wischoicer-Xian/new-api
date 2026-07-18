@@ -196,7 +196,10 @@ func locatorFromBlob(blob *model.ImageTaskResultBlob) (ImageTaskResult, error) {
 // root cause of CW's "content_url must be https" ingest break.
 func imageTaskResultContentURL(publicTaskID string) (string, error) {
 	if publicTaskID == "" {
-		return "", nil
+		// Fail fast: an empty public task id means the blob row never got its
+		// durable id — emitting a path-only/empty locator would silently mask
+		// that invariant. Treat it the same as a missing base URL.
+		return "", errors.New("image task result locator missing public task id")
 	}
 	base, err := imageTaskResultBaseURL()
 	if err != nil {
@@ -207,12 +210,15 @@ func imageTaskResultContentURL(publicTaskID string) (string, error) {
 
 // imageTaskResultBaseURL resolves the public https base new-api exposes the
 // image-task result endpoint at. It reuses system_setting.ServerAddress — the
-// same public base the symmetric video locator builds on
-// (taskcommon.BuildProxyURL → /v1/videos/{id}/content) — and locks the scheme
-// to https. A missing, whitespace-only, malformed or non-https ServerAddress
-// fails fast so the locator never degrades to a path-only or http value, which
-// is the WIS-572 root cause: CW ValidateLocator rejects non-https, and a
-// path-only locator has no host for the SSRF dial check to validate either.
+// same public base new-api uses elsewhere (e.g. taskcommon.BuildProxyURL for
+// /v1/videos/{id}/content) — and additionally locks the scheme to https and
+// rebuilds from parsed components. taskcommon.BuildProxyURL concatenates
+// ServerAddress verbatim without an https lock; that is a separate pre-existing
+// surface, NOT changed here (flagged for a follow-up). A missing, whitespace-
+// only, malformed or non-https ServerAddress fails fast so the locator never
+// degrades to a path-only or http value, which is the WIS-572 root cause: CW
+// ValidateLocator rejects non-https, and a path-only locator has no host for
+// the SSRF dial check to validate either.
 func imageTaskResultBaseURL() (string, error) {
 	raw := strings.TrimSpace(system_setting.ServerAddress)
 	if raw == "" {
@@ -231,8 +237,9 @@ func imageTaskResultBaseURL() (string, error) {
 	// P2 (WIS-572 review): ServerAddress is a public origin. Reject components
 	// that would leak credentials into the locator (userinfo) or push the fixed
 	// result path into the wrong route (query/fragment). A sub-path is allowed
-	// to support reverse-proxy deployments, matching the symmetric video locator
-	// which concatenates ServerAddress as-is.
+	// to support reverse-proxy deployments, assuming the proxy does NOT strip
+	// the prefix — the result path /v1/image-tasks/{id}/result is appended
+	// verbatim to (scheme+host+subpath).
 	if u.User != nil {
 		return "", fmt.Errorf("image task result base URL must not carry userinfo: got %q", u.User.String())
 	}
