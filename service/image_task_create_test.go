@@ -11,14 +11,34 @@ import (
 )
 
 func TestImageTaskCreateAllowed(t *testing.T) {
-	prev := constant.ImageTaskCreateEnabled
-	t.Cleanup(func() { constant.ImageTaskCreateEnabled = prev })
+	// ImageTaskCreateAllowed is the §14.1 route-level release/liveness gate: it
+	// admits creation only when an operator has released it AND the processor is
+	// live, so admitted work can advance. The matrix locks the four
+	// create×processor combinations; only on/on releases the route.
+	prevCreate := constant.ImageTaskCreateEnabled
+	prevProc := constant.ImageTaskProcessorEnabled
+	t.Cleanup(func() {
+		constant.ImageTaskCreateEnabled = prevCreate
+		constant.ImageTaskProcessorEnabled = prevProc
+	})
 
-	constant.ImageTaskCreateEnabled = false
-	assert.False(t, ImageTaskCreateAllowed(), "create is fail-closed by default (§14.1 placeholder off)")
-
-	constant.ImageTaskCreateEnabled = true
-	assert.False(t, ImageTaskCreateAllowed(), "a global switch cannot bypass the missing processor and allowlist")
+	cases := []struct {
+		name         string
+		create, proc bool
+		want         bool
+	}{
+		{"off/off fail-closed", false, false, false},
+		{"off/on create not released", false, true, false},
+		{"on/off processor not live", true, false, false},
+		{"on/on releases the route", true, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			constant.ImageTaskCreateEnabled = tc.create
+			constant.ImageTaskProcessorEnabled = tc.proc
+			assert.Equal(t, tc.want, ImageTaskCreateAllowed())
+		})
+	}
 }
 
 // TestImageTaskInFlightStatusOf proves the READ-ONLY status primitive returns

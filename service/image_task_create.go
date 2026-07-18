@@ -8,13 +8,23 @@ import (
 )
 
 // ImageTaskCreateAllowed reports whether the public single-image task create
-// routes may create tasks. Creation stays fail-closed until P3-I wires both the
-// processor and the real principal/channel/model allowlist.
+// routes are released for use. It is the §14.1 route-level release/liveness
+// gate: creation is admitted only when an operator has enabled it AND the
+// processor is on, so admitted work can advance (the §14.1 startup gate in
+// common/init.go already makes create-on without processor-on fatal).
+//
+// This is a RELEASE gate, NOT an authorization boundary. General token
+// authentication is performed by TokenAuth before the handler runs, so by the
+// time this gate is reached the caller already holds a valid token; when it
+// returns true, any such token may attempt creation. There is no per-principal
+// allowlist here. The only in-flow checks CreateImageTask applies after the gate
+// are the creation token's optional TokenModelLimit (model), image-capable
+// channel selection (channel capability/routing), and the per-user in-flight cap
+// (capacity) — none of them is per-principal authorization. The on-state
+// authorization surface is intentionally broad (HO 2026-07-18, WIS-569); see the
+// rollout observation in WIS-565.
 func ImageTaskCreateAllowed() bool {
-	// The processor and principal/channel/model allowlist are not implemented
-	// yet. A process-wide environment switch is not an authorization boundary,
-	// so creation remains unconditionally fail-closed until P3-I lands both.
-	return false
+	return constant.ImageTaskCreateEnabled && constant.ImageTaskProcessorEnabled
 }
 
 // ImageTaskInFlightStatus is a READ-ONLY snapshot of a user's in-flight image
