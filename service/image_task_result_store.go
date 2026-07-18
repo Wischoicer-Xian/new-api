@@ -228,5 +228,22 @@ func imageTaskResultBaseURL() (string, error) {
 	if u.Host == "" {
 		return "", errors.New("image task result base URL has empty host (configure system ServerAddress with a public https host)")
 	}
-	return strings.TrimRight(raw, "/"), nil
+	// P2 (WIS-572 review): ServerAddress is a public origin. Reject components
+	// that would leak credentials into the locator (userinfo) or push the fixed
+	// result path into the wrong route (query/fragment). A sub-path is allowed
+	// to support reverse-proxy deployments, matching the symmetric video locator
+	// which concatenates ServerAddress as-is.
+	if u.User != nil {
+		return "", fmt.Errorf("image task result base URL must not carry userinfo: got %q", u.User.String())
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("image task result base URL must not carry a query string: got %q", u.RawQuery)
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("image task result base URL must not carry a fragment: got %q", u.Fragment)
+	}
+	// Rebuild from parsed components so only scheme+host(+port)+path remain;
+	// never concatenate the raw string after validation (P2 review requirement).
+	base := &url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimRight(u.Path, "/")}
+	return base.String(), nil
 }

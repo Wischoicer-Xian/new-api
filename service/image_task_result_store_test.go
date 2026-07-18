@@ -230,6 +230,14 @@ func TestImageTaskResultContentURL(t *testing.T) {
 		{name: "whitespace-only ServerAddress fails fast", serverAddr: "   ", publicTask: "imgtask_x", wantErr: true, errContains: "ServerAddress"},
 		{name: "http ServerAddress fails fast (https locked)", serverAddr: "http://newapi.example.com", publicTask: "imgtask_x", wantErr: true, errContains: "https"},
 		{name: "schemeless ServerAddress fails fast", serverAddr: "newapi.example.com", publicTask: "imgtask_x", wantErr: true},
+		// P2 (WIS-572 review): ServerAddress must be a clean public origin.
+		// userinfo would leak credentials into the locator; query/fragment would
+		// push the result path into the wrong route. Rebuilt from parsed components.
+		{name: "rejects userinfo", serverAddr: "https://user:pass@newapi.example.com", publicTask: "imgtask_x", wantErr: true, errContains: "userinfo"},
+		{name: "rejects query string", serverAddr: "https://newapi.example.com?x=1", publicTask: "imgtask_x", wantErr: true, errContains: "query"},
+		{name: "rejects fragment", serverAddr: "https://newapi.example.com#frag", publicTask: "imgtask_x", wantErr: true, errContains: "fragment"},
+		{name: "allows subpath origin (reverse-proxy deploy)", serverAddr: "https://newapi.example.com/newapi", publicTask: "imgtask_x", wantURL: "https://newapi.example.com/newapi/v1/image-tasks/imgtask_x/result"},
+		{name: "normalizes subpath trailing slash", serverAddr: "https://newapi.example.com/newapi/", publicTask: "imgtask_x", wantURL: "https://newapi.example.com/newapi/v1/image-tasks/imgtask_x/result"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
