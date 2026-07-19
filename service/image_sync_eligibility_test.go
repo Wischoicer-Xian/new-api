@@ -9,44 +9,58 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// WIS-580: the image-adapter capability registry (imageAdapterRegistry) is the
-// single source of truth for which channel/api types can serve a SYNCHRONOUS
-// image request via relay.GetAdaptor. ApiNebula (type-59 / APITypeApiNebula) is
-// async-only — it has no sync adaptor entry — so it must be reported ineligible
-// for sync image selection; OpenAI (type-1) supports sync and is eligible. A
-// channel type that is not an image-task adapter at all is left to the normal
-// sync relay path, so it must NOT be excluded by this rule (otherwise we'd break
-// every non-image chat/embedding channel).
+// WIS-580 P2 (记星 review round 2): sync-image eligibility must be OPERATION
+// granular, not "generation OR edit supports sync -> pass whole channel". A
+// hypothetical mixed adapter (sync generation, async edit) must be rejected for a
+// sync /v1/images/edits request even though it passes a /v1/images/generations
+// check. The capability truth stays in imageAdapterRegistry; op is derived from
+// the request path (single prefix list lives in model).
 
-func TestChannelSupportsSyncImage(t *testing.T) {
-	assert.True(t, ChannelSupportsSyncImage(constant.ChannelTypeOpenAI),
-		"OpenAI has a sync image adaptor -> eligible")
-	assert.False(t, ChannelSupportsSyncImage(constant.ChannelTypeApiNebula),
-		"ApiNebula is async-only -> not sync-eligible (WIS-580 root cause)")
-	assert.True(t, ChannelSupportsSyncImage(constant.ChannelTypeAnthropic),
-		"non-image channel type is handled by normal relay, not excluded")
-	assert.True(t, ChannelSupportsSyncImage(constant.ChannelTypeAdvancedCustom),
-		"Advanced Custom is path-matched separately, not excluded here")
+func TestApiTypeSupportsSyncImageForPath(t *testing.T) {
+	// OpenAI supports sync for both operations on both sync image paths.
+	assert.True(t, ApiTypeSupportsSyncImageForPath(constant.APITypeOpenAI, "/v1/images/generations"))
+	assert.True(t, ApiTypeSupportsSyncImageForPath(constant.APITypeOpenAI, "/v1/images/edits"))
+	// ApiNebula is async-only for BOTH operations on BOTH paths.
+	assert.False(t, ApiTypeSupportsSyncImageForPath(constant.APITypeApiNebula, "/v1/images/generations"),
+		"async-only apiType must be rejected for sync generation (WIS-580 root cause)")
+	assert.False(t, ApiTypeSupportsSyncImageForPath(constant.APITypeApiNebula, "/v1/images/edits"),
+		"async-only apiType must be rejected for sync edit too")
+	// Non-image apiType (its own GetAdaptor case) passes.
+	assert.True(t, ApiTypeSupportsSyncImageForPath(constant.APITypeAnthropic, "/v1/images/generations"))
+	// Non-sync-image path is not governed by this rule.
+	assert.True(t, ApiTypeSupportsSyncImageForPath(constant.APITypeApiNebula, "/v1/chat/completions"))
 }
 
-func TestApiTypeSupportsSyncImage(t *testing.T) {
-	// The dispatch-time (方案 1) guard checks the resolved apiType directly.
-	assert.True(t, ApiTypeSupportsSyncImage(constant.APITypeOpenAI))
-	assert.False(t, ApiTypeSupportsSyncImage(constant.APITypeApiNebula),
-		"async-only apiType must be rejected at ImageHelper dispatch (WIS-580 方案 1)")
-	// An apiType with no image-task adapter registration is served by the normal
-	// sync relay (GetAdaptor has its case), so it is not rejected by this guard.
-	assert.True(t, ApiTypeSupportsSyncImage(constant.APITypeAnthropic))
+func TestChannelSupportsSyncImageForPath(t *testing.T) {
+	assert.True(t, ChannelSupportsSyncImageForPath(constant.ChannelTypeOpenAI, "/v1/images/edits"))
+	assert.False(t, ChannelSupportsSyncImageForPath(constant.ChannelTypeApiNebula, "/v1/images/edits"))
+	assert.False(t, ChannelSupportsSyncImageForPath(constant.ChannelTypeApiNebula, "/v1/images/generations"))
 }
 
-// TestSyncImageEligibilityHookRegistered verifies the service layer injects its
-// canonical predicate into model at init, so model's selection path can consult
-// the capability truth without importing service (no import cycle). This seam is
-// what keeps the capability truth in exactly one place — model never duplicates
-// the async-only set.
+// TestCapsSupportsSyncOperationGranularity is the mixed-adapter defense: a caps
+// that supports sync generation but async edit must pass generation and fail edit.
+// This is the primitive that keeps an async edit off the sync /v1/images/edits path.
+func TestCapsSupportsSyncOperationGranularity(t *testing.T) {
+	mixed := staticImageAdapterCaps{
+		support: map[ImageOperation][]ImageExecutionMode{
+			ImageOperationGeneration: {ImageExecutionSync},
+			ImageOperationEdit:       {ImageExecutionAsyncTask},
+		},
+	}
+	assert.True(t, capsSupports(mixed, ImageOperationGeneration, ImageExecutionSync),
+		"sync generation must pass")
+	assert.False(t, capsSupports(mixed, ImageOperationEdit, ImageExecutionSync),
+		"async edit must NOT pass the sync check (operation granularity)")
+}
+
+// TestSyncImageEligibilityHookRegistered verifies service injects its canonical,
+// operation-granular predicate into model at init (no model->service import cycle,
+// single source of truth).
 func TestSyncImageEligibilityHookRegistered(t *testing.T) {
 	require.NotNil(t, model.SyncImageChannelEligibility,
 		"service init must inject the sync-image eligibility predicate into model")
-	assert.False(t, model.SyncImageChannelEligibility(constant.ChannelTypeApiNebula))
-	assert.True(t, model.SyncImageChannelEligibility(constant.ChannelTypeOpenAI))
+	assert.False(t, model.SyncImageChannelEligibility(constant.ChannelTypeApiNebula, model.SyncImageOpGeneration))
+	assert.False(t, model.SyncImageChannelEligibility(constant.ChannelTypeApiNebula, model.SyncImageOpEdit))
+	assert.True(t, model.SyncImageChannelEligibility(constant.ChannelTypeOpenAI, model.SyncImageOpGeneration))
+	assert.True(t, model.SyncImageChannelEligibility(constant.ChannelTypeOpenAI, model.SyncImageOpEdit))
 }

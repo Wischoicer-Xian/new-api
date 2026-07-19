@@ -13,48 +13,75 @@ import (
 // request selects one, relay.ImageHelper hits GetAdaptor(info.ApiType)==nil and
 // returns "invalid api type: 36" HTTP 500.
 //
-// The capability truth — which apiType supports which image execution modes —
-// already lives in imageAdapterRegistry (service.image_adapter_capabilities).
-// The model selection layer cannot import service (import cycle), so it exposes
-// a hook (model.SyncImageChannelEligibility) that this package fills in init().
-// That keeps the truth in exactly one place; model never duplicates the
-// async-only set.
+// P2 (记星 review round 2): eligibility is OPERATION-granular. The check is per
+// (apiType, operation): a channel that supports sync generation but async edit
+// must still be rejected for a sync /v1/images/edits request. The capability
+// truth lives in imageAdapterRegistry; the operation is derived from the request
+// path (single prefix list owned by model). model cannot import service (import
+// cycle), so it exposes a hook (model.SyncImageChannelEligibility) that this
+// package fills in init() — one source of truth, operation-granular, no duplication.
 
-// ApiTypeSupportsSyncImage reports whether the given apiType can serve a
-// synchronous image request through relay.GetAdaptor. It is the dispatch-time
-// (方案 1) guard used by relay.ImageHelper, and the primitive on which
-// ChannelSupportsSyncImage builds.
+// ApiTypeSupportsSyncImageForOp reports whether the given apiType can serve a
+// synchronous image request for the given operation through relay.GetAdaptor.
 //
-// A registered image adapter is sync-eligible iff it supports sync execution for
-// at least one image operation (generation or edit). An apiType that is not an
-// image-task adapter at all is left to the normal sync relay (GetAdaptor has its
-// own case for it), so it is NOT rejected here.
-func ApiTypeSupportsSyncImage(apiType int) bool {
+// A registered image adapter is sync-eligible for an operation iff it lists sync
+// execution for that operation (capsSupports). An apiType that is not an image-task
+// adapter at all is left to the normal sync relay (GetAdaptor has its own case),
+// so it is NOT rejected here. An unknown operation fails closed (return false).
+func ApiTypeSupportsSyncImageForOp(apiType int, op model.SyncImageOperation) bool {
 	caps, ok := ImageAdapterCapabilities(apiType)
 	if !ok {
 		return true
 	}
-	for _, op := range []ImageOperation{ImageOperationGeneration, ImageOperationEdit} {
-		for _, mode := range caps.ImageTaskExecutionSupport(op) {
-			if mode == ImageExecutionSync {
-				return true
-			}
-		}
+	sop, known := opToServiceOp(op)
+	if !known {
+		return false // sync-image path but op underrivable -> fail-close
 	}
-	return false
+	return capsSupports(caps, sop, ImageExecutionSync)
 }
 
-// ChannelSupportsSyncImage reports whether a channel of the given type can serve
-// a synchronous image request. It resolves the channel type to its apiType and
-// delegates to ApiTypeSupportsSyncImage.
-func ChannelSupportsSyncImage(channelType int) bool {
+// opToServiceOp maps model's path-derived operation tag to the image-task
+// ImageOperation consumed by the capability registry. model owns the tag so the
+// path-prefix list stays in one place; this mapping is the only seam.
+func opToServiceOp(op model.SyncImageOperation) (ImageOperation, bool) {
+	switch op {
+	case model.SyncImageOpGeneration:
+		return ImageOperationGeneration, true
+	case model.SyncImageOpEdit:
+		return ImageOperationEdit, true
+	}
+	return "", false
+}
+
+// ApiTypeSupportsSyncImageForPath derives the operation from requestPath and
+// delegates to ApiTypeSupportsSyncImageForOp. Non-sync-image paths are not
+// governed by this rule (return true).
+func ApiTypeSupportsSyncImageForPath(apiType int, requestPath string) bool {
+	if !model.IsSyncImagePath(requestPath) {
+		return true
+	}
+	return ApiTypeSupportsSyncImageForOp(apiType, model.SyncImageOperationFromPath(requestPath))
+}
+
+// ChannelSupportsSyncImageForOp / ForPath are the channel-type-facing wrappers,
+// resolving the channel type to its apiType first. Used by the middleware
+// affinity path and registered as the model eligibility hook.
+func ChannelSupportsSyncImageForOp(channelType int, op model.SyncImageOperation) bool {
 	apiType, _ := common.ChannelType2APIType(channelType)
-	return ApiTypeSupportsSyncImage(apiType)
+	return ApiTypeSupportsSyncImageForOp(apiType, op)
 }
 
-// init injects the canonical sync-image eligibility predicate into the model
-// selection layer, so model's candidate filter can apply the capability truth
-// without importing service. Runs once at process start, before any request.
+func ChannelSupportsSyncImageForPath(channelType int, requestPath string) bool {
+	if !model.IsSyncImagePath(requestPath) {
+		return true
+	}
+	return ChannelSupportsSyncImageForOp(channelType, model.SyncImageOperationFromPath(requestPath))
+}
+
+// init injects the canonical, operation-granular sync-image eligibility predicate
+// into the model selection layer, so model's candidate filter can apply the
+// capability truth without importing service. Runs once at process start, before
+// any request.
 func init() {
-	model.SyncImageChannelEligibility = ChannelSupportsSyncImage
+	model.SyncImageChannelEligibility = ChannelSupportsSyncImageForOp
 }

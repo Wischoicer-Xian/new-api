@@ -39,11 +39,11 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	}
 
 	// WIS-580 (方案 1): fail-close with a clear error if the resolved apiType is
-	// an async-only image provider (e.g. APITypeApiNebula) — GetAdaptor has no
-	// case for it. This catches entry points that bypass the model-layer candidate
-	// filter (specific-channel / affinity). Must run before GetAdaptor to avoid the
-	// bare "invalid api type" 500.
-	if guardErr := syncImageAdaptorGuard(info.ApiType, info.OriginModelName); guardErr != nil {
+	// an async-only image provider (e.g. APITypeApiNebula) for this request's
+	// operation — GetAdaptor has no case for it. This catches entry points that
+	// bypass the model-layer candidate filter (specific-channel / affinity). Must
+	// run before GetAdaptor to avoid the bare "invalid api type" 500.
+	if guardErr := syncImageAdaptorGuard(info.ApiType, c.Request.URL.Path, info.OriginModelName); guardErr != nil {
 		return guardErr
 	}
 

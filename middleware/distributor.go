@@ -181,8 +181,8 @@ func channelSupportsRequestPath(channel *model.Channel, requestPath string, requ
 	}
 	// WIS-580: the affinity-preferred path bypasses the model-layer candidate
 	// filter, so re-check here that an async-only image channel is not adopted
-	// for a synchronous image request.
-	if model.IsSyncImagePath(requestPath) && !service.ChannelSupportsSyncImage(channel.Type) {
+	// for a synchronous image request (operation-granular: edit path checks edit).
+	if model.IsSyncImagePath(requestPath) && !service.ChannelSupportsSyncImageForPath(channel.Type, requestPath) {
 		return false
 	}
 	if channel.Type != constant.ChannelTypeAdvancedCustom {

@@ -18,11 +18,16 @@ import (
 // the model-layer candidate filter (specific-channel / affinity paths), which
 // 方案 2 cannot reach.
 //
+// P2 (记星 review round 2): the check is operation-granular via the request path —
+// a hypothetical adapter that is sync for generation but async for edit must still
+// be rejected when dispatched for an edit.
+//
 // Returns nil when apiType may proceed through GetAdaptor — a sync-capable image
-// adapter, or a non-image apiType whose GetAdaptor case exists (or which is left
-// to the existing GetAdaptor-nil fail-close for genuinely unknown apiTypes).
-func syncImageAdaptorGuard(apiType int, modelName string) *types.NewAPIError {
-	if service.ApiTypeSupportsSyncImage(apiType) {
+// adapter for this path's operation, or a non-image apiType whose GetAdaptor case
+// exists (or which is left to the existing GetAdaptor-nil fail-close for genuinely
+// unknown apiTypes).
+func syncImageAdaptorGuard(apiType int, requestPath string, modelName string) *types.NewAPIError {
+	if service.ApiTypeSupportsSyncImageForPath(apiType, requestPath) {
 		return nil
 	}
 	return types.NewErrorWithStatusCode(
