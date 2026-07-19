@@ -10,11 +10,13 @@ import (
 	"image"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 
 	"gorm.io/gorm"
 )
@@ -84,7 +86,11 @@ func PersistImageTaskResult(ctx context.Context, exec *model.ImageTaskExecution,
 		return ImageTaskResult{}, resultStoreError(errors.New("nil execution"))
 	}
 	if existing, err := model.GetImageTaskResultBlob(exec.ID); err == nil && existing != nil {
-		return locatorFromBlob(existing), nil
+		loc, lerr := locatorFromBlob(existing)
+		if lerr != nil {
+			return ImageTaskResult{}, resultStoreError(lerr)
+		}
+		return loc, nil
 	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		// A real DB error (not record-not-found) is a result_store_error.
 		return ImageTaskResult{}, resultStoreError(fmt.Errorf("load existing result blob: %w", err))
@@ -112,7 +118,11 @@ func PersistImageTaskResult(ctx context.Context, exec *model.ImageTaskExecution,
 	if err != nil {
 		return ImageTaskResult{}, resultStoreError(fmt.Errorf("persist result blob: %w", err))
 	}
-	return locatorFromBlob(stored), nil
+	loc, lerr := locatorFromBlob(stored)
+	if lerr != nil {
+		return ImageTaskResult{}, resultStoreError(lerr)
+	}
+	return loc, nil
 }
 
 // validateImageTaskResultDownload enforces the §7.6 invariants: the bytes must
@@ -157,26 +167,94 @@ func validateImageTaskResultDimensions(config image.Config) error {
 }
 
 // locatorFromBlob maps the durable blob row onto the execution's result locator.
-// content_url points at new-api's own read path (served by a future handler);
+// content_url points at new-api's own read path (served by GetImageTaskResult);
 // expires_at is 0 because the stored copy is permanent, unlike the upstream URL.
-func locatorFromBlob(blob *model.ImageTaskResultBlob) ImageTaskResult {
+// An error from the locator builder (WIS-572: missing/non-https ServerAddress)
+// propagates so PersistImageTaskResult classifies it as result_store_error
+// rather than emitting a path-only locator.
+func locatorFromBlob(blob *model.ImageTaskResultBlob) (ImageTaskResult, error) {
 	if blob == nil {
-		return ImageTaskResult{}
+		return ImageTaskResult{}, nil
+	}
+	contentURL, err := imageTaskResultContentURL(blob.PublicTaskID)
+	if err != nil {
+		return ImageTaskResult{}, err
 	}
 	return ImageTaskResult{
-		ContentURL: imageTaskResultContentURL(blob.PublicTaskID),
+		ContentURL: contentURL,
 		MimeType:   blob.MimeType,
 		SizeBytes:  blob.SizeBytes,
 		SHA256:     blob.SHA256,
-	}
+	}, nil
 }
 
-// imageTaskResultContentURL is the stable path new-api will serve the persisted
-// blob from. The handler lands in a later phase; until then the locator is
-// durable (the bytes are in the result store) and the URL is deterministic.
-func imageTaskResultContentURL(publicTaskID string) string {
+// imageTaskResultContentURL is the absolute https URL new-api serves the
+// persisted blob from (GetImageTaskResult). WIS-572: the base is
+// system_setting.ServerAddress (the same public base used for the symmetric
+// video locator /v1/videos/{id}/content). The scheme is locked to https and a
+// missing/malformed base fails fast — the previous path-only return was the
+// root cause of CW's "content_url must be https" ingest break.
+func imageTaskResultContentURL(publicTaskID string) (string, error) {
 	if publicTaskID == "" {
-		return ""
+		// Fail fast: an empty public task id means the blob row never got its
+		// durable id — emitting a path-only/empty locator would silently mask
+		// that invariant. Treat it the same as a missing base URL.
+		return "", errors.New("image task result locator missing public task id")
 	}
-	return "/v1/image-tasks/" + publicTaskID + "/result"
+	base, err := imageTaskResultBaseURL()
+	if err != nil {
+		return "", err
+	}
+	return base + "/v1/image-tasks/" + publicTaskID + "/result", nil
+}
+
+// imageTaskResultBaseURL resolves the public https base new-api exposes the
+// image-task result endpoint at. It reuses system_setting.ServerAddress — the
+// same public base new-api uses elsewhere (e.g. taskcommon.BuildProxyURL for
+// /v1/videos/{id}/content) — and additionally locks the scheme to https and
+// rebuilds from parsed components. taskcommon.BuildProxyURL concatenates
+// ServerAddress verbatim without an https lock; that is a separate pre-existing
+// surface, NOT changed here (flagged for a follow-up). A missing, whitespace-
+// only, malformed or non-https ServerAddress fails fast so the locator never
+// degrades to a path-only or http value, which is the WIS-572 root cause: CW
+// ValidateLocator rejects non-https, and a path-only locator has no host for
+// the SSRF dial check to validate either.
+func imageTaskResultBaseURL() (string, error) {
+	raw := strings.TrimSpace(system_setting.ServerAddress)
+	if raw == "" {
+		return "", errors.New("image task result base URL not configured: set the public https system ServerAddress")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("image task result base URL invalid: %w", err)
+	}
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("image task result base URL must be https, got scheme %q (configure system ServerAddress with an https public host)", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", errors.New("image task result base URL has empty host (configure system ServerAddress with a public https host)")
+	}
+	// P2 (WIS-572 review): ServerAddress is a public origin. Reject components
+	// that would leak credentials into the locator (userinfo) or push the fixed
+	// result path into the wrong route (query/fragment). A sub-path is allowed
+	// ONLY for reverse-proxy deployments whose proxy STRIPS the prefix: e.g.
+	// ServerAddress https://host/newapi yields content_url
+	// https://host/newapi/v1/image-tasks/{id}/result, which the proxy must
+	// rewrite to the app root /v1/image-tasks/{id}/result (strip /newapi) —
+	// without that strip the request 404s. Whether subpath deploy is permitted
+	// and the strip-prefix config are a Jirui Zhao provision decision; until
+	// decided, provision should use a path-less public https origin.
+	if u.User != nil {
+		return "", fmt.Errorf("image task result base URL must not carry userinfo: got %q", u.User.String())
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("image task result base URL must not carry a query string: got %q", u.RawQuery)
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("image task result base URL must not carry a fragment: got %q", u.Fragment)
+	}
+	// Rebuild from parsed components so only scheme+host(+port)+path remain;
+	// never concatenate the raw string after validation (P2 review requirement).
+	base := &url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimRight(u.Path, "/")}
+	return base.String(), nil
 }
