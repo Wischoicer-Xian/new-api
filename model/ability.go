@@ -149,8 +149,10 @@ func GetChannel(group string, model string, retry int, requestPath string) (*Cha
 // filterAbilitiesByRequestPathAndModel restricts candidates by request path and
 // model for the DB (non-memory-cache) selection path. Only Advanced Custom
 // (type 58) channels are path-checked: kept only when one of their routes matches
-// requestPath and model; all other channel types always pass. When requestPath is
-// empty, filtering is skipped.
+// requestPath and model; all other channel types always pass — except that
+// synchronous image paths also exclude async-only image providers (e.g.
+// ChannelTypeApiNebula) via excludeChannelForSyncImage (WIS-580). When
+// requestPath is empty, filtering is skipped.
 func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath string, model string) []Ability {
 	if requestPath == "" || len(abilities) == 0 {
 		return abilities
@@ -173,7 +175,9 @@ func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath strin
 	}
 
 	advancedConfigs := make(map[int]*dto.AdvancedCustomConfig)
+	channelTypeByID := make(map[int]int, len(channels))
 	for _, channel := range channels {
+		channelTypeByID[channel.Id] = channel.Type
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
 			advancedConfigs[channel.Id] = channel.GetOtherSettings().AdvancedCustom
 		}
@@ -183,6 +187,12 @@ func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath strin
 	for _, ability := range abilities {
 		config, isAdvancedCustom := advancedConfigs[ability.ChannelId]
 		if !isAdvancedCustom {
+			// WIS-580: exclude async-only image providers (e.g. ChannelTypeApiNebula)
+			// from synchronous image relay paths; they have no sync GetAdaptor, so
+			// relay.ImageHelper would return "invalid api type" 500 if selected.
+			if excludeChannelForSyncImage(requestPath, channelTypeByID[ability.ChannelId]) {
+				continue
+			}
 			filtered = append(filtered, ability)
 			continue
 		}

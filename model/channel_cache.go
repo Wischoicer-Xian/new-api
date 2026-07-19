@@ -226,6 +226,12 @@ func filterChannelsByRequestPathAndModel(channels []int, requestPath string, mod
 			continue
 		}
 		if channel.Type != constant.ChannelTypeAdvancedCustom {
+			// WIS-580: exclude async-only image providers (e.g. ChannelTypeApiNebula)
+			// from synchronous image relay paths; they have no sync GetAdaptor, so
+			// relay.ImageHelper would return "invalid api type" 500 if selected.
+			if excludeChannelForSyncImage(requestPath, channel.Type) {
+				continue
+			}
 			filtered = append(filtered, channelId)
 			continue
 		}
