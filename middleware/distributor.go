@@ -171,9 +171,18 @@ func Distribute() func(c *gin.Context) {
 
 // channelSupportsRequestPath reports whether a channel can serve the request path.
 // Only Advanced Custom (type 58) channels are path-checked; all other channel types
-// always pass. A type-58 channel is usable only when one of its routes matches.
+// always pass — except that synchronous image paths also reject async-only image
+// providers (e.g. ChannelTypeApiNebula), which have no sync GetAdaptor and would
+// 500 in relay.ImageHelper (WIS-580). A type-58 channel is usable only when one of
+// its routes matches.
 func channelSupportsRequestPath(channel *model.Channel, requestPath string, requestModel string) bool {
 	if channel == nil {
+		return false
+	}
+	// WIS-580: the affinity-preferred path bypasses the model-layer candidate
+	// filter, so re-check here that an async-only image channel is not adopted
+	// for a synchronous image request (operation-granular: edit path checks edit).
+	if model.IsSyncImagePath(requestPath) && !service.ChannelSupportsSyncImageForPath(channel.Type, requestPath) {
 		return false
 	}
 	if channel.Type != constant.ChannelTypeAdvancedCustom {
