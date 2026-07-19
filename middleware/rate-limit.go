@@ -25,8 +25,10 @@ func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark st
 	listLength, err := rdb.LLen(ctx, key).Result()
 	if err != nil {
 		fmt.Println(err.Error())
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		// Fallback to in-memory limiter when Redis is unavailable,
+		// instead of returning 500 or passing through unprotected.
+		inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+		memoryRateLimiter(c, maxRequestNum, duration, mark)
 		return
 	}
 	if listLength < int64(maxRequestNum) {
@@ -37,16 +39,16 @@ func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark st
 		oldTime, err := time.Parse(timeFormat, oldTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+			memoryRateLimiter(c, maxRequestNum, duration, mark)
 			return
 		}
 		nowTimeStr := time.Now().Format(timeFormat)
 		nowTime, err := time.Parse(timeFormat, nowTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+			memoryRateLimiter(c, maxRequestNum, duration, mark)
 			return
 		}
 		// time.Since will return negative number!
@@ -158,8 +160,9 @@ func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key
 	listLength, err := rdb.LLen(ctx, key).Result()
 	if err != nil {
 		fmt.Println(err.Error())
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		// Fallback to in-memory limiter when Redis is unavailable
+		inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+		memoryRateLimiter(c, maxRequestNum, duration, key)
 		return
 	}
 	if listLength < int64(maxRequestNum) {
@@ -170,16 +173,16 @@ func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key
 		oldTime, err := time.Parse(timeFormat, oldTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+			memoryRateLimiter(c, maxRequestNum, duration, key)
 			return
 		}
 		nowTimeStr := time.Now().Format(timeFormat)
 		nowTime, err := time.Parse(timeFormat, nowTimeStr)
 		if err != nil {
 			fmt.Println(err)
-			c.Status(http.StatusInternalServerError)
-			c.Abort()
+			inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+			memoryRateLimiter(c, maxRequestNum, duration, key)
 			return
 		}
 		if int64(nowTime.Sub(oldTime).Seconds()) < duration {
@@ -202,4 +205,13 @@ func SearchRateLimit() func(c *gin.Context) {
 		return defNext
 	}
 	return userRateLimitFactory(common.SearchRateLimitNum, common.SearchRateLimitDuration, "SR")
+}
+
+// SsoRateLimit provides a dedicated, per-IP rate limiter for the SSO login
+// endpoint. It sits outside GlobalAPIRateLimit (which was too aggressive and
+// blocked normal cross-platform redirects) but still protects against abuse.
+// 30 requests per 60 seconds per IP — generous for normal use, tight enough
+// for brute-force protection.
+func SsoRateLimit() func(c *gin.Context) {
+	return rateLimitFactory(30, 60, "SSO")
 }

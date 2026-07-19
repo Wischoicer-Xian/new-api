@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from './api'
+import { getBasepath } from './basepath'
 
 // ============================================================================
 // OAuth URL Builders
@@ -33,12 +34,11 @@ export function buildGitHubOAuthUrl(clientId: string, state: string): string {
  * Build Discord OAuth URL
  */
 export function buildDiscordOAuthUrl(clientId: string, state: string): string {
+  const bp = getBasepath()
+  const base = bp ? `${window.location.origin}${bp}` : window.location.origin
   const url = new URL('https://discord.com/oauth2/authorize')
   url.searchParams.set('client_id', clientId)
-  url.searchParams.set(
-    'redirect_uri',
-    `${window.location.origin}/oauth/discord`
-  )
+  url.searchParams.set('redirect_uri', `${base}/oauth/discord`)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', 'identify+openid')
   url.searchParams.set('state', state)
@@ -53,9 +53,11 @@ export function buildOIDCOAuthUrl(
   clientId: string,
   state: string
 ): string {
+  const bp = getBasepath()
+  const base = bp ? `${window.location.origin}${bp}` : window.location.origin
   const url = new URL(authUrl)
   url.searchParams.set('client_id', clientId)
-  url.searchParams.set('redirect_uri', `${window.location.origin}/oauth/oidc`)
+  url.searchParams.set('redirect_uri', `${base}/oauth/oidc`)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', 'openid profile email')
   url.searchParams.set('state', state)

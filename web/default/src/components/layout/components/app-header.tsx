@@ -16,18 +16,37 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useNotifications } from '@/hooks/use-notifications'
-import { useTopNavLinks } from '@/hooks/use-top-nav-links'
+import { LayoutDashboard } from 'lucide-react'
+
 import { ConfigDrawer } from '@/components/config-drawer'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { NotificationPopover } from '@/components/notification-popover'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { Search } from '@/components/search'
+import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { useNotifications } from '@/hooks/use-notifications'
+import { useTopNavLinks } from '@/hooks/use-top-nav-links'
+
 import { defaultTopNavLinks } from '../config/top-nav.config'
 import { type TopNavLink } from '../types'
 import { Header } from './header'
 import { SystemBrand } from './system-brand'
 import { TopNav } from './top-nav'
+
+/** Get Wischoicer workstation console URL */
+function getConsoleUrl(): string {
+  // Console lives in the workstation app at /console
+  // Use env var for base URL, fallback to same origin
+  const base =
+    import.meta.env.VITE_WISCHOICER_WORKSTATION_URL || window.location.origin
+  return `${base.replace(/\/+$/, '')}/console`
+}
 
 /**
  * General application Header component
@@ -125,6 +144,29 @@ export function AppHeader({
                 <TopNav links={links} />
               </div>
             )}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant='ghost'
+                      size='icon'
+                      className='size-7'
+                      onClick={() =>
+                        window.open(
+                          getConsoleUrl(),
+                          '_blank',
+                          'noopener,noreferrer'
+                        )
+                      }
+                    />
+                  }
+                >
+                  <LayoutDashboard className='size-4' />
+                </TooltipTrigger>
+                <TooltipContent>控制台</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             {showSearch && <Search />}
             {showNotifications && (
               <NotificationPopover

@@ -104,7 +104,16 @@ type TaskPrivateData struct {
 	BillingSource  string              `json:"billing_source,omitempty"`  // "wallet" 或 "subscription"
 	SubscriptionId int                 `json:"subscription_id,omitempty"` // 订阅 ID，用于订阅退款
 	TokenId        int                 `json:"token_id,omitempty"`        // 令牌 ID，用于令牌额度退款
+	NodeName       string              `json:"node_name,omitempty"`       // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
 	BillingContext *TaskBillingContext `json:"billing_context,omitempty"` // 计费参数快照（用于轮询阶段重新计算）
+	// Wischoicer 业务归因快照（WIS-499）：submit 阶段从请求 header 解析后冻结，
+	// 供 settle/refund 阶段复用同一份归因，避免异步阶段漏账或拆账。
+	Wischoicer *common.WischoicerAttribution `json:"wischoicer,omitempty"`
+	// SubmitRequestId / SubmitUpstreamRequestId 为 submit 阶段请求链路 ID 快照。
+	// settle/refund 日志本身没有独立 request 列位，details 接口按 RFC 回炉 delta
+	// 从这里复用原始提交链路 ID；无快照时回 null。
+	SubmitRequestId         string `json:"submit_request_id,omitempty"`
+	SubmitUpstreamRequestId string `json:"submit_upstream_request_id,omitempty"`
 }
 
 // TaskBillingContext 记录任务提交时的计费参数，以便轮询阶段可以重新计算额度。
@@ -178,10 +187,10 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 			privateData.Key = relayInfo.ChannelMeta.ApiKey
 		}
 		if relayInfo.UpstreamModelName != "" {
-			properties.UpstreamModelName = relayInfo.UpstreamModelName
+			properties.UpstreamModelName = common.MaskedModelNameIf(relayInfo.TokenHidden, relayInfo.UpstreamModelName)
 		}
 		if relayInfo.OriginModelName != "" {
-			properties.OriginModelName = relayInfo.OriginModelName
+			properties.OriginModelName = common.MaskedModelNameIf(relayInfo.TokenHidden, relayInfo.OriginModelName)
 		}
 	}
 
@@ -294,6 +303,7 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 	err := DB.Where("progress != ?", "100%").
 		Where("status NOT IN ?", []string{TaskStatusFailure, TaskStatusSuccess}).
 		Where("submit_time < ?", cutoffUnix).
+		Where("platform IN ?", constant.LegacyTimeoutPlatformValues()).
 		Order("submit_time").
 		Limit(limit).
 		Find(&tasks).Error
@@ -306,12 +316,35 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 func GetAllUnFinishSyncTasks(limit int) []*Task {
 	var tasks []*Task
 	var err error
-	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Limit(limit).Order("id").Find(&tasks).Error
+	// get all tasks progress is not 100%. The platform allowlist (§7.3) is
+	// applied before LIMIT so image/unknown platforms cannot starve legacy
+	// Suno/video work out of the window.
+	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Where("platform IN ?", constant.LegacyPollingPlatformValues()).Limit(limit).Order("id").Find(&tasks).Error
 	if err != nil {
 		return nil
 	}
 	return tasks
+}
+
+// HasUnfinishedSyncTasks reports whether at least one legacy async task still
+// needs the async_task_poll pass — either a currently-pollable Suno/video task
+// or a historical named-string task (kling/jimeng) that the timeout sweep still
+// owes failure/finalize. It is a cheap existence check (LIMIT 1) used to decide
+// whether the async_task_poll system task needs to run; the platform superset
+// (LegacyTimeoutPlatformValues, §7.3) is applied so a backlog of only historical
+// rows still spins up the poller long enough to sweep them, instead of
+// silently stranding their timeout convergence. When nothing remains the
+// scheduler skips creating a row entirely.
+func HasUnfinishedSyncTasks() bool {
+	var id int64
+	err := DB.Model(&Task{}).
+		Where("progress != ?", "100%").
+		Where("status != ?", TaskStatusFailure).
+		Where("status != ?", TaskStatusSuccess).
+		Where("platform IN ?", constant.LegacyTimeoutPlatformValues()).
+		Limit(1).
+		Pluck("id", &id).Error
+	return err == nil && id != 0
 }
 
 func GetByOnlyTaskId(taskId string) (*Task, bool, error) {
@@ -399,6 +432,10 @@ func (Task *Task) Update() error {
 	var err error
 	err = DB.Save(Task).Error
 	return err
+}
+
+func (t *Task) UpdateQuota() error {
+	return DB.Model(t).Update("quota", t.Quota).Error
 }
 
 // UpdateWithStatus performs a conditional UPDATE guarded by fromStatus (CAS).

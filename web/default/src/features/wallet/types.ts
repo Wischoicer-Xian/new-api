@@ -20,6 +20,8 @@ For commercial licensing, please contact support@quantumnous.com
 // Wallet Type Definitions
 // ============================================================================
 
+import type { WischoicerWalletRechargeView } from './lib/wischoicer-recharge'
+
 /**
  * Generic API response
  */
@@ -94,11 +96,11 @@ export interface PaymentMethod {
   name: string
   /** Payment method type identifier */
   type: string
-  /** Optional color for UI display */
+  /** Legacy optional color for UI display */
   color?: string
   /** Minimum topup amount for this payment method */
   min_topup?: number
-  /** Optional icon URL provided by backend (preferred over built-in icons) */
+  /** Optional react-icons component name or safe icon URL */
   icon?: string
 }
 
@@ -287,3 +289,35 @@ export interface BillingHistoryResponse {
 export interface CompleteOrderRequest {
   trade_no: string
 }
+
+// ============================================================================
+// Wischoicer WeChat Native wallet recharge (WIS-545 S5)
+//
+// Browser-facing types for the new-api wallet UserAuth façade
+// (`POST/GET /api/wallet/recharges*`, WIS-550 PR#19). Only browser-safe fields
+// are modelled here — quota / token / internal error codes / service names are
+// never part of these types and are additionally stripped by
+// `toSafeRechargeView` in `lib/wischoicer-recharge`.
+// ============================================================================
+
+/**
+ * Create / idempotent re-fetch order request. `clientRequestId` is the
+ * wallet-side idempotency key (omitted only when the browser lets the façade
+ * generate one); `amountCents` must be a server tier (¥50/100/200/500).
+ */
+export interface WischoicerCreateRechargeRequest {
+  clientRequestId?: string
+  amountCents: number
+}
+
+/** Single recharge order response (create / get). */
+export type WischoicerRechargeResponse = ApiResponse<WischoicerWalletRechargeView>
+
+/** One page of recharge order history. */
+export interface WischoicerRechargeListData {
+  items: WischoicerWalletRechargeView[]
+  nextCursor?: string
+}
+
+/** Recharge history list response. */
+export type WischoicerRechargeListResponse = ApiResponse<WischoicerRechargeListData>

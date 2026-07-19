@@ -14,10 +14,23 @@ type headerNavAccess struct {
 	RequireAuth bool
 }
 
+// headerNavFallbackOverrides makes specific modules default to a safer access
+// policy when the HeaderNavModules runtime config does not explicitly configure
+// them. The "pricing" module aggregates perf-metrics (performance dashboard);
+// defaulting it to require auth closes the anonymous-read path so aggregated
+// model data is not exposed without login. Admins can still publish it via the
+// HeaderNavModules runtime config, which overrides this fallback.
+var headerNavFallbackOverrides = map[string]headerNavAccess{
+	"pricing": {Enabled: true, RequireAuth: true},
+}
+
 func getHeaderNavAccess(module string) headerNavAccess {
 	fallback := headerNavAccess{
 		Enabled:     true,
 		RequireAuth: false,
+	}
+	if override, ok := headerNavFallbackOverrides[module]; ok {
+		fallback = override
 	}
 
 	common.OptionMapRWMutex.RLock()

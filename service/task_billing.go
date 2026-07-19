@@ -11,21 +11,24 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
 
 // LogTaskConsumption 记录任务消费日志和统计信息（仅记录，不涉及实际扣费）。
 // 实际扣费已由 BillingSession（PreConsumeBilling + SettleBilling）完成。
-func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
+// task 非 nil 时（异步视频 submit），写入 task_id 与 submit 阶段冻结的归因快照，
+// billing_stage=submit，保证后续 settle/refund 能复用同一份归因。
+func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model.Task) {
 	tokenName := c.GetString("token_name")
 	logContent := fmt.Sprintf("操作 %s", info.Action)
 	// 支持任务仅按次计费
 	if common.StringsContains(constant.TaskPricePatches, info.OriginModelName) {
 		logContent = fmt.Sprintf("%s，按次计费", logContent)
 	} else {
-		if len(info.PriceData.OtherRatios) > 0 {
+		if otherRatios := info.PriceData.OtherRatios(); len(otherRatios) > 0 {
 			var contents []string
-			for key, ra := range info.PriceData.OtherRatios {
+			for key, ra := range otherRatios {
 				if 1.0 != ra {
 					contents = append(contents, fmt.Sprintf("%s: %.2f", key, ra))
 				}
@@ -50,18 +53,49 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = info.UpstreamModelName
 	}
+	// WIS-499 submit 日志：带 task_id（new-api 诊断用）+ provider_task_id（上游真实任务 ID，
+	// 非 task_xxx）+ 冻结归因快照；billing_stage=submit。
+	billingStage := common.WischoicerStageSubmit
+	if task != nil {
+		other["task_id"] = task.TaskID
+		// provider_task_id 取上游真实 ID；空则不写，details 返 null（不拿 task_xxx 冒充）。
+		if upstreamID := task.PrivateData.UpstreamTaskID; upstreamID != "" {
+			other["provider_task_id"] = upstreamID
+		}
+		if attr := task.PrivateData.Wischoicer; attr != nil && attr.IsAttributed() {
+			other["wischoicer"] = attr.ToOtherMap(billingStage)
+		}
+	}
+	// develop 合入：计费饱和度审计钩子（quota clamp 落 other.admin_info.quota_saturation），
+	// 与上方 WIS-502 归因块正交，两侧均保留。
+	attachQuotaSaturation(c, info, other)
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
-		ChannelId: info.ChannelId,
-		ModelName: info.OriginModelName,
-		TokenName: tokenName,
-		Quota:     info.PriceData.Quota,
-		Content:   logContent,
-		TokenId:   info.TokenId,
-		Group:     info.UsingGroup,
-		Other:     other,
+		ChannelId:    info.ChannelId,
+		ModelName:    info.OriginModelName,
+		TokenName:    tokenName,
+		Quota:        info.PriceData.Quota,
+		Content:      logContent,
+		TokenId:      info.TokenId,
+		Group:        info.UsingGroup,
+		Other:        other,
+		BillingStage: billingStage,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
 	model.UpdateChannelUsedQuota(info.ChannelId, info.PriceData.Quota)
+}
+
+// SnapshotTaskAttribution 冻结异步任务 submit 阶段的业务归因与请求链路 ID 到 task.PrivateData。
+// 在 task.Insert 前调用；归因从请求 header 解析，链路 ID 从 gin.Context 取（此时上游
+// upstream_request_id 已写入 ctx）。供 settle/refund 复用。
+func SnapshotTaskAttribution(task *model.Task, c *gin.Context) {
+	if task == nil || c == nil {
+		return
+	}
+	if attr := common.ParseWischoicerAttribution(c.Request.Header); attr != nil {
+		task.PrivateData.Wischoicer = attr
+	}
+	task.PrivateData.SubmitRequestId = c.GetString(common.RequestIdKey)
+	task.PrivateData.SubmitUpstreamRequestId = c.GetString(common.UpstreamRequestIdKey)
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +126,7 @@ func taskAdjustFunding(task *model.Task, delta int) error {
 	if delta > 0 {
 		return model.DecreaseUserQuota(task.UserId, delta, false)
 	}
-	return model.IncreaseUserQuota(task.UserId, -delta, false)
+	return model.RefundUserQuota(task.UserId, -delta)
 }
 
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。
@@ -125,8 +159,8 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 			other["model_ratio"] = bc.ModelRatio
 		}
 		other["group_ratio"] = bc.GroupRatio
-		if len(bc.OtherRatios) > 0 {
-			for k, v := range bc.OtherRatios {
+		if priceData := taskBillingContextPriceData(bc); priceData != nil {
+			for k, v := range priceData.OtherRatios() {
 				other[k] = v
 			}
 		}
@@ -136,7 +170,36 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = props.UpstreamModelName
 	}
+	// WIS-499：异步 settle/refund 复用 submit 阶段冻结的归因快照，保证同一 biz_task_id
+	// 全链路归因一致；并把 submit 阶段原始链路 ID 复用到 wischoicer 内，供 details 在
+	// settle/refund 日志上回填（无快照则不写，details 返 null）。
+	if attr := task.PrivateData.Wischoicer; attr != nil && attr.IsAttributed() {
+		w := attr.ToOtherMap("")
+		if task.PrivateData.SubmitRequestId != "" {
+			w["request_id"] = task.PrivateData.SubmitRequestId
+		}
+		if task.PrivateData.SubmitUpstreamRequestId != "" {
+			w["upstream_request_id"] = task.PrivateData.SubmitUpstreamRequestId
+		}
+		other["wischoicer"] = w
+	}
+	// provider_task_id = 上游真实任务 ID（submit 阶段冻结于 task.PrivateData.UpstreamTaskID），
+	// settle/refund 复用同一份快照；空则不写，details 返 null。不与 new-api 的 task_xxx 混淆。
+	if upstreamID := task.PrivateData.UpstreamTaskID; upstreamID != "" {
+		other["provider_task_id"] = upstreamID
+	}
 	return other
+}
+
+func taskBillingContextPriceData(bc *model.TaskBillingContext) *types.PriceData {
+	if bc == nil || len(bc.OtherRatios) == 0 {
+		return nil
+	}
+	priceData := &types.PriceData{}
+	if !priceData.ReplaceOtherRatios(bc.OtherRatios) {
+		return nil
+	}
+	return priceData
 }
 
 // taskModelName 从 BillingContext 或 Properties 中获取模型名称。
@@ -169,22 +232,24 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 	other["task_id"] = task.TaskID
 	other["reason"] = reason
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   model.LogTypeRefund,
-		Content:   "",
-		ChannelId: task.ChannelId,
-		ModelName: taskModelName(task),
-		Quota:     quota,
-		TokenId:   task.PrivateData.TokenId,
-		Group:     task.Group,
-		Other:     other,
+		UserId:       task.UserId,
+		LogType:      model.LogTypeRefund,
+		Content:      "",
+		ChannelId:    task.ChannelId,
+		ModelName:    taskModelName(task),
+		Quota:        quota,
+		TokenId:      task.PrivateData.TokenId,
+		Group:        task.Group,
+		Other:        other,
+		BillingStage: common.WischoicerStageRefund,
 	})
 }
 
 // RecalculateTaskQuota 通用的异步差额结算。
 // actualQuota 是任务完成后的实际应扣额度，与预扣额度 (task.Quota) 做差额结算。
 // reason 用于日志记录（例如 "token重算" 或 "adaptor调整"）。
-func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason string) {
+// clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
+func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason string, clamps ...*common.QuotaClamp) {
 	if actualQuota <= 0 {
 		return
 	}
@@ -215,32 +280,43 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	taskAdjustTokenQuota(ctx, task, quotaDelta)
 
 	task.Quota = actualQuota
+	if err := task.UpdateQuota(); err != nil {
+		logger.LogError(ctx, fmt.Sprintf("差额结算回写 quota 失败 task %s: %s", task.TaskID, err.Error()))
+	}
 
 	var logType int
 	var logQuota int
+	var billingStage string
 	if quotaDelta > 0 {
 		logType = model.LogTypeConsume
 		logQuota = quotaDelta
+		billingStage = common.WischoicerStageSettle
 		model.UpdateUserUsedQuotaAndRequestCount(task.UserId, quotaDelta)
 		model.UpdateChannelUsedQuota(task.ChannelId, quotaDelta)
 	} else {
 		logType = model.LogTypeRefund
 		logQuota = -quotaDelta
+		billingStage = common.WischoicerStageRefund
 	}
 	other := taskBillingOther(task)
 	other["task_id"] = task.TaskID
 	other["pre_consumed_quota"] = preConsumedQuota
 	other["actual_quota"] = actualQuota
+	for _, clamp := range clamps {
+		attachQuotaSaturationToOther(other, clamp)
+	}
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   logType,
-		Content:   reason,
-		ChannelId: task.ChannelId,
-		ModelName: taskModelName(task),
-		Quota:     logQuota,
-		TokenId:   task.PrivateData.TokenId,
-		Group:     task.Group,
-		Other:     other,
+		UserId:       task.UserId,
+		LogType:      logType,
+		Content:      reason,
+		ChannelId:    task.ChannelId,
+		ModelName:    taskModelName(task),
+		Quota:        logQuota,
+		TokenId:      task.PrivateData.TokenId,
+		Group:        task.Group,
+		Other:        other,
+		NodeName:     task.PrivateData.NodeName,
+		BillingStage: billingStage,
 	})
 }
 
@@ -285,17 +361,13 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 
 	// 计算 OtherRatios 乘积（视频折扣、时长等）
 	otherMultiplier := 1.0
-	if bc := task.PrivateData.BillingContext; bc != nil {
-		for _, r := range bc.OtherRatios {
-			if r != 1.0 && r > 0 {
-				otherMultiplier *= r
-			}
-		}
+	if priceData := taskBillingContextPriceData(task.PrivateData.BillingContext); priceData != nil {
+		otherMultiplier = priceData.OtherRatioMultiplier()
 	}
 
-	// 计算实际应扣费额度: totalTokens * modelRatio * groupRatio * otherMultiplier
-	actualQuota := int(float64(totalTokens) * modelRatio * finalGroupRatio * otherMultiplier)
+	// 计算实际应扣费额度: totalTokens * modelRatio * groupRatio * otherMultiplier（饱和转换，防止溢出成负数）
+	actualQuota, clamp := common.QuotaFromFloatChecked(float64(totalTokens) * modelRatio * finalGroupRatio * otherMultiplier)
 
 	reason := fmt.Sprintf("token重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f, otherMultiplier=%.4f", totalTokens, modelRatio, finalGroupRatio, otherMultiplier)
-	RecalculateTaskQuota(ctx, task, actualQuota, reason)
+	RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
 }

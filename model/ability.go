@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -103,7 +105,7 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
-func GetChannel(group string, model string, retry int) (*Channel, error) {
+func GetChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
 	var abilities []Ability
 
 	var err error = nil
@@ -111,7 +113,7 @@ func GetChannel(group string, model string, retry int) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	if common.UsingSQLite || common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) || common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		err = channelQuery.Order("weight DESC").Find(&abilities).Error
 	} else {
 		err = channelQuery.Order("weight DESC").Find(&abilities).Error
@@ -119,6 +121,7 @@ func GetChannel(group string, model string, retry int) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
+	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
 	channel := Channel{}
 	if len(abilities) > 0 {
 		// Randomly choose one
@@ -141,6 +144,92 @@ func GetChannel(group string, model string, retry int) (*Channel, error) {
 	}
 	err = DB.First(&channel, "id = ?", channel.Id).Error
 	return &channel, err
+}
+
+// filterAbilitiesByRequestPathAndModel restricts candidates by request path and
+// model for the DB (non-memory-cache) selection path. Only Advanced Custom
+// (type 58) channels are path-checked: kept only when one of their routes matches
+// requestPath and model; all other channel types always pass — except that
+// synchronous image paths also exclude async-only image providers (e.g.
+// ChannelTypeApiNebula) via excludeChannelForSyncImage (WIS-580). When
+// requestPath is empty, filtering is skipped. The metadata-dependent filtering
+// (including the WIS-580 P1 fail-close) lives in filterAbilitiesByChannelMetadata
+// so it is unit-testable without a real DB fault.
+func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath string, model string) []Ability {
+	if requestPath == "" || len(abilities) == 0 {
+		return abilities
+	}
+
+	channelIds := make([]int, 0, len(abilities))
+	seen := make(map[int]struct{}, len(abilities))
+	for _, ability := range abilities {
+		if _, ok := seen[ability.ChannelId]; ok {
+			continue
+		}
+		seen[ability.ChannelId] = struct{}{}
+		channelIds = append(channelIds, ability.ChannelId)
+	}
+
+	var channels []*Channel
+	err := DB.Where("id IN ?", channelIds).Find(&channels).Error
+	return filterAbilitiesByChannelMetadata(abilities, requestPath, model, channels, err)
+}
+
+// filterAbilitiesByChannelMetadata applies the request-path/model filters given
+// the resolved channel metadata. queryErr non-nil means the metadata query
+// failed and channel type info is unavailable.
+//
+// WIS-580 P1 (记星 review round 2): for synchronous image paths, unavailable OR
+// missing metadata MUST fail-close — returning unfiltered candidates would let an
+// async-only image channel (e.g. ChannelTypeApiNebula) be selected and 500 in
+// relay.ImageHelper, which is exactly the regression this fix closes. Non-image
+// paths keep the historical fail-open behavior so a metadata hiccup never blocks
+// chat/embedding selection (their filtering is best-effort AdvancedCustom routing).
+func filterAbilitiesByChannelMetadata(abilities []Ability, requestPath string, model string, channels []*Channel, queryErr error) []Ability {
+	if queryErr != nil {
+		if IsSyncImagePath(requestPath) {
+			return nil
+		}
+		return abilities
+	}
+
+	advancedConfigs := make(map[int]*dto.AdvancedCustomConfig)
+	channelTypeByID := make(map[int]int, len(channels))
+	channelFound := make(map[int]bool, len(channels))
+	for _, channel := range channels {
+		channelTypeByID[channel.Id] = channel.Type
+		channelFound[channel.Id] = true
+		if channel.Type == constant.ChannelTypeAdvancedCustom {
+			advancedConfigs[channel.Id] = channel.GetOtherSettings().AdvancedCustom
+		}
+	}
+
+	filtered := make([]Ability, 0, len(abilities))
+	for _, ability := range abilities {
+		config, isAdvancedCustom := advancedConfigs[ability.ChannelId]
+		if !isAdvancedCustom {
+			if IsSyncImagePath(requestPath) {
+				// WIS-580 P1 fail-close: a channel whose type metadata is missing
+				// cannot be proven sync-capable, so drop it rather than guess —
+				// treating unknown as sync-capable would re-open the type-59 bug.
+				if !channelFound[ability.ChannelId] {
+					continue
+				}
+				// Exclude async-only image providers (e.g. ChannelTypeApiNebula);
+				// they have no sync GetAdaptor, so relay.ImageHelper would return
+				// "invalid api type" 500 if selected.
+				if excludeChannelForSyncImage(requestPath, channelTypeByID[ability.ChannelId]) {
+					continue
+				}
+			}
+			filtered = append(filtered, ability)
+			continue
+		}
+		if config != nil && config.SupportsPathForModel(requestPath, model) {
+			filtered = append(filtered, ability)
+		}
+	}
+	return filtered
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
@@ -292,7 +381,7 @@ func FixAbility() (int, int, error) {
 	defer fixLock.Unlock()
 
 	// truncate abilities table
-	if common.UsingSQLite {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		err := DB.Exec("DELETE FROM abilities").Error
 		if err != nil {
 			common.SysLog(fmt.Sprintf("Delete abilities failed: %s", err.Error()))

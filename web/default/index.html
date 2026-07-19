@@ -2,8 +2,30 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/png" href="/logo.png" />
+    <script>
+      // Base bootloader — MUST execute before any asset tag below it.
+      // Assets are emitted relative (rsbuild assetPrefix: './') so a single
+      // build runs under root '/', '/token-platform/', and '/token-platform-fe/'.
+      // On a client-route deep link such as /dashboard/models, a relative URL
+      // would otherwise resolve against the route path (/dashboard/static/...)
+      // and the SPA fallback would return index.html as the asset, which the
+      // browser then tries to execute → "SyntaxError: Unexpected token '<'".
+      // Pinning <base href> to the detected proxy basepath makes every relative
+      // asset resolve from the base instead. Detection mirrors src/lib/basepath.ts.
+      // See WIS-518.
+      (function () {
+        var p = window.location.pathname;
+        var base = '/';
+        if (p.indexOf('/token-platform-fe') === 0) base = '/token-platform-fe/';
+        else if (p.indexOf('/token-platform') === 0) base = '/token-platform/';
+        var el = document.createElement('base');
+        el.href = base;
+        document.head.appendChild(el);
+      })();
+    </script>
+    <link rel="icon" type="image/png" href="./logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="google" content="notranslate" />
 
     <!-- Primary Meta Tags -->
     <title>New API</title>
@@ -19,6 +41,6 @@
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root" translate="no" class="notranslate"></div>
   </body>
 </html>

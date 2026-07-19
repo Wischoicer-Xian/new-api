@@ -198,6 +198,27 @@ func SetRelayRouter(router *gin.Engine) {
 			controller.Relay(c, types.RelayFormatGemini)
 		})
 	}
+
+	// Wischoicer single-image async task API (§6.1). Deliberately outside the
+	// Distribute-wrapped httpRouter: the image task path must not auto-switch
+	// channels on 5xx/429 (§7.5), and per-user in-flight enforcement lives in
+	// the reserve aggregate rather than ModelRequestRateLimit. Create routes
+	// are mounted once the service create orchestration lands; GET/cancel read
+	// the durable state and are usable against tasks from any creation path.
+	imageTaskRouter := router.Group("/v1/image-tasks")
+	imageTaskRouter.Use(middleware.RouteTag("relay"))
+	imageTaskRouter.Use(middleware.SystemPerformanceCheck())
+	imageTaskRouter.Use(middleware.TokenAuth())
+	{
+		imageTaskRouter.GET("/:task_id", controller.GetImageTask)
+		imageTaskRouter.GET("/:task_id/result", controller.GetImageTaskResult)
+		imageTaskRouter.POST("/:task_id/cancel", controller.CancelImageTask)
+		// Create routes (§6.1). Mounted behind the §14.1 create-allowlist gate;
+		// the service fails closed with 404 until the switch is on, so no traffic
+		// is accepted in this checkpoint.
+		imageTaskRouter.POST("/generations", controller.CreateImageTaskGeneration)
+		imageTaskRouter.POST("/edits", controller.CreateImageTaskEdit)
+	}
 }
 
 func registerMjRouterGroup(relayMjRouter *gin.RouterGroup) {

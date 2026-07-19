@@ -75,6 +75,10 @@ func ChannelType2APIType(channelType int) (int, bool) {
 		apiType = constant.APITypeReplicate
 	case constant.ChannelTypeCodex:
 		apiType = constant.APITypeCodex
+	case constant.ChannelTypeAdvancedCustom:
+		apiType = constant.APITypeAdvancedCustom
+	case constant.ChannelTypeApiNebula:
+		apiType = constant.APITypeApiNebula
 	}
 	if apiType == -1 {
 		return constant.APITypeOpenAI, false

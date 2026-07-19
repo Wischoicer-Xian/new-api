@@ -36,6 +36,12 @@ func init() {
 		if i == constant.APITypeAIProxyLibrary {
 			continue
 		}
+		// ApiNebula is an image-only async provider with no general relay
+		// adaptor and no OpenAI-compatible model list; relay.GetAdaptor returns
+		// nil for it, so it must be skipped here like AIProxyLibrary.
+		if i == constant.APITypeApiNebula {
+			continue
+		}
 		adaptor := relay.GetAdaptor(i)
 		channelName := adaptor.GetChannelName()
 		modelNames := adaptor.GetModelList()
@@ -102,6 +108,12 @@ func init() {
 			ChannelType: i,
 		}}
 		adaptor := relay.GetAdaptor(apiType)
+		if adaptor == nil {
+			// Image-only providers (e.g. ApiNebula) opt into the image-task
+			// subsystem but register no general relay adaptor, so they expose
+			// no model list here.
+			continue
+		}
 		adaptor.Init(meta)
 		channelId2Models[i] = adaptor.GetModelList()
 	}

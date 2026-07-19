@@ -16,12 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState, useRef, useEffect } from 'react'
 import type { AxiosRequestConfig } from 'axios'
+import { useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { useAuthStore } from '@/stores/auth-store'
+
 import { api } from '@/lib/api'
+import { withBasepath } from '@/lib/basepath'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { getOAuthState } from '../api'
 import {
   buildGitHubOAuthUrl,
@@ -201,7 +204,7 @@ export function useOAuthLogin(status: SystemStatus | null) {
         return
       }
 
-      const redirectUri = `${window.location.origin}/oauth/${provider.slug}`
+      const redirectUri = `${window.location.origin}${withBasepath(`/oauth/${provider.slug}`)}`
       const url = new URL(provider.authorization_endpoint)
       url.searchParams.set('client_id', provider.client_id)
       url.searchParams.set('redirect_uri', redirectUri)

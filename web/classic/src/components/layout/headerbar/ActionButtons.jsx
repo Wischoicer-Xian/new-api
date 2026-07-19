@@ -18,11 +18,19 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React from 'react';
+import { LayoutDashboard } from 'lucide-react';
+import { Button, Tooltip } from '@douyinfe/semi-ui';
 import NewYearButton from './NewYearButton';
 import NotificationButton from './NotificationButton';
 import ThemeToggle from './ThemeToggle';
 import LanguageSelector from './LanguageSelector';
 import UserArea from './UserArea';
+
+/** Get Wischoicer workstation console URL */
+function getConsoleUrl() {
+  const base = import.meta.env.VITE_WISCHOICER_WORKSTATION_URL || window.location.origin;
+  return `${base.replace(/\/+$/, '')}/console`;
+}
 
 const ActionButtons = ({
   isNewYear,
@@ -43,6 +51,14 @@ const ActionButtons = ({
   return (
     <div className='flex items-center gap-2 md:gap-3'>
       <NewYearButton isNewYear={isNewYear} />
+
+      <Tooltip content='控制台'>
+        <Button
+          theme='borderless'
+          icon={<LayoutDashboard size={18} />}
+          onClick={() => window.open(getConsoleUrl(), '_blank', 'noopener,noreferrer')}
+        />
+      </Tooltip>
 
       <NotificationButton
         unreadCount={unreadCount}

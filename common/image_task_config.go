@@ -1,0 +1,46 @@
+package common
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/QuantumNous/new-api/constant"
+)
+
+// ParseMaxImageTasksPerUser validates the MAX_IMAGE_TASKS_PER_USER env value.
+// Empty returns constant.DefaultMaxImageTasksPerUser (a dormant provisional
+// value, not a closed product decision). A non-empty value must parse as a
+// positive integer: 0, negative, or non-numeric are invalid and fail startup
+// (fail-closed). §6.1/§12.1/§17 make the per-user cap a mandatory invariant,
+// so an illegal value must never be interpreted as unlimited.
+func ParseMaxImageTasksPerUser(raw string) (int, error) {
+	if raw == "" {
+		return constant.DefaultMaxImageTasksPerUser, nil
+	}
+	cap, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("MAX_IMAGE_TASKS_PER_USER=%q is not an integer", raw)
+	}
+	if cap <= 0 {
+		return 0, fmt.Errorf("MAX_IMAGE_TASKS_PER_USER must be a positive integer, got %d", cap)
+	}
+	return cap, nil
+}
+
+// ParseMaxImageTasksInFlightPerUser validates the
+// MAX_IMAGE_TASKS_IN_FLIGHT_PER_USER env value. Empty returns the dormant
+// default. A non-empty value must be a positive integer; 0/negative/non-numeric
+// fail startup so the §7.5 fairness cap is never silently disabled.
+func ParseMaxImageTasksInFlightPerUser(raw string) (int, error) {
+	if raw == "" {
+		return constant.DefaultMaxImageTasksInFlightPerUser, nil
+	}
+	cap, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("MAX_IMAGE_TASKS_IN_FLIGHT_PER_USER=%q is not an integer", raw)
+	}
+	if cap <= 0 {
+		return 0, fmt.Errorf("MAX_IMAGE_TASKS_IN_FLIGHT_PER_USER must be a positive integer, got %d", cap)
+	}
+	return cap, nil
+}

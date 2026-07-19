@@ -81,7 +81,8 @@ func performHeaderNavRequest(t *testing.T, handler gin.HandlerFunc, authenticate
 func TestHeaderNavModuleAuthAllowsDefaultPublicAccess(t *testing.T) {
 	withHeaderNavModules(t, "")
 
-	recorder := performHeaderNavRequest(t, HeaderNavModuleAuth("pricing"), false)
+	// Modules without a fallback override (e.g. rankings) still default to public.
+	recorder := performHeaderNavRequest(t, HeaderNavModuleAuth("rankings"), false)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 }
@@ -125,7 +126,8 @@ func TestHeaderNavModuleAuthRejectsLegacyDisabledModule(t *testing.T) {
 func TestHeaderNavModulePublicOrUserAuthAllowsDefaultPublicAccess(t *testing.T) {
 	withHeaderNavModules(t, "")
 
-	recorder := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth("pricing"), false)
+	// Modules without a fallback override (e.g. rankings) still default to public.
+	recorder := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth("rankings"), false)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 }
@@ -164,4 +166,41 @@ func TestHeaderNavModulePublicOrUserAuthRequiresLoginForLegacyDisabledModule(t *
 	recorder := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth("pricing"), false)
 
 	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+// pricing defaults to RequireAuth (headerNavFallbackOverrides) so the perf-metrics
+// aggregate exposed under it is not anonymously readable. Admins can still publish
+// it via explicit HeaderNavModules config, which overrides the fallback.
+func TestHeaderNavModuleAuthDefaultsToRequireAuthForPricing(t *testing.T) {
+	withHeaderNavModules(t, "")
+
+	recorder := performHeaderNavRequest(t, HeaderNavModuleAuth("pricing"), false)
+
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+func TestHeaderNavModuleAuthPricingPublicViaConfig(t *testing.T) {
+	raw := `{"pricing":{"enabled":true,"requireAuth":false}}`
+	withHeaderNavModules(t, raw)
+
+	recorder := performHeaderNavRequest(t, HeaderNavModuleAuth("pricing"), false)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+}
+
+func TestHeaderNavModulePublicOrUserAuthDefaultsToRequireAuthForPricing(t *testing.T) {
+	withHeaderNavModules(t, "")
+
+	recorder := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth("pricing"), false)
+
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+func TestHeaderNavModulePublicOrUserAuthPricingPublicViaConfig(t *testing.T) {
+	raw := `{"pricing":{"enabled":true,"requireAuth":false}}`
+	withHeaderNavModules(t, raw)
+
+	recorder := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth("pricing"), false)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
 }

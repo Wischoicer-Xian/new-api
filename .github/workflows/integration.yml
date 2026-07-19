@@ -1,0 +1,133 @@
+name: integration
+
+# MySQL/PostgreSQL integration gate for the wischoicer billing feature.
+#
+# The wischoicer capacity/credit/Epay invariants (reserve/release/credit
+# idempotency, per-user quota row lock, Epay atomic credit, int32 hard-cap
+# rollback) are exercised on in-memory SQLite by the default `go test ./...`
+# suite. SQLite serializes on a single write lock and has no FOR UPDATE, so it
+# cannot prove the row-lock / unique-index / int-column semantics of production
+# databases. This workflow lifts those scenarios onto real MySQL and PostgreSQL.
+#
+# Fail-closed: the integration-tagged helpers call t.Fatalf (not t.Skipf) when
+# Docker or the container is unavailable, so a green run proves both database
+# paths actually ran. Do not add -short or skip flags.
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+jobs:
+  database-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [mysql, postgres]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Go module download
+        run: go mod download
+
+      - name: Compile money-critical packages (integration tag)
+        run: go test -tags integration -run '^$' ./common ./model ./controller
+
+      - name: Vet (integration tag)
+        run: go vet -tags integration ./model ./controller
+
+      # Fail-closed gate: the integration tag MUST run the selected testcontainer
+      # suite. setupWischoicerIntegrationDB calls t.Fatalf (not t.Skipf) when Docker
+      # or the container is unavailable, so a green run proves FOR UPDATE, unique
+      # indexes, CAS and int32 column semantics hold on the selected database.
+      - name: ${{ matrix.database }} integration tests
+        env:
+          WIS_INTEGRATION_DATABASE: ${{ matrix.database }}
+        run: go test -tags integration -count=1 ./model/...
+
+      # Also run the default SQLite suite to catch regressions in the
+      # non-integration path. ./service covers the §7.3 image-task poller /
+      # timeout isolation filters; ./constant covers the image-platform predicate.
+      - name: Unit tests (SQLite)
+        run: go test -count=1 ./common ./model ./controller ./constant ./service
+
+  # DTO contract gate for the §6.1 public image-task API. The duplicate-key
+  # helper (common/json.go) and the exact-key / null / hostless-URL validators
+  # (dto/) are pure-Go contract checks; the database-integration job above does
+  # not exercise ./dto, so this job proves the DTO contract compiles and passes
+  # on the current PR head on every pull_request.
+  dto-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Go module download
+        run: go mod download
+
+      - name: DTO contract tests
+        run: go test -count=1 ./dto/
+
+      - name: Vet dto
+        run: go vet ./dto/
+
+  image-billing-sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go mod download
+      - name: Image billing SQLite tests
+        run: go test -count=1 -race ./model/ -run 'ImageTaskPriceResolution|ImageTaskBillingSnapshot|ApplyBillingStageTx|FundMatrix_SQLite'
+      - name: Vet model
+        run: go vet ./model/
+
+  image-billing-mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go mod download
+      - name: Compile integration
+        run: go test -tags integration -run '^$' ./model
+      - name: MySQL integration
+        env:
+          WIS_INTEGRATION_DATABASE: mysql
+        run: go test -tags integration -count=1 ./model/... -run 'LedgerCASGates_RealDB|FundMatrix_RealDB'
+
+  image-billing-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go mod download
+      - name: Compile integration
+        run: go test -tags integration -run '^$' ./model
+      - name: PostgreSQL integration
+        env:
+          WIS_INTEGRATION_DATABASE: postgres
+        run: go test -tags integration -count=1 ./model/... -run 'LedgerCASGates_RealDB|FundMatrix_RealDB'

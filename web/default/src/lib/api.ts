@@ -19,6 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import axios, { type AxiosRequestConfig } from 'axios'
 import { t } from 'i18next'
 import { toast } from 'sonner'
+
+import { getBasepath } from '@/lib/basepath'
 import { useAuthStore } from '@/stores/auth-store'
 
 declare module 'axios' {
@@ -35,8 +37,10 @@ export type ApiRequestConfig = AxiosRequestConfig
 // Axios Instance Configuration
 // ============================================================================
 
-// Base URL: empty string for same-origin API requests
-const baseURL = ''
+// Base URL: detect proxy path at runtime via shared basepath utility.
+// Supports /token-platform-fe (workstation proxy), /token-platform (direct
+// nginx proxy), and empty string (direct Go server access).
+const baseURL = getBasepath()
 
 // Create axios instance with default config
 export const api = axios.create({

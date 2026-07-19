@@ -105,7 +105,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	ov.ID = info.PublicTaskID
 	ov.TaskID = info.PublicTaskID
 	ov.CreatedAt = time.Now().Unix()
-	ov.Model = info.OriginModelName
+	ov.Model = info.MaskedModelName()
 
 	c.JSON(http.StatusOK, ov)
 	return hResp.TaskID, responseBody, nil

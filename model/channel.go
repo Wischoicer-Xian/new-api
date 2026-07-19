@@ -54,6 +54,16 @@ type Channel struct {
 	ChannelInfo ChannelInfo `json:"channel_info" gorm:"type:json"`
 
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
+	// ImageRevisionNumber allocates immutable image channel revisions. It has no
+	// GORM default tag so migrations remain stable across all supported dialects.
+	ImageRevisionNumber int `json:"-" gorm:"column:image_revision_number"`
+
+	// ImageExecutionConfig holds the per-channel image task execution
+	// configuration JSON (see service.ImageChannelExecutionConfig). A nil or
+	// empty value means the channel is not configured for image tasks and is
+	// excluded from the image task candidate pool. Additive column with no
+	// GORM default tag, so the migration is dialect-neutral.
+	ImageExecutionConfig *string `json:"image_execution_config,omitempty" gorm:"type:text"`
 
 	// cache info
 	Keys []string `json:"-" gorm:"-"`
@@ -138,7 +148,7 @@ func NormalizeChannelGroupFilter(group string) string {
 }
 
 func channelGroupFilterCondition() string {
-	if common.UsingMySQL {
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
 		return `CONCAT(',', ` + commonGroupCol + `, ',') LIKE ? ESCAPE '!'`
 	}
 	return `(',' || ` + commonGroupCol + ` || ',') LIKE ? ESCAPE '!'`
@@ -381,13 +391,13 @@ func SearchChannels(keyword string, group string, model string, idSort bool, sor
 	modelsCol := "`models`"
 
 	// 如果是 PostgreSQL，使用双引号
-	if common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		modelsCol = `"models"`
 	}
 
 	baseURLCol := "`base_url`"
 	// 如果是 PostgreSQL，使用双引号
-	if common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		baseURLCol = `"base_url"`
 	}
 
@@ -524,44 +534,7 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
-	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
-	if channel.ChannelInfo.IsMultiKey {
-		var keyStr string
-		if channel.Key != "" {
-			keyStr = channel.Key
-		} else {
-			// If key is not provided, read the existing key from the database
-			if existing, err := GetChannelById(channel.Id, true); err == nil {
-				keyStr = existing.Key
-			}
-		}
-		// Parse the key list (supports newline separation or JSON array)
-		keys := []string{}
-		if keyStr != "" {
-			trimmed := strings.TrimSpace(keyStr)
-			if strings.HasPrefix(trimmed, "[") {
-				var arr []json.RawMessage
-				if err := common.Unmarshal([]byte(trimmed), &arr); err == nil {
-					keys = make([]string, len(arr))
-					for i, v := range arr {
-						keys[i] = string(v)
-					}
-				}
-			}
-			if len(keys) == 0 { // fallback to newline split
-				keys = strings.Split(strings.Trim(keyStr, "\n"), "\n")
-			}
-		}
-		channel.ChannelInfo.MultiKeySize = len(keys)
-		// Clean up status data that exceeds the new key count to prevent index out of range
-		if channel.ChannelInfo.MultiKeyStatusList != nil {
-			for idx := range channel.ChannelInfo.MultiKeyStatusList {
-				if idx >= channel.ChannelInfo.MultiKeySize {
-					delete(channel.ChannelInfo.MultiKeyStatusList, idx)
-				}
-			}
-		}
-	}
+	channel.recalcMultiKeySize()
 	var err error
 	err = DB.Model(channel).Updates(channel).Error
 	if err != nil {
@@ -797,6 +770,18 @@ func DisableChannelByTag(tag string) error {
 }
 
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
+	return EditChannelByTagWithImageRevision(tag, newTag, modelMapping, models, group, priority, weight, paramOverride, headerOverride, nil)
+}
+
+// EditChannelByTagWithImageRevision is the tag-bulk-edit path that also freezes
+// a new revision for every image-capable channel when a frozen field
+// (ModelMapping / ParamOverride / HeaderOverride) changes, so a later in-flight
+// image task still sees the pre-edit request semantics (§7.2 immutable
+// revision). The channel field update, ability re-create and revision creation
+// run in a single transaction; a revision build or persist failure rolls the
+// field update back (fail-closed) rather than leaving a channel whose frozen
+// fields changed without a matching revision.
+func EditChannelByTagWithImageRevision(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string, buildRevision ChannelRevisionBuilder) error {
 	updateData := Channel{}
 	shouldReCreateAbilities := false
 	updatedTag := tag
@@ -829,25 +814,62 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
-	if err != nil {
-		return err
-	}
-	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
-		if err == nil {
-			for _, channel := range channels {
-				err = channel.UpdateAbilities(nil)
+	frozenChanged := modelMapping != nil || paramOverride != nil || headerOverride != nil
+	freezeRevisions := frozenChanged && buildRevision != nil
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error; err != nil {
+			return err
+		}
+		if !shouldReCreateAbilities && !freezeRevisions {
+			return nil
+		}
+		// Load affected channels AFTER the bulk update (via the tx so the rows
+		// reflect the just-applied tag rename and field changes), then either
+		// re-create abilities or freeze a revision per image-capable channel.
+		var channels []Channel
+		if err := tx.Where("tag = ?", updatedTag).Find(&channels).Error; err != nil {
+			return err
+		}
+		for i := range channels {
+			channel := channels[i]
+			if shouldReCreateAbilities {
+				if err := channel.UpdateAbilities(tx); err != nil {
+					// Fail-closed: an ability write failure must abort the whole
+					// transaction (channel field update + revisions) so the
+					// channel, its ability set and its revisions all stay at the
+					// pre-edit state, matching the all-or-nothing contract.
+					return err
+				}
+			}
+			if freezeRevisions {
+				revision, err := buildRevision(&channel)
 				if err != nil {
-					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error=%v", channel.Id, channel.GetTag(), err))
+					// fail-closed: a channel that now carries a non-empty image
+					// config against an unsupported adapter must not persist.
+					return err
+				}
+				if revision == nil {
+					continue
+				}
+				if err := validateRevisionSettings(revision.Settings); err != nil {
+					return err
+				}
+				if _, err := createChannelRevisionInTx(tx, *revision); err != nil {
+					return err
 				}
 			}
 		}
-	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
-		if err != nil {
-			return err
-		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Ability priority/weight update for the non-recreate path has no tx-aware
+	// variant and runs after the field/revision transaction, preserving prior
+	// semantics. It is only reached when models/group did not change.
+	if !shouldReCreateAbilities {
+		return UpdateAbilityByTag(tag, newTag, priority, weight)
 	}
 	return nil
 }
@@ -898,13 +920,13 @@ func SearchTags(keyword string, group string, model string, idSort bool) ([]*str
 	modelsCol := "`models`"
 
 	// 如果是 PostgreSQL，使用双引号
-	if common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		modelsCol = `"models"`
 	}
 
 	baseURLCol := "`base_url`"
 	// 如果是 PostgreSQL，使用双引号
-	if common.UsingPostgreSQL {
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		baseURLCol = `"base_url"`
 	}
 
@@ -943,6 +965,28 @@ func (channel *Channel) ValidateSettings() error {
 		err := common.Unmarshal([]byte(*channel.Setting), channelParams)
 		if err != nil {
 			return err
+		}
+	}
+	channelOtherSettings := &dto.ChannelOtherSettings{}
+	if channel.OtherSettings != "" {
+		err := common.UnmarshalJsonStr(channel.OtherSettings, channelOtherSettings)
+		if err != nil {
+			return err
+		}
+	}
+	if channel.Type == constant.ChannelTypeAdvancedCustom {
+		if channelOtherSettings.AdvancedCustom == nil {
+			return fmt.Errorf("advanced_custom is required")
+		}
+	}
+	if channelOtherSettings.AdvancedCustom != nil {
+		if err := channelOtherSettings.AdvancedCustom.Validate(); err != nil {
+			return err
+		}
+	}
+	if channel.Type == constant.ChannelTypeAdvancedCustom && channelOtherSettings.UpstreamModelUpdateCheckEnabled {
+		if _, ok := channelOtherSettings.AdvancedCustom.ModelListRoute(); !ok {
+			return fmt.Errorf("advanced custom channels require a %s route when upstream model update checks are enabled", dto.AdvancedCustomModelListPath)
 		}
 	}
 	return nil

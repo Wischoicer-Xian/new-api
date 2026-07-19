@@ -1,0 +1,154 @@
+package model
+
+import (
+	"testing"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+// TestAdvanceCAS_RejectsStaleGeneration pins the fencing invariant of the
+// processor's non-terminal advance: a worker presenting a stale lease_generation
+// (because its lease expired and another worker took over) must lose the CAS and
+// mutate nothing. This is the correctness core that makes the processor safe
+// under lease expiry — without it a slow worker could clobber a live one's state.
+func TestAdvanceCAS_RejectsStaleGeneration(t *testing.T) {
+	truncateImageTaskExecutions(t)
+	exec := insertClaimableExecution(t, ImageTaskStateQueued, 100, 0, "")
+
+	// Worker A claims the execution.
+	won, claimed, err := TryClaimImageTaskExecution(ImageTaskLeaseClaim{ExecutionID: exec.ID, Owner: "A", Now: 100, LeaseUntil: 200})
+	require.NoError(t, err)
+	require.True(t, won)
+	require.Equal(t, 1, claimed.LeaseGeneration)
+
+	// Worker A advances with the correct generation → wins.
+	adv := ImageTaskAdvance{ID: exec.ID, LeaseOwner: "A", ExpectedGeneration: 1, Now: 150, From: ImageTaskStateQueued, To: ImageTaskStatePolling}
+	won, err = AdvanceImageTaskExecutionCAS(adv, func(tx *gorm.DB) error {
+		return tx.Model(&ImageTaskExecution{}).Where("id = ?", exec.ID).Update("client_submission_id", "task_adv_1").Error
+	})
+	require.NoError(t, err)
+	assert.True(t, won)
+	got := reloadAdvExecution(t, exec.ID)
+	assert.Equal(t, ImageTaskStatePolling, got.State)
+	assert.Equal(t, "task_adv_1", got.ClientSubmissionID)
+
+	// A stale worker (generation 0, the pre-claim value) tries to advance from
+	// polling back to queued → must lose, leaving the live state untouched.
+	stale := ImageTaskAdvance{ID: exec.ID, LeaseOwner: "A", ExpectedGeneration: 0, Now: 160, From: ImageTaskStatePolling, To: ImageTaskStateQueued}
+	won, err = AdvanceImageTaskExecutionCAS(stale, func(tx *gorm.DB) error {
+		return tx.Model(&ImageTaskExecution{}).Where("id = ?", exec.ID).Update("client_submission_id", "STALE").Error
+	})
+	require.NoError(t, err)
+	assert.False(t, won, "stale generation must lose the CAS")
+	got = reloadAdvExecution(t, exec.ID)
+	assert.Equal(t, ImageTaskStatePolling, got.State, "live state must be unchanged")
+	assert.Equal(t, "task_adv_1", got.ClientSubmissionID, "stale worker must not overwrite side writes")
+}
+
+// TestAdvanceCAS_RejectsTerminalTargets verifies the guardrail: terminal
+// transitions must go through FinalizeImageTask (billing in the CAS callback),
+// not AdvanceImageTaskExecutionCAS.
+func TestAdvanceCAS_RejectsTerminalTargets(t *testing.T) {
+	truncateImageTaskExecutions(t)
+	exec := insertClaimableExecution(t, ImageTaskStatePolling, 100, 0, "")
+	won, claimed, err := TryClaimImageTaskExecution(ImageTaskLeaseClaim{ExecutionID: exec.ID, Owner: "A", Now: 100, LeaseUntil: 200})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	_, err = AdvanceImageTaskExecutionCAS(ImageTaskAdvance{ID: exec.ID, LeaseOwner: "A", ExpectedGeneration: claimed.LeaseGeneration, Now: 150, From: ImageTaskStatePolling, To: ImageTaskStateCompleted}, nil)
+	require.Error(t, err)
+}
+
+// TestMarkManualReviewCAS transitions a submission_unknown execution into
+// manual_review under the lease fence.
+func TestMarkManualReviewCAS(t *testing.T) {
+	truncateImageTaskExecutions(t)
+	exec := insertClaimableExecution(t, ImageTaskStateSubmissionUnknown, 100, 0, "")
+	won, claimed, err := TryClaimImageTaskExecution(ImageTaskLeaseClaim{ExecutionID: exec.ID, Owner: "A", Now: 100, LeaseUntil: 200})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	won, err = MarkImageTaskManualReviewCAS(ImageTaskAdvance{ID: exec.ID, LeaseOwner: "A", ExpectedGeneration: claimed.LeaseGeneration, Now: 150, From: ImageTaskStateSubmissionUnknown}, "submission unknown past SLA")
+	require.NoError(t, err)
+	assert.True(t, won)
+	got := reloadAdvExecution(t, exec.ID)
+	assert.Equal(t, ImageTaskStateManualReview, got.State)
+	assert.Equal(t, "submission unknown past SLA", got.ManualReviewReason)
+	assert.Equal(t, int64(0), got.NextRunAt, "manual_review clears next_run_at so no auto-processing resumes")
+}
+
+func reloadAdvExecution(t *testing.T, id int64) ImageTaskExecution {
+	t.Helper()
+	var exec ImageTaskExecution
+	require.NoError(t, DB.First(&exec, id).Error)
+	return exec
+}
+
+// TestHasDueImageTaskExecutions verifies the system-task Enabled() gate: it is
+// true only when a claimable execution is due. HasDueImageTaskExecutions uses
+// common.GetTimestamp internally, so the fixture seeds values relative to now.
+func TestHasDueImageTaskExecutions(t *testing.T) {
+	truncateImageTaskExecutions(t)
+	assert.False(t, HasDueImageTaskExecutions(), "no executions → not due")
+
+	now := common.GetTimestamp()
+	// next_run_at in the future → not due.
+	insertClaimableExecution(t, ImageTaskStateQueued, now+3600, 0, "")
+	assert.False(t, HasDueImageTaskExecutions())
+
+	// next_run_at in the past → due.
+	insertClaimableExecution(t, ImageTaskStatePolling, now-100, 0, "")
+	assert.True(t, HasDueImageTaskExecutions())
+}
+
+func TestListFairDueImageTaskExecutionsDoesNotStarveOwners(t *testing.T) {
+	truncateImageTaskExecutions(t)
+	for i := 0; i < 60; i++ {
+		exec := insertClaimableExecution(t, ImageTaskStateQueued, int64(i+1), 0, "")
+		require.NoError(t, DB.Model(exec).Update("owner_user_id", 1).Error)
+	}
+	other := insertClaimableExecution(t, ImageTaskStateQueued, 1000, 0, "")
+	require.NoError(t, DB.Model(other).Update("owner_user_id", 2).Error)
+
+	execs, err := ListFairDueImageTaskExecutions(2000, 50, 3)
+	require.NoError(t, err)
+	require.Len(t, execs, 4)
+	ownerCounts := map[int]int{}
+	for _, exec := range execs {
+		ownerCounts[exec.OwnerUserID]++
+	}
+	assert.Equal(t, 3, ownerCounts[1])
+	assert.Equal(t, 1, ownerCounts[2], "a hot owner must not hide another due owner")
+}
+
+// TestHasNonTerminalImageTaskExecutions verifies the data source of the §14.1
+// second readiness gate: it reports true only when a non-terminal execution
+// exists. Every non-terminal state counts — including manual_review, which is
+// excluded from the claimable set but is still non-terminal and owed an
+// operator ruling, so the processor must stay on to drain it. Only
+// completed/failed/cancelled are terminal and do not count.
+func TestHasNonTerminalImageTaskExecutions(t *testing.T) {
+	truncateImageTaskExecutions(t)
+
+	has, err := HasNonTerminalImageTaskExecutions()
+	require.NoError(t, err)
+	assert.False(t, has, "empty table → no non-terminal executions")
+
+	// All terminal states → still false.
+	insertClaimableExecution(t, ImageTaskStateCompleted, 0, 0, "")
+	insertClaimableExecution(t, ImageTaskStateFailed, 0, 0, "")
+	insertClaimableExecution(t, ImageTaskStateCancelled, 0, 0, "")
+	has, err = HasNonTerminalImageTaskExecutions()
+	require.NoError(t, err)
+	assert.False(t, has, "terminal-only executions → no non-terminal work")
+
+	// A non-terminal state → true. manual_review is non-terminal (§6.1) even
+	// though it is not claimable, so it must keep the processor on.
+	insertClaimableExecution(t, ImageTaskStateManualReview, 0, 0, "")
+	has, err = HasNonTerminalImageTaskExecutions()
+	require.NoError(t, err)
+	assert.True(t, has, "a non-terminal execution exists → must keep processor on")
+}
