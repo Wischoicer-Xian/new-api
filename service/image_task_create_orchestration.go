@@ -130,7 +130,50 @@ func CreateImageTask(ctx context.Context, in ImageTaskCreateInput) (obj *dto.Ima
 	if err != nil {
 		return nil, false, 0, mapImageTaskReserveError(err)
 	}
+	recordImageTaskReserveConsumption(outcome, price, in.Attribution, in.RequestID)
 	return projectImageTaskObject(outcome.Execution), outcome.Replayed, 0, nil
+}
+
+// recordImageTaskReserveConsumption 为新预扣的图片任务记录用户可见费用日志。
+// ReserveImageTask 负责持久化资金变动；此处只补齐费用统计和累计计数，不会再次扣费。
+// 幂等重放不会重复写入费用日志。
+func recordImageTaskReserveConsumption(outcome model.ImageTaskReserveOutcome, price *model.ImageTaskPriceResolution, attribution json.RawMessage, requestID string) {
+	if outcome.Replayed || outcome.Task == nil || outcome.AppliedReserveQuota <= 0 {
+		return
+	}
+	task := outcome.Task
+	requestPath := "/v1/image-tasks/generations"
+	if task.Action == string(ImageOperationEdit) {
+		requestPath = "/v1/image-tasks/edits"
+	}
+	other := map[string]interface{}{
+		"is_task":      true,
+		"request_path": requestPath,
+		"task_id":      task.TaskID,
+		"model_price":  price.ModelPrice(),
+		"group_ratio":  price.GroupRatio(),
+	}
+	if len(attribution) > 0 {
+		var attr common.WischoicerAttribution
+		if err := common.Unmarshal(attribution, &attr); err == nil && attr.IsAttributed() {
+			other["wischoicer"] = attr.ToOtherMap(common.WischoicerStageSubmit)
+		}
+	}
+	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
+		UserId:       task.UserId,
+		LogType:      model.LogTypeConsume,
+		Content:      "异步图片任务预扣费",
+		ChannelId:    task.ChannelId,
+		ModelName:    price.OriginModel(),
+		Quota:        outcome.AppliedReserveQuota,
+		TokenId:      task.PrivateData.TokenId,
+		Group:        task.Group,
+		Other:        other,
+		RequestId:    requestID,
+		BillingStage: common.WischoicerStageSubmit,
+	})
+	model.UpdateUserUsedQuotaAndRequestCount(task.UserId, outcome.AppliedReserveQuota)
+	model.UpdateChannelUsedQuota(task.ChannelId, outcome.AppliedReserveQuota)
 }
 
 func selectAndPickImageTaskChannel(usingGroup, userBaseGroup, modelName string, op ImageOperation, specificChannelID int) (string, imageTaskChannelSelection, error) {

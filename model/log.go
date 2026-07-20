@@ -490,17 +490,19 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 }
 
 type RecordTaskBillingLogParams struct {
-	UserId    int
-	LogType   int
-	Content   string
-	ChannelId int
-	ModelName string
-	Quota     int
-	TokenId   int
-	Group     string
-	Other     map[string]interface{}
-	NodeName  string // 任务发起节点；为空时回退当前节点
-	// BillingStage 业务计费阶段（WIS-499）：settle=异步差额补扣，refund=异步退款。
+	UserId            int
+	LogType           int
+	Content           string
+	ChannelId         int
+	ModelName         string
+	Quota             int
+	TokenId           int
+	Group             string
+	Other             map[string]interface{}
+	NodeName          string // 任务发起节点；为空时回退当前节点
+	RequestId         string
+	UpstreamRequestId string
+	// BillingStage 业务计费阶段（WIS-499）：submit=异步首次预扣，settle=异步差额补扣，refund=异步退款。
 	// 异步日志的归因由调用方（taskBillingOther）从 task.PrivateData 快照预置进 Other.wischoicer，
 	// 这里只负责把 billing_stage 盖到已预置的 wischoicer 上；无 wischoicer 时不写入。
 	BillingStage string
@@ -536,18 +538,20 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	createdAt := common.GetTimestamp()
 	other := stampWischoicerBillingStage(params.Other, params.BillingStage)
 	log := &Log{
-		UserId:    params.UserId,
-		Username:  username,
-		CreatedAt: createdAt,
-		Type:      params.LogType,
-		Content:   params.Content,
-		TokenName: tokenName,
-		ModelName: params.ModelName,
-		Quota:     params.Quota,
-		ChannelId: params.ChannelId,
-		TokenId:   params.TokenId,
-		Group:     params.Group,
-		Other:     common.MapToJsonStr(other),
+		UserId:            params.UserId,
+		Username:          username,
+		CreatedAt:         createdAt,
+		Type:              params.LogType,
+		Content:           params.Content,
+		TokenName:         tokenName,
+		ModelName:         params.ModelName,
+		Quota:             params.Quota,
+		ChannelId:         params.ChannelId,
+		TokenId:           params.TokenId,
+		Group:             params.Group,
+		RequestId:         params.RequestId,
+		UpstreamRequestId: params.UpstreamRequestId,
+		Other:             common.MapToJsonStr(other),
 	}
 	err := createLog(log)
 	if err != nil {

@@ -258,6 +258,58 @@ func TestCreateImageTask_ReservesAndProjectsAccepted(t *testing.T) {
 	assert.Equal(t, obj.ID, obj2.ID)
 }
 
+func TestCreateImageTask_RecordsAttributedReserveUsageOnce(t *testing.T) {
+	setupCreateTest(t)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"dall-e-3":0.04}`))
+	seedUser(t, 5201, 1000000)
+	seedTokenForImage(t, 6201, 5201, "sk-log", 1000000)
+	seedImageChannelForCreate(t, 7201, "default", "dall-e-3", `{"defaults":{"generation":"sync"}}`)
+	attrJSON, err := common.Marshal(common.WischoicerAttribution{
+		SchemaVersion: 1, SourceService: common.WischoicerSourceContentWorkstation,
+		InternalFunction: true, FeatureCode: "image_creation", FeatureName: "爆款内容工坊 - 图片创作",
+		OperationCode: "image_creation.regenerate", OperationName: "图片创作重生",
+		BizTaskID: "biz-image-1", AccountID: "account-1", AppUserID: "account-1",
+	})
+	require.NoError(t, err)
+	in := ImageTaskCreateInput{
+		RawBody: []byte(`{"model":"dall-e-3","prompt":"a cat"}`), Operation: ImageOperationGeneration,
+		OwnerUserID: 5201, CreationTokenID: 6201, IdempotencyKey: "usage-log-once",
+		UsingGroup: "default", UserBaseGroup: "default", RequestID: "req-image-1", Attribution: attrJSON,
+	}
+
+	_, replayed, _, err := CreateImageTask(context.Background(), in)
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	var logs []model.Log
+	require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", 5201, model.LogTypeConsume).Find(&logs).Error)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "req-image-1", logs[0].RequestId)
+	assert.Equal(t, "dall-e-3", logs[0].ModelName)
+	assert.Equal(t, 20000, logs[0].Quota)
+	var other map[string]interface{}
+	require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &other))
+	wis, ok := other["wischoicer"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "image_creation", wis["feature_code"])
+	assert.Equal(t, "image_creation.regenerate", wis["operation_code"])
+	assert.Equal(t, common.WischoicerStageSubmit, wis["billing_stage"])
+	assert.Equal(t, "biz-image-1", wis["biz_task_id"])
+
+	_, replayed, _, err = CreateImageTask(context.Background(), in)
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	var count int64
+	require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("user_id = ? AND type = ?", 5201, model.LogTypeConsume).Count(&count).Error)
+	assert.EqualValues(t, 1, count)
+	var user model.User
+	require.NoError(t, model.DB.First(&user, 5201).Error)
+	assert.Equal(t, 20000, user.UsedQuota)
+	assert.Equal(t, 1, user.RequestCount)
+	var channel model.Channel
+	require.NoError(t, model.DB.First(&channel, 7201).Error)
+	assert.EqualValues(t, 20000, channel.UsedQuota)
+}
+
 func TestCreateImageTask_TokenModelLimitFailsClosed(t *testing.T) {
 	setupCreateTest(t)
 	_, _, _, err := CreateImageTask(context.Background(), ImageTaskCreateInput{
