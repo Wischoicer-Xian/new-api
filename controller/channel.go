@@ -716,7 +716,6 @@ func AddChannel(c *gin.Context) {
 			return
 		}
 	}
-	service.ResetProxyClientCache()
 	recordManageAudit(c, "channel.create", map[string]interface{}{
 		"name":  addChannelRequest.Channel.Name,
 		"type":  addChannelRequest.Channel.Type,
@@ -732,8 +731,13 @@ func AddChannel(c *gin.Context) {
 func DeleteChannel(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	channelName := ""
+	channelProxy := ""
+	channelLookupFailed := false
 	if existing, err := model.GetChannelById(id, false); err == nil && existing != nil {
 		channelName = existing.Name
+		channelProxy = existing.GetSetting().Proxy
+	} else {
+		channelLookupFailed = true
 	}
 	channel := model.Channel{Id: id}
 	err := channel.Delete()
@@ -742,6 +746,11 @@ func DeleteChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	if channelLookupFailed {
+		service.ResetProxyClientCache()
+	} else {
+		service.InvalidateProxyClient(channelProxy)
+	}
 	recordManageAudit(c, "channel.delete", map[string]interface{}{
 		"id":   id,
 		"name": channelName,
@@ -760,6 +769,9 @@ func DeleteDisabledChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	if rows > 0 {
+		service.ResetProxyClientCache()
+	}
 	recordManageAudit(c, "channel.delete_disabled", map[string]interface{}{
 		"count": rows,
 	})
@@ -910,19 +922,22 @@ func DeleteChannelBatch(c *gin.Context) {
 		})
 		return
 	}
-	err = model.BatchDeleteChannels(channelBatch.Ids)
+	deletedCount, err := model.BatchDeleteChannels(channelBatch.Ids)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	if deletedCount > 0 {
+		service.ResetProxyClientCache()
+	}
 	recordManageAudit(c, "channel.delete_batch", map[string]interface{}{
-		"count": len(channelBatch.Ids),
+		"count": deletedCount,
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    len(channelBatch.Ids),
+		"data":    deletedCount,
 	})
 	return
 }
@@ -975,6 +990,13 @@ func UpdateChannel(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
+	}
+	originProxy := originChannel.GetSetting().Proxy
+	proxyChanged := false
+	if _, settingProvided := requestData["setting"]; settingProvided {
+		newProxy, _ := service.NormalizeProxyURL(channel.GetSetting().Proxy)
+		normalizedOriginProxy, originProxyErr := service.NormalizeProxyURL(originProxy)
+		proxyChanged = originProxyErr != nil || normalizedOriginProxy != newProxy
 	}
 
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
@@ -1091,7 +1113,9 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
-	service.ResetProxyClientCache()
+	if proxyChanged {
+		service.InvalidateProxyClient(originProxy)
+	}
 	// 记录变更的字段名（语言无关的字段标识），密钥仅记录"已更换"绝不记录内容。
 	changedFields := make([]string, 0)
 	if channel.Models != originChannel.Models {
@@ -1138,7 +1162,6 @@ func UpdateChannelStatus(c *gin.Context) {
 	changed := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
 	if changed {
 		model.InitChannelCache()
-		service.ResetProxyClientCache()
 	}
 	recordManageAudit(c, "channel.status_update", map[string]interface{}{
 		"id":      id,
@@ -1166,7 +1189,6 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 	}
 	if changedCount > 0 {
 		model.InitChannelCache()
-		service.ResetProxyClientCache()
 	}
 	recordManageAudit(c, "channel.status_update_batch", map[string]interface{}{
 		"count":  changedCount,
@@ -1437,6 +1459,12 @@ func CopyChannel(c *gin.Context) {
 	if resetBalance {
 		clone.Balance = 0
 		clone.UsedQuota = 0
+	}
+
+	if err := clone.ValidateSettings(); err != nil {
+		common.SysError("failed to validate cloned channel: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Failed to copy channel: invalid channel settings"})
+		return
 	}
 
 	// insert
