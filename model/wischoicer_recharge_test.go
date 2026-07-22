@@ -912,6 +912,17 @@ func TestIncreaseUserQuota_DbTrueBlockedByCapacityGuard(t *testing.T) {
 	assert.Equal(t, 700000, reloadUserQuota(t, 50080))
 }
 
+// 管理员显式加额不应被面向支付预约的软上限阻塞。账户余额可以超过单次计费的
+// MaxQuota；否则管理员无法给高用量演示或企业账号配置足额余额。
+func TestIncreaseUserQuotaByAdmin_AllowsBalanceAboveMaxQuota(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt32)
+	seedWischoicerUser(t, 50113, 31_000_000)
+
+	require.NoError(t, IncreaseUserQuotaByAdmin(50113, 2_450_000_000))
+	assert.Equal(t, 2_481_000_000, reloadUserQuota(t, 50113))
+}
+
 // ---------------------------------------------------------------------------
 // P1-2：RefundUserQuota 退还先前扣除，走守卫并在容量瞬时打满时降级直写
 // ---------------------------------------------------------------------------
@@ -1272,7 +1283,7 @@ func TestCreditPaidTopUp_NonPositiveDeltaIsNoOp(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R6 P1-6：SetUserQuota — 管理员 override 仍守 int32+reserved 硬界
+// R6 P1-6：SetUserQuota — 管理员 override 允许账户余额超过单次计费 MaxQuota
 // ---------------------------------------------------------------------------
 
 // 正常范围内 override 成功，不受软上限限制（管理员显式管理行为）。
@@ -1285,35 +1296,22 @@ func TestSetUserQuota_SucceedsWithinHardCap(t *testing.T) {
 	assert.Equal(t, 900000, reloadUserQuota(t, 50110))
 }
 
-// newQuota + activeReservedQuota 超过 int32 硬界时拒绝，quota 不变。
-func TestSetUserQuota_RejectedWhenReservedPushesOverHardCap(t *testing.T) {
+// 账户余额不是单次计费值，允许超过 MaxQuota。
+func TestSetUserQuota_AllowsBalanceAboveMaxQuota(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, math.MaxInt32)
 	seedWischoicerUser(t, 50111, 100)
 
-	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
-		OrderNo:         "ORDER_SETQUOTA_111",
-		NewApiUserId:    50111,
-		Quota:           100,
-		AmountCents:     1000,
-		Currency:        "CNY",
-		PaymentProvider: "wischoicer_wechat",
-	})
-	require.NoError(t, err)
-
-	// newQuota(MaxInt32-50) + reserved(100) > MaxInt32 → 拒绝。
-	err = SetUserQuota(50111, math.MaxInt32-50)
-	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
-	assert.Equal(t, 100, reloadUserQuota(t, 50111))
+	require.NoError(t, SetUserQuota(50111, 2_481_000_000))
+	assert.Equal(t, 2_481_000_000, reloadUserQuota(t, 50111))
 }
 
-// 非法参数（负数或超过 int32）直接拒绝。
+// 负数仍属于非法参数。
 func TestSetUserQuota_RejectsInvalidArgument(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, 1000000)
 	seedWischoicerUser(t, 50112, 0)
 
 	require.ErrorIs(t, SetUserQuota(50112, -1), ErrWischoicerInvalidArgument)
-	require.ErrorIs(t, SetUserQuota(50112, math.MaxInt32+1), ErrWischoicerInvalidArgument)
 	assert.Equal(t, 0, reloadUserQuota(t, 50112))
 }

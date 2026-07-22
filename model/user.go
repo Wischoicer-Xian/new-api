@@ -1221,6 +1221,61 @@ func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	return increaseUserQuota(id, quota)
 }
 
+// IncreaseUserQuotaByAdmin 执行管理员显式加额。
+//
+// 管理员加额不是支付前的容量预留，不受 Wischoicer 充值软上限约束。SQLite 的
+// INTEGER 账户余额使用 int64 范围；MySQL/PostgreSQL 现有 schema 仍是 int，继续守
+// int32 范围。单次模型计费的 MaxQuota 防溢出规则保持不变。
+func IncreaseUserQuotaByAdmin(id int, quota int) error {
+	if quota < 0 {
+		return errors.New("quota 不能为负数！")
+	}
+	if quota == 0 {
+		return nil
+	}
+
+	err := runWischoicerTx(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrWischoicerCreditUserUnavailable
+			}
+			return err
+		}
+		maxBalance := maxUserBalanceForStorage()
+		if user.Quota < 0 || int64(user.Quota) > maxBalance || int64(quota) > maxBalance-int64(user.Quota) {
+			return ErrWischoicerQuotaOverflow
+		}
+		result := tx.Model(&User{}).
+			Where("id = ?", id).
+			Update("quota", gorm.Expr("quota + ?", quota))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrWischoicerCreditUserUnavailable
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	gopool.Go(func() {
+		if err := cacheIncrUserQuota(id, int64(quota)); err != nil {
+			common.SysLog("failed to increase user quota cache: " + err.Error())
+		}
+	})
+	return nil
+}
+
+func maxUserBalanceForStorage() int64 {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		return math.MaxInt64
+	}
+	return math.MaxInt32
+}
+
 func increaseUserQuota(id int, quota int) (err error) {
 	err = DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", quota)).Error
 	if err != nil {
@@ -1423,12 +1478,10 @@ func CreditPaidTopUp(id int, quota int) error {
 // SetUserQuota 是管理员显式设置用户 quota 绝对值的唯一入口（override 操作）。
 //
 // override 是管理员显式管理行为，不是「新预约」，不受「新售卖准入」软上限
-// （WischoicerMaxUserQuota）限制。但物理硬界不能突破：锁 user 行、汇总
-// activeReservedQuota，校验 newQuota+activeReservedQuota 不超过 int32 宽度
-// （math.MaxInt32），避免后续已付款 RESERVED 凭据消费（consumeQuotaForCreditTx 不
-// 检查容量，直接叠加到 quota 列）时物理溢出。
+// （WischoicerMaxUserQuota）限制。SQLite 账户余额允许超过单次计费使用的 MaxQuota；
+// MySQL/PostgreSQL 仍遵循现有 int32 schema。activeReservedQuota 也计入存储范围检查。
 func SetUserQuota(id int, newQuota int) error {
-	if newQuota < 0 || newQuota > math.MaxInt32 {
+	if newQuota < 0 {
 		return ErrWischoicerInvalidArgument
 	}
 	return runWischoicerTx(func(tx *gorm.DB) error {
@@ -1443,7 +1496,8 @@ func SetUserQuota(id int, newQuota int) error {
 		if err != nil {
 			return err
 		}
-		if int64(newQuota)+int64(reservedSum) > int64(math.MaxInt32) {
+		maxBalance := maxUserBalanceForStorage()
+		if int64(newQuota) > maxBalance || reservedSum < 0 || int64(reservedSum) > maxBalance-int64(newQuota) {
 			return ErrWischoicerQuotaOverflow
 		}
 		result := tx.Model(&User{}).Where("id = ?", id).Update("quota", newQuota)
