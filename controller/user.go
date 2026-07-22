@@ -1058,7 +1058,7 @@ func CreateUser(c *gin.Context) {
 		Username:    user.Username,
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
-		Role:        user.Role, // 保持管理员设置的角色
+		Role:        user.Role,  // 保持管理员设置的角色
 		Group:       user.Group, // 管理员可指定用户分组
 	}
 	authzTouched := false
@@ -1203,9 +1203,9 @@ func ManageUser(c *gin.Context) {
 				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
 				return
 			}
-			if err := model.IncreaseUserQuota(user.Id, req.Value, true); err != nil {
-				if errors.Is(err, model.ErrWischoicerQuotaCapacityExceeded) {
-					common.ApiErrorMsg(c, "用户额度达到上限，无法增加")
+			if err := model.IncreaseUserQuotaByAdmin(user.Id, req.Value); err != nil {
+				if errors.Is(err, model.ErrWischoicerQuotaOverflow) {
+					common.ApiErrorMsg(c, "增加后的用户额度超过系统可表示范围")
 					return
 				}
 				common.ApiError(c, err)
