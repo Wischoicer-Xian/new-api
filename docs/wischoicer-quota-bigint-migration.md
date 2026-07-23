@@ -30,9 +30,18 @@ ALTER TABLE users MODIFY COLUMN aff_history BIGINT NOT NULL DEFAULT 0;
 
 ### precheck（ALTER 前）
 ```sql
--- 记下 4 列当前的 nullability/default（postcheck 比对）
+-- 记下 4 列当前的 nullability/default（postcheck 对比）
 SHOW CREATE TABLE users;
--- 确认无用户值溢出 int32（WIS-561 前理论上不该有；脏数据留神）
+-- 4 个钱字段全量留档（COUNT/MIN/MAX/SUM，与 postcheck 同口径比对——证 ALTER 全量无损，
+-- 比 COUNT + 样本行更强）。int4→bigint 是无损加宽，这些聚合值 ALTER 前后必须完全一致。
+SELECT COUNT(*) AS rows_total,
+       MIN(quota) AS min_quota, MAX(quota) AS max_quota, SUM(quota) AS sum_quota,
+       MIN(used_quota) AS min_used, MAX(used_quota) AS max_used, SUM(used_quota) AS sum_used,
+       MIN(aff_quota) AS min_aff, MAX(aff_quota) AS max_aff, SUM(aff_quota) AS sum_aff,
+       MIN(aff_history) AS min_aff_hist, MAX(aff_history) AS max_aff_hist, SUM(aff_history) AS sum_aff_hist
+  FROM users;
+-- 确认无用户值溢出 int32（WIS-561 前理论上不该有；脏数据留神——若 MAX > int32 max，
+-- 反向降级路径彻底关闭，见下方「禁止盲降级」）
 SELECT id, quota, used_quota, aff_quota, aff_history FROM users
   WHERE quota > 2147483647 OR used_quota > 2147483647
      OR aff_quota > 2147483647 OR aff_history > 2147483647;
@@ -42,17 +51,37 @@ SELECT id, quota, used_quota, aff_quota, aff_history FROM users
 ```sql
 -- 确认 4 列已 bigint + nullability/default 保留（与 precheck 对比）
 SHOW CREATE TABLE users;
--- 确认数据无丢失
-SELECT COUNT(*) FROM users;
-SELECT id, quota, used_quota, aff_quota, aff_history FROM users ORDER BY id LIMIT 5;
+-- 4 个钱字段全量比对：COUNT/MIN/MAX/SUM 必须与 precheck 完全一致（证 ALTER 无丢失/截断）
+SELECT COUNT(*) AS rows_total,
+       MIN(quota) AS min_quota, MAX(quota) AS max_quota, SUM(quota) AS sum_quota,
+       MIN(used_quota) AS min_used, MAX(used_quota) AS max_used, SUM(used_quota) AS sum_used,
+       MIN(aff_quota) AS min_aff, MAX(aff_quota) AS max_aff, SUM(aff_quota) AS sum_aff,
+       MIN(aff_history) AS min_aff_hist, MAX(aff_history) AS max_aff_hist, SUM(aff_history) AS sum_aff_hist
+  FROM users;
 ```
 
-## 禁止盲降级（one-way door）
+## 禁止盲降级（one-way door）+ 安全回滚
 
-`int4 → bigint` 是**安全加宽（无损）**。但**反向 `bigint → int4` 是 one-way door**：一旦有任何用户值 > `2147483647`（int32 max），反向 ALTER 会**静默截断**数据。因此：
+`int4 → bigint` 是**安全加宽（无损）**。但**反向 `bigint → int4` 是 one-way door**：一旦有任何用户值 > `2147483647`（int32 max），反向会**静默截断**数据。
 
-- 回滚代码（revert binary + `WISCHOICER_MAX_USER_QUOTA` env 设回小值）**不需要**反向 ALTER——bigint 列对旧 binary 透明（旧 binary gorm tag `type:int`，但 GORM 对更宽的 DB 列 no-op，不缩窄）。
-- **禁止**执行 `bigint → int4` 反向 ALTER，除非已确认全表无 >int32 值（precheck 查询为空）。
+**⚠️ 对称反事实（R2 已修正）**：旧 binary（`type:int` tag）启动**同样**会发 `bigint → int`——锁定 GORM `v1.25.12` 的 `MigrateColumn` 对列类型差异**不区分加宽/缩窄**，发现 `bigint→int` 不同即置 `alterColumn=true` 发 `MODIFY COLUMN`。**即「直接 revert 到旧 binary」不是透明回滚**，会正踩 one-way door（>int32 值还会让 ALTER 失败 / 危险转换）。
+
+### DDL 后的安全回滚规则
+
+DDL（4 列已 bigint）完成后，**不得直接部署带 `type:int` 的旧 binary**。业务回退只能：
+
+1. **用保留 4 个 `type:bigint` tag 的 rollback build**（revert 业务逻辑但保留 schema tag，或留本 binary + 关业务开关），**不要** revert schema tag；或
+2. 显式关掉该实例的 `AutoMigrate`（若 new-api 提供 gate）再评估是否部署旧 binary。
+
+回退前**先把 `WISCHOICER_MAX_USER_QUOTA` 调小**（回到 int32 顶以下的业务上限），避免回退态余额越界。
+
+### 一旦出现 `>int32` 值：只走 forward-fix
+
+若 precheck/postcheck 的 `MAX(quota/used_quota/aff_quota/aff_history)` 查到任何 `> 2147483647`：**只走 forward-fix**（保留 bigint、修业务逻辑），**禁止** schema 缩窄或部署 `type:int` 旧 binary——任何 `bigint→int` 尝试都会截断或失败。
+
+### 反向 ALTER 的硬条件（仅极端核账场景）
+
+`bigint → int4` 反向 ALTER **仅当** 4 字段 `MAX(...) <= 2147483647` 且经人工核账确认、在受控窗口执行；否则禁止。
 
 ## 范围外
 
