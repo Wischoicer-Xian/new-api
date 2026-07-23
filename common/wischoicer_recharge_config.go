@@ -2,7 +2,6 @@ package common
 
 import (
 	"fmt"
-	"math"
 	"net"
 	"net/url"
 	"os"
@@ -16,9 +15,11 @@ import (
 // 这些变量在 InitEnv 中一次性读取，不支持热更新（方案 §3.2、§12.1）。
 var (
 	// WischoicerMaxUserQuota 是单个 new-api 用户的正余额 + 活跃预留总和上限。
-	// 必须为正且不超过 math.MaxInt32。未配置时使用 MaxInt32（等价于不额外限制，
-	// 保持原有行为）；显式配置为非法值（<=0 或 >MaxInt32）时启动 fail-fast。
-	WischoicerMaxUserQuota = math.MaxInt32
+	// 默认 ¥1,000,000 对应值（QuotaPerUnit=500000，$1=¥1，故 ¥1M = 5×10¹¹ 单位），
+	// 覆盖重度测试账号退款积压（如 ~12.3B 单位 ≈ ¥24,600）且留足生产余量。user.quota
+	// 列已 bigint（WIS-561），余额存储走 int64；此软上限远低于 maxUserBalanceForStorage()
+	// 的 int64 物理硬界。必须为正；显式配置为非正值（<=0）时启动 fail-fast。
+	WischoicerMaxUserQuota int64 = 500_000_000_000
 
 	// WischoicerBillingInternalServiceToken 持有解析后的 Token B（billing → new-api：
 	// reserve / release / credit / GET 内部账务接口）。方向语义明确：仅 billing 持有
@@ -109,10 +110,10 @@ func initWischoicerRechargeConfig() error {
 		if err != nil {
 			return fmt.Errorf("%s must be an integer: %w", EnvWischoicerMaxUserQuota, err)
 		}
-		if parsed <= 0 || parsed > math.MaxInt32 {
-			return fmt.Errorf("%s must be positive and <= math.MaxInt32, got %d", EnvWischoicerMaxUserQuota, parsed)
+		if parsed <= 0 {
+			return fmt.Errorf("%s must be positive, got %d", EnvWischoicerMaxUserQuota, parsed)
 		}
-		WischoicerMaxUserQuota = parsed
+		WischoicerMaxUserQuota = int64(parsed)
 	}
 
 	// Token B（billing → new-api）：主名优先，别名回退。两者均为空时 fail-closed 不挂载。

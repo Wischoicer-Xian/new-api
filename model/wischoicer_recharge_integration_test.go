@@ -2,13 +2,14 @@
 
 // These tests lift the wischoicer feature's money-critical invariants onto a
 // real MySQL/PostgreSQL (testcontainers) so that SELECT ... FOR UPDATE, record
-// locks, unique indexes, CAS and the int32 column width are actually exercised.
+// locks, unique indexes, CAS and the bigint storage cap are actually exercised.
 //
 // The in-memory SQLite suite (wischoicer_recharge_test.go / topup_test.go)
 // cannot reproduce any of these: SQLite has no FOR UPDATE (lockForUpdate skips
 // the clause), serializes on a single write lock, and stores integers up to
-// int64 regardless of the declared column type — so the 32-bit quota overflow
-// that the review flagged as a silent-wrap risk is invisible there.
+// int64 regardless of the declared column type — so the storage-cap overflow
+// guard (checked int64 addition, WIS-561) is exercised identically there;
+// this suite adds the real-DB transaction/lock semantics on top.
 //
 // Run with:  go test -tags integration ./model/...
 // Without the build tag these tests are not compiled; the default
@@ -232,23 +233,24 @@ func TestCreditExternalRecharge_DatabaseConcurrentOnlyOneCredit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. ConsumeReservedQuotaTx int32 hard cap — MySQL int column overflow rollback
+// 4. ConsumeReservedQuotaTx storage hard cap — overflow rollback
 // ---------------------------------------------------------------------------
 
-// user.quota is a 32-bit int column on MySQL. When consumeQuotaForCreditTx runs
-// `UPDATE users SET quota = quota + delta` and the result overflows signed
-// int32, MySQL (strict mode) rejects the UPDATE — the whole transaction rolls
-// back, so the CAS that flipped the credit RESERVED→SUCCESS is also undone.
-// SQLite stores int64 regardless of column type, so this boundary is invisible
-// there. This is the r5 overflow scenario lifted onto a real DB.
-func TestConsumeReservedQuota_DatabaseInt32OverflowRollsBack(t *testing.T) {
+// user.quota is a bigint column. consumeQuotaForCreditTx now uses checked
+// int64 addition: when current+delta would overflow the storage cap it rejects
+// before the UPDATE, so the whole transaction rolls back and the CAS that
+// flipped the credit RESERVED→SUCCESS is also undone. SQLite stores int64
+// regardless of column type, so the boundary is invisible there — this lifts
+// the overflow scenario onto a real DB and exercises the transaction rollback
+// + FOR UPDATE semantics on MySQL/PostgreSQL.
+func TestConsumeReservedQuota_DatabaseStorageOverflowRollsBack(t *testing.T) {
 	setupWischoicerIntegrationDB(t)
-	// Bypass the soft limit by seeding directly: user.quota near MaxInt32.
-	seedWischoicerUser(t, 60004, math.MaxInt32-5)
+	// Bypass the soft limit by seeding directly: user.quota near MaxInt64.
+	seedWischoicerUser(t, 60004, math.MaxInt64-5)
 	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
 		OrderNo:         "ORDER_INT_OVF_004",
 		NewAPIUserId:    60004,
-		Quota:           100, // quota(MaxInt32-5) + 100 overflows int32
+		Quota:           100, // quota(MaxInt64-5) + 100 overflows the storage cap
 		AmountCents:     1000,
 		Currency:        "CNY",
 		PaymentProvider: "wischoicer_wechat",
@@ -265,32 +267,33 @@ func TestConsumeReservedQuota_DatabaseInt32OverflowRollsBack(t *testing.T) {
 		TransactionId:   "TX_INT_OVF_004",
 		PaidAt:          1720000010,
 	})
-	require.Error(t, err, "int32 overflow must cause the credit transaction to fail")
+	require.Error(t, err, "storage overflow must cause the credit transaction to fail")
 	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
 
 	// Durable state: credit rolled back to RESERVED (CAS undone), quota unchanged.
 	credit := reloadCredit(t, "ORDER_INT_OVF_004")
 	assert.Equal(t, WischoicerCreditStatusReserved, credit.Status,
 		"CAS must roll back when the subsequent quota UPDATE fails")
-	assert.Equal(t, math.MaxInt32-5, reloadUserQuota(t, 60004),
+	assert.Equal(t, math.MaxInt64-5, reloadUserQuota(t, 60004),
 		"quota must be unchanged after overflow rollback")
 }
 
 // ---------------------------------------------------------------------------
-// 5. RefundUserQuota int32 hard cap — CAS guard rejects reserved+current+delta > MaxInt32
+// 5. RefundUserQuota storage hard cap — CAS guard rejects reserved+current+delta > cap
 // ---------------------------------------------------------------------------
 
-// The refund fallback (refundUserQuotaDirectWithInt32Cap) guards the true hard
-// cap: current + activeReserved + delta must not exceed MaxInt32. A refund that
-// would overflow is rejected before the UPDATE. Two concurrent refunds that
-// would each overflow must both be rejected — the user-row FOR UPDATE lock
-// serializes them and neither writes. This is the r5 CAS subtraction guard.
-func TestRefundUserQuota_DatabaseInt32OverflowWithReservationRejected(t *testing.T) {
+// The refund fallback (refundUserQuotaDirectWithStorageCap) guards the true hard
+// cap: current + activeReserved + delta must not overflow the storage cap
+// (bigint int64, checked addition, WIS-561). A refund that would overflow is
+// rejected before the UPDATE. Two concurrent refunds that would each overflow
+// must both be rejected — the user-row FOR UPDATE lock serializes them and
+// neither writes. This is the CAS subtraction guard on a real DB.
+func TestRefundUserQuota_DatabaseStorageOverflowWithReservationRejected(t *testing.T) {
 	setupWischoicerIntegrationDB(t)
 	setWischoicerCapacity(t, 1000000) // force CreditUserQuota to reject, exercising the fallback
-	// Seed user near MaxInt32 (bypassing the soft limit) plus an active RESERVED
-	// credit so reserved+current+delta overflows int32.
-	seedWischoicerUser(t, 60005, math.MaxInt32-200)
+	// Seed user near MaxInt64 (bypassing the soft limit) plus an active RESERVED
+	// credit so reserved+current+delta overflows the storage cap.
+	seedWischoicerUser(t, 60005, math.MaxInt64-200)
 	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
 		OrderNo:         "ORDER_INT_OVF_005",
 		NewAPIUserId:    60005,
@@ -320,7 +323,7 @@ func TestRefundUserQuota_DatabaseInt32OverflowWithReservationRejected(t *testing
 
 	// Durable state: quota unchanged; the RESERVED credit still counts against
 	// the hard cap (not consumed by a partial refund).
-	assert.Equal(t, math.MaxInt32-200, reloadUserQuota(t, 60005),
+	assert.Equal(t, math.MaxInt64-200, reloadUserQuota(t, 60005),
 		"quota must be unchanged after both refunds rejected")
 	credit := reloadCredit(t, "ORDER_INT_OVF_005")
 	assert.Equal(t, WischoicerCreditStatusReserved, credit.Status)

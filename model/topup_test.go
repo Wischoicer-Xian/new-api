@@ -116,16 +116,16 @@ func TestCompleteEpayTopUpTx_AlreadySuccessIdempotentNoDoubleCredit(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// quota 增额溢出 int32 硬界 → 事务回滚 → topUp 保持 Pending + quota 不变 + err
+// quota 增额溢出存储硬界（bigint int64）→ 事务回滚 → topUp 保持 Pending + quota 不变 + err
 // controller 据此不 ACK success，让 epay 重试（r7 P1-2 核心不变量）。
 // ---------------------------------------------------------------------------
 
 func TestCompleteEpayTopUpTx_QuotaOverflowRollsBackKeepsPending(t *testing.T) {
 	truncateTopUpTables(t)
-	// 软上限很小，迫使 CreditPaidTopUpTx 进入降级直写路径；current(2e9)+delta(5e8)
-	// = 2.5e9 > MaxInt32 触发物理硬界溢出。
+	// 软上限很小，迫使 CreditPaidTopUpTx 进入降级直写路径；current(MaxInt64-1e8)+delta(5e8)
+	// = MaxInt64+4e8 > MaxInt64 触发存储硬界溢出。
 	setWischoicerCapacity(t, 1_000_000)
-	seedWischoicerUser(t, 61003, 2_000_000_000)
+	seedWischoicerUser(t, 61003, math.MaxInt64-100_000_000)
 	seedTopUpRow(t, &TopUp{
 		UserId:          61003,
 		Amount:          10,
@@ -144,7 +144,7 @@ func TestCompleteEpayTopUpTx_QuotaOverflowRollsBackKeepsPending(t *testing.T) {
 	assert.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
 	// 事务回滚：订单状态与 quota 都不变（Save 已被回滚，不会出现"已 SUCCESS 但未到账"）。
 	assert.Equal(t, common.TopUpStatusPending, reloadTopUpByTradeNo(t, "EPAY_OVF_003").Status)
-	assert.Equal(t, 2_000_000_000, reloadUserQuota(t, 61003))
+	assert.Equal(t, math.MaxInt64-100_000_000, reloadUserQuota(t, 61003))
 }
 
 // ---------------------------------------------------------------------------
