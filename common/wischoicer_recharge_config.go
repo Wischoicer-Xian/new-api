@@ -15,11 +15,12 @@ import (
 // 这些变量在 InitEnv 中一次性读取，不支持热更新（方案 §3.2、§12.1）。
 var (
 	// WischoicerMaxUserQuota 是单个 new-api 用户的正余额 + 活跃预留总和上限。
-	// 默认 ¥1,000,000 对应值（QuotaPerUnit=500000，$1=¥1，故 ¥1M = 5×10¹¹ 单位），
-	// 覆盖重度测试账号退款积压（如 ~12.3B 单位 ≈ ¥24,600）且留足生产余量。user.quota
-	// 列已 bigint（WIS-561），余额存储走 int64；此软上限远低于 maxUserBalanceForStorage()
-	// 的 int64 物理硬界。必须为正；显式配置为非正值（<=0）时启动 fail-fast。
-	WischoicerMaxUserQuota int64 = 500_000_000_000
+	// 默认 = wischoicerMaxUserQuotaCap（¥1,000,000 对应值：QuotaPerUnit=500000，
+	// $1=¥1，故 ¥1M = 5×10¹¹ 单位），覆盖重度测试账号退款积压（如 ~12.3B 单位 ≈ ¥24,600）
+	// 且留足生产余量。user.quota 列已 bigint（WIS-561），余额存储走 int64；此软上限远低于
+	// maxUserBalanceForStorage() 的 int64 物理硬界。env 配置不得突破 wischoicerMaxUserQuotaCap
+	// ——若产品要放宽须另取 Jirui 点头（R2 P1：cap 必须锁住，不能由实现自行放行）。
+	WischoicerMaxUserQuota int64 = wischoicerMaxUserQuotaCap
 
 	// WischoicerBillingInternalServiceToken 持有解析后的 Token B（billing → new-api：
 	// reserve / release / credit / GET 内部账务接口）。方向语义明确：仅 billing 持有
@@ -75,6 +76,11 @@ var (
 	WischoicerCacheRetryInterval = 60
 )
 
+// wischoicerMaxUserQuotaCap 是 WischoicerMaxUserQuota 的硬上限（也是默认值）：¥1,000,000
+// 对应值（QuotaPerUnit=500000，$1=¥1，故 ¥1M = 5×10¹¹ 单位）。env 配置不得突破——
+// 若产品要放宽须另取 Jirui 点头，不能由实现自行放行（R2 P1：cap 必须锁住）。
+const wischoicerMaxUserQuotaCap int64 = 500_000_000_000
+
 const (
 	// Token B（billing → new-api）方向语义主名 + 兼容别名。
 	EnvBillingToNewApiServiceToken     = "BILLING_TO_NEWAPI_SERVICE_TOKEN"
@@ -106,14 +112,18 @@ const WischoicerRechargeTestAmountCents int64 = 100
 // 返回 error 而非直接 panic，让调用方（main）统一用 FatalLog 处理。
 func initWischoicerRechargeConfig() error {
 	if v := os.Getenv(EnvWischoicerMaxUserQuota); v != "" {
-		parsed, err := strconv.Atoi(v)
+		parsed, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return fmt.Errorf("%s must be an integer: %w", EnvWischoicerMaxUserQuota, err)
 		}
-		if parsed <= 0 {
-			return fmt.Errorf("%s must be positive, got %d", EnvWischoicerMaxUserQuota, parsed)
+		if parsed <= 0 || parsed > wischoicerMaxUserQuotaCap {
+			return fmt.Errorf("%s must be in (0, %d], got %d", EnvWischoicerMaxUserQuota, wischoicerMaxUserQuotaCap, parsed)
 		}
-		WischoicerMaxUserQuota = int64(parsed)
+		WischoicerMaxUserQuota = parsed
+	} else {
+		// unset => 默认 cap（让 initWischoicerRechargeConfig 幂等：每次加载都把软上限
+		// 重置为 cap 或 env 值，不残留前次 env 的值）。
+		WischoicerMaxUserQuota = wischoicerMaxUserQuotaCap
 	}
 
 	// Token B（billing → new-api）：主名优先，别名回退。两者均为空时 fail-closed 不挂载。

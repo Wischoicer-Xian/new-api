@@ -327,7 +327,7 @@ func CompleteEpayTopUpTx(tx *gorm.DB, tradeNo string, quotaToAdd int, actualPaym
 	if err := tx.Save(topUp).Error; err != nil {
 		return false, err
 	}
-	// 同事务内增 quota（已收款到账入口，不被“新售卖软上限”拒绝；int32 硬界溢出或 DB
+	// 同事务内增 quota（已收款到账入口，不被“新售卖软上限”拒绝；存储硬界（int64）溢出或 DB
 	// 错误时返回 error 触发整体回滚，订单保持 Pending、quota 不变，等待重试或人工介入）。
 	if err := CreditPaidTopUpTx(tx, topUp.UserId, quotaToAdd); err != nil {
 		return false, err

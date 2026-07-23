@@ -1581,7 +1581,7 @@ func CreditPaidTopUp(id int, quota int) error {
 //
 // override 是管理员显式管理行为，不是「新预约」，不受「新售卖准入」软上限
 // （WischoicerMaxUserQuota）限制。SQLite 账户余额允许超过单次计费使用的 MaxQuota；
-// MySQL/PostgreSQL 仍遵循现有 int32 schema。activeReservedQuota 也计入存储范围检查。
+// MySQL/PostgreSQL 列已 bigint（WIS-561），余额走 int64 存储。activeReservedQuota 也计入存储范围检查。
 func SetUserQuota(id int, newQuota int) error {
 	if newQuota < 0 {
 		return ErrWischoicerInvalidArgument

@@ -1271,6 +1271,48 @@ func TestCreditPaidTopUp_RejectedWhenStorageOverflow(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "paid topup credit rejected: would overflow storage hard cap")
 }
 
+// CreditUserQuotaTx 的 checked 相加（R2 补充直测）：current+reserved+delta 接近 MaxInt64
+// 时直接相加会 wrap 绕过软上限，分步 checked 必须拒绝（容量超限，ErrWischoicerQuotaCapacityExceeded）。
+func TestCreditUserQuotaTx_RejectedWhenStorageOverflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt64)
+	seedWischoicerUser(t, 50091, math.MaxInt64-100)
+	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
+		OrderNo:         "ORDER_CREDIT_OVF_091",
+		NewAPIUserId:    50091,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+		Status:          WischoicerCreditStatusReserved,
+	})
+
+	err := runWischoicerTx(func(tx *gorm.DB) error {
+		return CreditUserQuotaTx(nil, tx, 50091, 200)
+	})
+	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+	assert.Equal(t, math.MaxInt64-100, reloadUserQuota(t, 50091))
+}
+
+// ReserveExternalRecharge 的 checked 相加（R2 补充直测）：current+reserved+new 接近
+// MaxInt64 时 wrap 必须被准入守卫拒绝（容量超限），不能绕过软上限。
+func TestReserveExternalRecharge_RejectedWhenStorageOverflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt64)
+	seedWischoicerUser(t, 50092, math.MaxInt64-100)
+
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_RESERVE_OVF_092",
+		NewApiUserId:    50092,
+		Quota:           200,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+	assert.Equal(t, math.MaxInt64-100, reloadUserQuota(t, 50092))
+}
+
 // 非正 delta 是 no-op。
 func TestCreditPaidTopUp_NonPositiveDeltaIsNoOp(t *testing.T) {
 	truncateWischoicerTables(t)
