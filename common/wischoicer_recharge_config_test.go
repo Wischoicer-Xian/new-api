@@ -2,6 +2,7 @@ package common
 
 import (
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -260,4 +261,44 @@ func TestInitWischoicerRechargeConfig_TokenANextSlot(t *testing.T) {
 	require.NoError(t, os.Setenv(EnvNewApiToBillingServiceTokenNext, "nxt-A"))
 	require.NoError(t, initWischoicerRechargeConfig())
 	assert.False(t, WischoicerWalletRechargeEnabled, "current empty but next set must NOT mount wallet")
+}
+
+// TestWischoicerMaxUserQuota_CapLocked（R2 P1-1）：WISCHOICER_MAX_USER_QUOTA 必须锁在
+// (0, wischoicerMaxUserQuotaCap]——默认 = cap；等于上限通过；上限+1 / <=0 fail-fast。
+// env 不得突破 ¥1M cap（若产品要放宽须另取 Jirui 点头，不能由实现自行放行）。
+func TestWischoicerMaxUserQuota_CapLocked(t *testing.T) {
+	save := snapshotWischoicerConfig(t)
+	t.Cleanup(save)
+	origQuota := WischoicerMaxUserQuota
+	t.Cleanup(func() { WischoicerMaxUserQuota = origQuota })
+	t.Cleanup(func() { _ = os.Unsetenv(EnvWischoicerMaxUserQuota) })
+
+	cases := []struct {
+		name    string
+		value   string // "" = unset
+		wantErr bool
+	}{
+		{"unset defaults to cap", "", false},
+		{"equal cap accepted", strconv.FormatInt(wischoicerMaxUserQuotaCap, 10), false},
+		{"cap+1 rejected", strconv.FormatInt(wischoicerMaxUserQuotaCap+1, 10), true},
+		{"zero rejected", "0", true},
+		{"negative rejected", "-1", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.value == "" {
+				require.NoError(t, os.Unsetenv(EnvWischoicerMaxUserQuota))
+			} else {
+				require.NoError(t, os.Setenv(EnvWischoicerMaxUserQuota, tc.value))
+			}
+			WischoicerMaxUserQuota = 0
+			err := initWischoicerRechargeConfig()
+			if tc.wantErr {
+				require.Error(t, err, "%s: want fail-fast", tc.name)
+				return
+			}
+			require.NoError(t, err, "%s: unexpected err", tc.name)
+			assert.Equal(t, wischoicerMaxUserQuotaCap, WischoicerMaxUserQuota, "%s: want cap", tc.name)
+		})
+	}
 }

@@ -93,14 +93,14 @@ type User struct {
 	TelegramId       string                     `json:"telegram_id" gorm:"column:telegram_id;index"`
 	VerificationCode string                     `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
 	AccessToken      *string                    `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
-	Quota            int                        `json:"quota" gorm:"type:int;default:0"`
-	UsedQuota        int                        `json:"used_quota" gorm:"type:int;default:0;column:used_quota"` // used quota
-	RequestCount     int                        `json:"request_count" gorm:"type:int;default:0;"`               // request number
+	Quota            int                        `json:"quota" gorm:"type:bigint;default:0"`
+	UsedQuota        int                        `json:"used_quota" gorm:"type:bigint;default:0;column:used_quota"` // used quota
+	RequestCount     int                        `json:"request_count" gorm:"type:int;default:0;"`                  // request number
 	Group            string                     `json:"group" gorm:"type:varchar(64);default:'default'"`
 	AffCode          string                     `json:"aff_code" gorm:"type:varchar(32);column:aff_code;uniqueIndex"`
 	AffCount         int                        `json:"aff_count" gorm:"type:int;default:0;column:aff_count"`
-	AffQuota         int                        `json:"aff_quota" gorm:"type:int;default:0;column:aff_quota"`           // 邀请剩余额度
-	AffHistoryQuota  int                        `json:"aff_history_quota" gorm:"type:int;default:0;column:aff_history"` // 邀请历史额度
+	AffQuota         int                        `json:"aff_quota" gorm:"type:bigint;default:0;column:aff_quota"`           // 邀请剩余额度
+	AffHistoryQuota  int                        `json:"aff_history_quota" gorm:"type:bigint;default:0;column:aff_history"` // 邀请历史额度
 	InviterId        int                        `json:"inviter_id" gorm:"type:int;column:inviter_id;index"`
 	DeletedAt        gorm.DeletedAt             `gorm:"index"`
 	LinuxDOId        string                     `json:"linux_do_id" gorm:"column:linux_do_id;index"`
@@ -1317,9 +1317,9 @@ func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 
 // IncreaseUserQuotaByAdmin 执行管理员显式加额。
 //
-// 管理员加额不是支付前的容量预留，不受 Wischoicer 充值软上限约束。SQLite 的
-// INTEGER 账户余额使用 int64 范围；MySQL/PostgreSQL 现有 schema 仍是 int，继续守
-// int32 范围。单次模型计费的 MaxQuota 防溢出规则保持不变。
+// 管理员加额不是支付前的容量预留，不受 Wischoicer 充值软上限约束。user 的 quota
+// 列已统一 bigint（SQLite INTEGER affinity / MySQL gorm type:bigint + 生产 ALTER
+// int4→bigint，见 WIS-561），余额走 int64 范围。单次模型计费的 MaxQuota 防溢出规则保持不变。
 func IncreaseUserQuotaByAdmin(id int, quota int) error {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
@@ -1363,11 +1363,12 @@ func IncreaseUserQuotaByAdmin(id int, quota int) error {
 	return nil
 }
 
+// maxUserBalanceForStorage 返回 user.quota 列可存储的最大余额。user 的 4 个 quota
+// 字段已统一 bigint（SQLite INTEGER affinity / MySQL gorm type:bigint + 生产 ALTER
+// int4→bigint，见 WIS-561），存储层上限对齐 int64；应用层 CAS 守此硬界，不依赖 DB
+// 方言的隐式 cast。
 func maxUserBalanceForStorage() int64 {
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
-		return math.MaxInt64
-	}
-	return math.MaxInt32
+	return math.MaxInt64
 }
 
 func increaseUserQuota(id int, quota int) (err error) {
@@ -1424,11 +1425,11 @@ func DeltaUpdateUserQuota(id int, delta int) (err error) {
 //
 // WischoicerMaxUserQuota 是「新预约/新正向加额」的软上限（reservation admission
 // threshold），不是物理硬界——退款必到账允许突破它。真正的物理硬界是 user.quota 列的
-// int32 宽度：降级直写前锁 user 行、汇总 activeReservedQuota，守住
-// `current + activeReservedQuota + delta <= math.MaxInt32`（覆盖已付款 RESERVED 凭据
-// 消费时会叠加到 quota 列的那部分，不能只看 current），溢出时拒绝退款
-// （ErrWischoicerQuotaOverflow）并 SysError 告警。这是「退款必须到账」的唯一例外——
-// int32 物理溢出无业务解，需运维人工介入（如核账后手动调整或迁移到 bigint）。
+// 存储宽度（bigint 后 int64，见 maxUserBalanceForStorage）：降级直写前锁 user 行、
+// 汇总 activeReservedQuota，守住 `current + activeReservedQuota + delta` 不溢出存储上限
+// （覆盖已付款 RESERVED 凭据消费时会叠加到 quota 列的那部分，不能只看 current），溢出时
+// 拒绝退款（ErrWischoicerQuotaOverflow）并 SysError 告警。这是「退款必须到账」的唯一例外
+// ——存储溢出无业务解（int64 极难触达，触达通常意味异常积压），需运维人工介入核账。
 //
 // 降级直写会让 current 瞬时突破软上限，但不影响已付款 RESERVED 凭据的消费：
 // consumeQuotaForCreditTx 不再检查容量，消费只是把 reserved 转为 actual、净额不变，
@@ -1446,8 +1447,8 @@ func RefundUserQuota(id int, quota int) (err error) {
 	if err == nil {
 		// 守卫通过：异步更新缓存。
 	} else if errors.Is(err, ErrWischoicerQuotaCapacityExceeded) {
-		// 软上限瞬时超限：退款必须到账，降级直写（仍守 int32 物理硬界）。
-		if err = refundUserQuotaDirectWithInt32Cap(id, quota); err != nil {
+		// 软上限瞬时超限：退款必须到账，降级直写（仍守存储硬界 int64）。
+		if err = refundUserQuotaDirectWithStorageCap(id, quota); err != nil {
 			return err
 		}
 	} else {
@@ -1461,22 +1462,22 @@ func RefundUserQuota(id int, quota int) (err error) {
 	return nil
 }
 
-// directIncreaseWithInt32CapTx 是「软上限拒绝后降级直写」的共享 CAS 核心：在已持有的
-// tx 内锁 user 行，汇总 activeReservedQuota，校验 current+reserved+delta 不超过 int32
-// 物理硬界后直接叠加 quota。
+// directIncreaseWithStorageCapTx 是「软上限拒绝后降级直写」的共享 CAS 核心：在已持有的
+// tx 内锁 user 行，汇总 activeReservedQuota，校验 current+reserved+delta 不超过存储
+// 硬界（user.quota 列 bigint 后的 int64 上限，见 maxUserBalanceForStorage）后直接叠加 quota。
 //
-// 唯一约束：user.quota 列是 int32（MySQL/PG int4），叠加后不得溢出。真正的硬界不是
+// 唯一约束：叠加后不得溢出 user.quota 列的存储宽度。真正的硬界不是
 // `current + delta`，而是「用户所有未消费 RESERVED 凭据消费完之后」的 quota 峰值，
 // 即 `current + activeReservedQuota + delta`——已付款 RESERVED 消费
 // （consumeQuotaForCreditTx）不再检查容量，只把 reserved 转 actual 直接叠加到
 // quota 列，一旦降级直写把 current 推到某个值，使得 current+reserved 后续消费会溢出
-// int32，consume 阶段只能靠数据库报错回滚，已付款订单永久死信、无法入账。所以硬界
+// 存储上限，consume 阶段只能靠数据库报错回滚，已付款订单永久死信、无法入账。所以硬界
 // 检查必须锁 user 行、汇总 activeReservedQuota，与 CreditUserQuotaTx 同构，只是上限换成
-// math.MaxInt32（物理硬界）而不是 WischoicerMaxUserQuota（软上限）。
+// maxUserBalanceForStorage()（存储硬界）而不是 WischoicerMaxUserQuota（软上限）。
 //
 // 是 RefundUserQuota（退款降级）与 CreditPaidTopUp（已收款到账降级）共享的核心；
 // 调用方持有各自的事务边界，负责在溢出时补上带上下文的 SysError 审计文案。
-func directIncreaseWithInt32CapTx(tx *gorm.DB, id int, quota int) (reservedSum int, currentQuota int, err error) {
+func directIncreaseWithStorageCapTx(tx *gorm.DB, id int, quota int) (reservedSum int, currentQuota int, err error) {
 	var user User
 	if err := lockForUpdate(tx).Where("id = ?", id).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1488,10 +1489,16 @@ func directIncreaseWithInt32CapTx(tx *gorm.DB, id int, quota int) (reservedSum i
 	if err != nil {
 		return 0, user.Quota, err
 	}
-	// int64 运算避免溢出后再截断检查；硬界覆盖 current+reserved+delta，
-	// 防止降级直写推高 current 后，已付款 RESERVED 消费叠加 reserved 物理溢出 int32。
-	projected := int64(user.Quota) + int64(reservedSum) + int64(quota)
-	if projected > int64(math.MaxInt32) {
+	// 防 int64 运算溢出：余额接近 MaxInt64 时加法会 wrap 成负数绕过上限检查，
+	// 故先逐项 checked 相加，任一步溢出或超过存储硬界即拒绝。
+	cur := int64(user.Quota)
+	reserved := int64(reservedSum)
+	sum := cur + reserved
+	if sum < cur {
+		return reservedSum, user.Quota, ErrWischoicerQuotaOverflow
+	}
+	projected := sum + int64(quota)
+	if projected < sum || projected > maxUserBalanceForStorage() {
 		return reservedSum, user.Quota, ErrWischoicerQuotaOverflow
 	}
 	result := tx.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", quota))
@@ -1504,16 +1511,17 @@ func directIncreaseWithInt32CapTx(tx *gorm.DB, id int, quota int) (reservedSum i
 	return reservedSum, user.Quota, nil
 }
 
-// refundUserQuotaDirectWithInt32Cap 是 RefundUserQuota 的降级直写路径：软上限已拒绝，
-// 退款在 user.quota 上直接叠加 delta，仍守 int32 硬界。溢出即拒绝并 SysError 告警，
-// 需运维人工介入（如核账后手动调整或迁移到 bigint）。
-func refundUserQuotaDirectWithInt32Cap(id int, quota int) error {
+// refundUserQuotaDirectWithStorageCap 是 RefundUserQuota 的降级直写路径：软上限已拒绝，
+// 退款在 user.quota 上直接叠加 delta，仍守存储硬界（bigint 后 int64 上限）。溢出即拒绝
+// 并 SysError 告警——理论上 int64 余额极少触达，触达通常意味异常积压（如海量失败任务
+// 退款总和），需运维人工介入核账。
+func refundUserQuotaDirectWithStorageCap(id int, quota int) error {
 	return runWischoicerTx(func(tx *gorm.DB) error {
-		reservedSum, currentQuota, err := directIncreaseWithInt32CapTx(tx, id, quota)
+		reservedSum, currentQuota, err := directIncreaseWithStorageCapTx(tx, id, quota)
 		if err != nil {
 			if errors.Is(err, ErrWischoicerQuotaOverflow) {
 				common.SysError(fmt.Sprintf(
-					"quota refund rejected: would overflow int32 hard cap including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
+					"quota refund rejected: would overflow storage hard cap (int64) including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
 					id, currentQuota, reservedSum, quota,
 				))
 			}
@@ -1530,8 +1538,8 @@ func refundUserQuotaDirectWithInt32Cap(id int, quota int) error {
 //
 // 与 RefundUserQuota 同样语义：钱已收到，credit 是不可拒绝的义务，不能被「新售卖软
 // 上限」（WischoicerMaxUserQuota）挡住，否则用户已付款却拿不到额度。守卫放行走正常
-// 路径；软上限拒绝时降级为 directIncreaseWithInt32CapTx（仅检查 int32+activeReserved
-// 硬界的 CAS，与 refundUserQuotaDirectWithInt32Cap 相同的硬界保护）。
+// 路径；软上限拒绝时降级为 directIncreaseWithStorageCapTx（仅检查存储硬界+activeReserved
+// 的 CAS，与 refundUserQuotaDirectWithStorageCap 相同的硬界保护）。
 func CreditPaidTopUpTx(tx *gorm.DB, id int, quota int) error {
 	if quota <= 0 {
 		return nil
@@ -1543,12 +1551,12 @@ func CreditPaidTopUpTx(tx *gorm.DB, id int, quota int) error {
 	if !errors.Is(err, ErrWischoicerQuotaCapacityExceeded) {
 		return err
 	}
-	// 软上限瞬时超限：已收款的到账必须成立，降级直写（仍守 int32 物理硬界）。
-	reservedSum, currentQuota, dErr := directIncreaseWithInt32CapTx(tx, id, quota)
+	// 软上限瞬时超限：已收款的到账必须成立，降级直写（仍守存储硬界 int64）。
+	reservedSum, currentQuota, dErr := directIncreaseWithStorageCapTx(tx, id, quota)
 	if dErr != nil {
 		if errors.Is(dErr, ErrWischoicerQuotaOverflow) {
 			common.SysError(fmt.Sprintf(
-				"paid topup credit rejected: would overflow int32 hard cap including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
+				"paid topup credit rejected: would overflow storage hard cap (int64) including active reservations, manual intervention required: user=%d current=%d reserved=%d delta=%d",
 				id, currentQuota, reservedSum, quota,
 			))
 		}
@@ -1573,7 +1581,7 @@ func CreditPaidTopUp(id int, quota int) error {
 //
 // override 是管理员显式管理行为，不是「新预约」，不受「新售卖准入」软上限
 // （WischoicerMaxUserQuota）限制。SQLite 账户余额允许超过单次计费使用的 MaxQuota；
-// MySQL/PostgreSQL 仍遵循现有 int32 schema。activeReservedQuota 也计入存储范围检查。
+// MySQL/PostgreSQL 列已 bigint（WIS-561），余额走 int64 存储。activeReservedQuota 也计入存储范围检查。
 func SetUserQuota(id int, newQuota int) error {
 	if newQuota < 0 {
 		return ErrWischoicerInvalidArgument

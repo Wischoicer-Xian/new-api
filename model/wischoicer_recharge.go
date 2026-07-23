@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -116,8 +115,8 @@ type CreditExternalRechargeResult struct {
 //
 // WischoicerMaxUserQuota 不是物理硬界——退款降级直写（RefundUserQuota）会为了「退款
 // 必到账」突破它，已付款 RESERVED 凭据的消费（consumeQuotaForCreditTx）也不再检查它。
-// 真正的物理硬界是 user.quota 列的 int32 宽度（math.MaxInt32），由 RefundUserQuota
-// 降级路径的 int32 溢出 CAS 守住。本函数守卫的软上限只 gate 新预约和新正向加额（admin
+// 真正的物理硬界是 user.quota 列的存储宽度（bigint 后 int64，见 maxUserBalanceForStorage），
+// 由 RefundUserQuota 降级路径的存储溢出 CAS 守住。本函数守卫的软上限只 gate 新预约和新正向加额（admin
 // 加额、签到等），对已付款的 RESERVED 消费 provably safe（Reserve 阶段已 gate）。
 //
 // 调用前必须已持有 tx（事务）；本函数在同一事务内锁 users 行、汇总该用户
@@ -145,9 +144,12 @@ func CreditUserQuotaTx(ctx context.Context, tx *gorm.DB, userID int, delta int) 
 		return err
 	}
 
-	// int64 运算避免溢出后再截断检查。
-	projected := int64(user.Quota) + int64(reservedSum) + int64(delta)
-	if projected > int64(common.WischoicerMaxUserQuota) {
+	// int64 checked 相加：余额接近 MaxInt64 时直接相加会 wrap 成负数绕过软上限，
+	// 故分步相加并检测每步溢出。
+	cur := int64(user.Quota)
+	sum := cur + int64(reservedSum)
+	projected := sum + int64(delta)
+	if sum < cur || projected < sum || projected > common.WischoicerMaxUserQuota {
 		common.SysError(
 			"wischoicer quota capacity exceeded: " +
 				quotaCapacityMsg(user.Id, user.Quota, reservedSum, delta, common.WischoicerMaxUserQuota),
@@ -168,7 +170,7 @@ func CreditUserQuotaTx(ctx context.Context, tx *gorm.DB, userID int, delta int) 
 }
 
 // quotaCapacityMsg 构造容量超限的审计日志消息。
-func quotaCapacityMsg(userID int, currentQuota int, reservedSum int, delta int, limit int) string {
+func quotaCapacityMsg(userID int, currentQuota int, reservedSum int, delta int, limit int64) string {
 	return fmt.Sprintf("user=%d current=%d reserved=%d delta=%d limit=%d",
 		userID, currentQuota, reservedSum, delta, limit)
 }
@@ -249,8 +251,11 @@ func ReserveExternalRecharge(ctx context.Context, req ReserveExternalRechargeReq
 		if err != nil {
 			return err
 		}
-		projected := int64(user.Quota) + int64(reservedSum) + int64(req.Quota)
-		if projected > int64(common.WischoicerMaxUserQuota) {
+		// int64 checked 相加防余额接近 MaxInt64 时 wrap（同 CreditUserQuotaTx）。
+		cur := int64(user.Quota)
+		sum := cur + int64(reservedSum)
+		projected := sum + int64(req.Quota)
+		if sum < cur || projected < sum || projected > common.WischoicerMaxUserQuota {
 			return ErrWischoicerQuotaCapacityExceeded
 		}
 
@@ -475,12 +480,14 @@ func handleAlreadySuccess(credit *WischoicerRechargeCredit, req CreditExternalRe
 // 到账，已付款的 RESERVED 凭据不能因退款突破而被永久拒绝（否则用户付了钱到不了账，
 // billing 只能重试/死信）。此时新 reservation 会被 ReserveExternalRecharge 的容量检查
 // 正确拒绝，软上限对新预留仍然生效；CreditUserQuotaTx（其他正向加额）也仍守卫容量。
-// int32 物理硬界由应用层在持有 users 行锁时显式检查，不依赖 MySQL/PostgreSQL 的
+// 存储硬界（bigint 后 int64）由应用层在持有 users 行锁时显式检查，不依赖 MySQL/PostgreSQL 的
 // 列类型映射或隐式 cast；越界会让整个事务回滚，凭据仍保持 RESERVED。
 func consumeQuotaForCreditTx(tx *gorm.DB, user *User, delta int) error {
-	if int64(user.Quota)+int64(delta) > int64(math.MaxInt32) {
+	cur := int64(user.Quota)
+	projected := cur + int64(delta)
+	if projected < cur || projected > maxUserBalanceForStorage() {
 		common.SysError(fmt.Sprintf(
-			"reserved quota consumption rejected: would overflow int32 hard cap: user=%d current=%d delta=%d",
+			"reserved quota consumption rejected: would overflow storage hard cap (int64): user=%d current=%d delta=%d",
 			user.Id, user.Quota, delta,
 		))
 		return ErrWischoicerQuotaCapacityExceeded

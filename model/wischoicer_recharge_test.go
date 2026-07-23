@@ -52,7 +52,7 @@ func reloadUserQuota(t *testing.T, id int) int {
 	return u.Quota
 }
 
-func setWischoicerCapacity(t *testing.T, limit int) {
+func setWischoicerCapacity(t *testing.T, limit int64) {
 	t.Helper()
 	original := common.WischoicerMaxUserQuota
 	common.WischoicerMaxUserQuota = limit
@@ -667,13 +667,13 @@ func TestConsumeReservedQuotaTx_SucceedsWhenCurrentExceedsLimit(t *testing.T) {
 	assert.Equal(t, "TX_060", *c.ExternalTransactionId)
 }
 
-// 软上限可以被退款路径突破，但 int32 物理硬界不能依赖数据库方言兜底。
+// 软上限可以被退款路径突破，但存储硬界（bigint 后 int64）不能依赖数据库方言兜底。
 // 即使 SQLite/迁移后的 PostgreSQL 列允许更宽的中间表达式，应用层也必须在
 // users 行锁内拒绝越界，并把此前的 RESERVED→SUCCESS CAS 一并回滚。
-func TestConsumeReservedQuotaTx_Int32OverflowRollsBack(t *testing.T) {
+func TestConsumeReservedQuotaTx_StorageOverflowRollsBack(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, math.MaxInt32)
-	seedWischoicerUser(t, 50062, math.MaxInt32-5)
+	seedWischoicerUser(t, 50062, math.MaxInt64-5)
 	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
 		OrderNo:         "ORDER_CONSUME_OVERFLOW_062",
 		NewAPIUserId:    50062,
@@ -696,7 +696,7 @@ func TestConsumeReservedQuotaTx_Int32OverflowRollsBack(t *testing.T) {
 		PaidAt:          1720000011,
 	})
 	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
-	assert.Equal(t, math.MaxInt32-5, reloadUserQuota(t, 50062))
+	assert.Equal(t, math.MaxInt64-5, reloadUserQuota(t, 50062))
 	credit := reloadCredit(t, "ORDER_CONSUME_OVERFLOW_062")
 	assert.Equal(t, WischoicerCreditStatusReserved, credit.Status)
 	assert.Nil(t, credit.ExternalTransactionId)
@@ -1005,39 +1005,39 @@ func TestRefundUserQuota_NonPositiveDeltaIsNoOp(t *testing.T) {
 	assert.Equal(t, 300000, reloadUserQuota(t, 50084))
 }
 
-// 退款叠加会溢出 int32 物理硬界时，RefundUserQuota 拒绝直写、不改变 quota、SysError 告警。
-// 这是「退款必须到账」的唯一例外——int32 物理溢出无业务解，需运维人工介入。
-// 软上限（WISCHOICER_MAX_USER_QUOTA）放到 MaxInt32，确保退款先被软上限守卫拒绝再走降级，
-// 由降级路径的 int32 CAS 兜住。
-func TestRefundUserQuota_RejectedWhenInt32Overflow(t *testing.T) {
+// 退款叠加会溢出存储硬界（bigint 后 int64）时，RefundUserQuota 拒绝直写、不改变 quota、
+// SysError 告警。这是「退款必须到账」的唯一例外——存储溢出无业务解（int64 极难触达，
+// 触达通常意味异常积压），需运维人工介入核账。软上限（WISCHOICER_MAX_USER_QUOTA）放到
+// MaxInt32（远低于 seed），确保退款先被软上限守卫拒绝再走降级，由降级路径的 storage CAS 兜住。
+func TestRefundUserQuota_RejectedWhenStorageOverflow(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, math.MaxInt32)
-	// current 接近 MaxInt32；叠加 delta 后溢出 int32 物理硬界。
-	seedWischoicerUser(t, 50085, math.MaxInt32-100)
+	// current 接近存储硬界 MaxInt64；叠加 delta 后溢出。
+	seedWischoicerUser(t, 50085, math.MaxInt64-100)
 
 	logBuf := captureSysError(t)
 	err := RefundUserQuota(50085, 200)
 	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
 	// CAS 拒绝写入，quota 保持不变。
-	assert.Equal(t, math.MaxInt32-100, reloadUserQuota(t, 50085))
+	assert.Equal(t, math.MaxInt64-100, reloadUserQuota(t, 50085))
 	// 告警包含溢出关键字，供运维检索。
-	assert.Contains(t, logBuf.String(), "overflow int32 hard cap")
+	assert.Contains(t, logBuf.String(), "overflow storage hard cap")
 }
 
-// R5 P1 回归：refundUserQuotaDirectWithInt32Cap 的硬界检查必须覆盖
-// activeReservedQuota，不能只看 current。反例：current=MaxInt32-150，
-// activeReserved=100（Reserve 阶段合法：current+reserved+new<=MaxInt32），
-// refund=100。修复前的 CAS 只查 current+delta<=MaxInt32
-// （MaxInt32-150+100=MaxInt32-50，合法通过），退款成功后 current=MaxInt32-50；
+// R5 P1 回归：refundUserQuotaDirectWithStorageCap 的硬界检查必须覆盖
+// activeReservedQuota，不能只看 current。反例：current=MaxInt64-150，
+// activeReserved=100（Reserve 阶段合法：current+reserved+new<=软上限=MaxInt64），
+// refund=100。修复前的 CAS 只查 current+delta<=存储上限
+// （MaxInt64-150+100=MaxInt64-50，合法通过），退款成功后 current=MaxInt64-50；
 // 后续消费该 100 的 RESERVED 凭据时 consumeQuotaForCreditTx 直接
-// current+reservedDelta=MaxInt32-50+100=MaxInt32+50，物理溢出，
+// current+reservedDelta=MaxInt64-50+100=MaxInt64+50，物理溢出，
 // 已付款订单永久死信。修复后退款阶段必须正确拒绝（覆盖 reserved）。
 func TestRefundUserQuota_RejectedWhenReservedPlusCurrentWouldOverflow(t *testing.T) {
 	truncateWischoicerTables(t)
-	setWischoicerCapacity(t, math.MaxInt32)
-	seedWischoicerUser(t, 50086, math.MaxInt32-150)
+	setWischoicerCapacity(t, math.MaxInt64)
+	seedWischoicerUser(t, 50086, math.MaxInt64-150)
 
-	// Reserve 阶段合法：current(MaxInt32-150) + reserved(0) + new(100) <= MaxInt32。
+	// Reserve 阶段合法：current(MaxInt64-150) + reserved(0) + new(100) <= 软上限(MaxInt64)。
 	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
 		OrderNo:         "ORDER_OVERFLOW_086",
 		NewApiUserId:    50086,
@@ -1048,13 +1048,13 @@ func TestRefundUserQuota_RejectedWhenReservedPlusCurrentWouldOverflow(t *testing
 	})
 	require.NoError(t, err)
 
-	// 退款 100：current+delta=MaxInt32-50 本身不溢出，但 current+reserved+delta
-	// =MaxInt32-150+100+100=MaxInt32+50 会溢出，必须被拒绝。
+	// 退款 100：current+delta=MaxInt64-50 本身不溢出，但 current+reserved+delta
+	// =MaxInt64-150+100+100=MaxInt64+50 会溢出，必须被拒绝。
 	logBuf := captureSysError(t)
 	err = RefundUserQuota(50086, 100)
 	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
-	assert.Equal(t, math.MaxInt32-150, reloadUserQuota(t, 50086))
-	assert.Contains(t, logBuf.String(), "overflow int32 hard cap including active reservations")
+	assert.Equal(t, math.MaxInt64-150, reloadUserQuota(t, 50086))
+	assert.Contains(t, logBuf.String(), "overflow storage hard cap (int64) including active reservations")
 
 	// 已付款的 RESERVED 凭据仍能安全消费（未被退款推向溢出）。
 	result, err := CreditExternalRecharge(nil, CreditExternalRechargeRequest{
@@ -1069,14 +1069,14 @@ func TestRefundUserQuota_RejectedWhenReservedPlusCurrentWouldOverflow(t *testing
 	})
 	require.NoError(t, err)
 	require.True(t, result.Credited)
-	assert.Equal(t, math.MaxInt32-50, reloadUserQuota(t, 50086))
+	assert.Equal(t, math.MaxInt64-50, reloadUserQuota(t, 50086))
 }
 
-// R5 P1 回归：软上限拒绝触发降级，但覆盖 reserved 后仍在 int32 硬界内时正常降级到账。
-func TestRefundUserQuota_FallbackSucceedsWhenReservedWithinInt32Cap(t *testing.T) {
+// R5 P1 回归：软上限拒绝触发降级，但覆盖 reserved 后仍在存储硬界（bigint int64）内时正常降级到账。
+func TestRefundUserQuota_FallbackSucceedsWhenReservedWithinStorageCap(t *testing.T) {
 	truncateWischoicerTables(t)
-	// 软上限低于 MaxInt32，确保退款先被软上限拒绝再走降级；降级路径的硬界检查
-	// （current+reserved+delta<=MaxInt32）仍应放行。
+	// 软上限设较低，确保退款先被软上限拒绝再走降级；降级路径的存储硬界检查
+	// （current+reserved+delta<=MaxInt64）仍应放行（值远低于存储上限）。
 	setWischoicerCapacity(t, math.MaxInt32-800)
 	seedWischoicerUser(t, 50087, math.MaxInt32-1000)
 
@@ -1091,7 +1091,7 @@ func TestRefundUserQuota_FallbackSucceedsWhenReservedWithinInt32Cap(t *testing.T
 	require.NoError(t, err)
 
 	// 软上限：current+reserved+delta = (MaxInt32-1000)+100+200 = MaxInt32-700 > limit(MaxInt32-800) → 拒绝，降级。
-	// 硬界：MaxInt32-700 <= MaxInt32 → 放行。
+	// 存储硬界：MaxInt32-700 <= MaxInt64 → 放行。
 	logBuf := captureSysError(t)
 	require.NoError(t, RefundUserQuota(50087, 200))
 	assert.Equal(t, math.MaxInt32-800, reloadUserQuota(t, 50087))
@@ -1102,8 +1102,8 @@ func TestRefundUserQuota_FallbackSucceedsWhenReservedWithinInt32Cap(t *testing.T
 // 验证锁 user 行 + 事务重试下 CAS/锁生效，不会出现双写导致的物理溢出。
 func TestRefundUserQuota_ConcurrentOnlyOneSucceedsWhenWouldOverflow(t *testing.T) {
 	truncateWischoicerTables(t)
-	setWischoicerCapacity(t, math.MaxInt32)
-	seedWischoicerUser(t, 50088, math.MaxInt32-150)
+	setWischoicerCapacity(t, math.MaxInt64)
+	seedWischoicerUser(t, 50088, math.MaxInt64-150)
 
 	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
 		OrderNo:         "ORDER_OVERFLOW_088",
@@ -1115,7 +1115,7 @@ func TestRefundUserQuota_ConcurrentOnlyOneSucceedsWhenWouldOverflow(t *testing.T
 	})
 	require.NoError(t, err)
 
-	// 每次退款 60：current(MaxInt32-150)+reserved(100)+60 = MaxInt32+10，单次已溢出，
+	// 每次退款 60：current(MaxInt64-150)+reserved(100)+60 = MaxInt64+10，单次已溢出，
 	// 两次并发都应被拒绝（每次都会溢出，不存在"仅一次安全"的情形，用于验证串行化下
 	// 两次都被正确拒绝、quota 保持不变、无并发数据竞争造成的意外通过）。
 	const attempts = 2
@@ -1136,8 +1136,8 @@ func TestRefundUserQuota_ConcurrentOnlyOneSucceedsWhenWouldOverflow(t *testing.T
 	}
 	wg.Wait()
 
-	assert.Equal(t, attempts, errCount, "both refunds should be rejected, neither may overflow int32")
-	assert.Equal(t, math.MaxInt32-150, reloadUserQuota(t, 50088))
+	assert.Equal(t, attempts, errCount, "both refunds should be rejected, neither may overflow the storage cap")
+	assert.Equal(t, math.MaxInt64-150, reloadUserQuota(t, 50088))
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,18 +1257,60 @@ func TestCreditPaidTopUp_FallbackOnCapacityGuardReject(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "paid topup credit rejected by soft cap, falling back to direct increase")
 }
 
-// 降级直写叠加会溢出 int32 物理硬界时拒绝，不改变 quota，SysError 告警——已收款到账
-// 也不能突破物理硬界，这是唯一例外（需运维人工介入）。
-func TestCreditPaidTopUp_RejectedWhenInt32Overflow(t *testing.T) {
+// 降级直写叠加会溢出存储硬界（bigint int64）时拒绝，不改变 quota，SysError 告警——
+// 已收款到账也不能突破存储硬界，这是唯一例外（需运维人工介入核账）。
+func TestCreditPaidTopUp_RejectedWhenStorageOverflow(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, math.MaxInt32)
-	seedWischoicerUser(t, 50102, math.MaxInt32-100)
+	seedWischoicerUser(t, 50102, math.MaxInt64-100)
 
 	logBuf := captureSysError(t)
 	err := CreditPaidTopUp(50102, 200)
 	require.ErrorIs(t, err, ErrWischoicerQuotaOverflow)
-	assert.Equal(t, math.MaxInt32-100, reloadUserQuota(t, 50102))
-	assert.Contains(t, logBuf.String(), "paid topup credit rejected: would overflow int32 hard cap")
+	assert.Equal(t, math.MaxInt64-100, reloadUserQuota(t, 50102))
+	assert.Contains(t, logBuf.String(), "paid topup credit rejected: would overflow storage hard cap")
+}
+
+// CreditUserQuotaTx 的 checked 相加（R2 补充直测）：current+reserved+delta 接近 MaxInt64
+// 时直接相加会 wrap 绕过软上限，分步 checked 必须拒绝（容量超限，ErrWischoicerQuotaCapacityExceeded）。
+func TestCreditUserQuotaTx_RejectedWhenStorageOverflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt64)
+	seedWischoicerUser(t, 50091, math.MaxInt64-100)
+	seedWischoicerReservedCredit(t, &WischoicerRechargeCredit{
+		OrderNo:         "ORDER_CREDIT_OVF_091",
+		NewAPIUserId:    50091,
+		Quota:           100,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+		Status:          WischoicerCreditStatusReserved,
+	})
+
+	err := runWischoicerTx(func(tx *gorm.DB) error {
+		return CreditUserQuotaTx(nil, tx, 50091, 200)
+	})
+	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+	assert.Equal(t, math.MaxInt64-100, reloadUserQuota(t, 50091))
+}
+
+// ReserveExternalRecharge 的 checked 相加（R2 补充直测）：current+reserved+new 接近
+// MaxInt64 时 wrap 必须被准入守卫拒绝（容量超限），不能绕过软上限。
+func TestReserveExternalRecharge_RejectedWhenStorageOverflow(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, math.MaxInt64)
+	seedWischoicerUser(t, 50092, math.MaxInt64-100)
+
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_RESERVE_OVF_092",
+		NewApiUserId:    50092,
+		Quota:           200,
+		AmountCents:     1000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.ErrorIs(t, err, ErrWischoicerQuotaCapacityExceeded)
+	assert.Equal(t, math.MaxInt64-100, reloadUserQuota(t, 50092))
 }
 
 // 非正 delta 是 no-op。
