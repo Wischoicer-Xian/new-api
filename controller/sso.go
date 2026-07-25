@@ -2,6 +2,8 @@ package controller
 
 import (
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -60,18 +62,12 @@ func SsoLogin(c *gin.Context) {
 		}
 	}
 
-	// Validate redirect: only allow same-origin relative paths. Accept a single
-	// leading '/' and reject anything that could be interpreted as an authority
-	// — including protocol-relative '//host' and the backslash form '/\host',
-	// which several browsers normalize to '//host'. This keeps the 302 Location
-	// confined to a same-origin path and blocks open-redirect.
-	redirectPath := "/"
-	if req.Redirect != "" {
-		cleaned := strings.TrimSpace(req.Redirect)
-		if len(cleaned) >= 1 && cleaned[0] == '/' && !(len(cleaned) >= 2 && (cleaned[1] == '/' || cleaned[1] == '\\')) {
-			redirectPath = cleaned
-		}
-	}
+	// Confine the redirect to a same-origin path. See safeSameOriginRedirect:
+	// it rejects ASCII control bytes and backslashes anywhere (browsers strip
+	// TAB/CR/LF and normalize /\ during URL parsing, which otherwise turns
+	// "/\t/host" or "/\host" into the authority "//host"), then requires a
+	// single leading '/' and no scheme/host.
+	redirectPath := safeSameOriginRedirect(req.Redirect)
 
 	user, err := model.ValidateAccessToken(req.AccessToken)
 	if err != nil {
@@ -108,5 +104,50 @@ func SsoLogin(c *gin.Context) {
 	}
 	service.WriteRefreshCookie(c, bundle.RefreshToken)
 	model.UpdateUserLastLoginAt(user.Id)
+	// Match the password-login response: never cache a session-bearing reply.
+	setAuthNoStore(c)
 	c.Redirect(http.StatusFound, redirectPath)
+}
+
+// safeSameOriginRedirect validates and normalizes a user-supplied redirect
+// target for use as a 302 Location, confining it to a same-origin path.
+//
+// It rejects anything a browser could reinterpret as a cross-origin URL:
+//   - ASCII control bytes (< 0x20 or 0x7f) anywhere — browsers strip TAB/CR/LF
+//     during URL parsing, so e.g. "/\t/host" resolves to the authority "//host".
+//   - backslashes anywhere — several browsers normalize "/\host" to "//host".
+//   - any URL with a scheme or host (absolute "https://host" or scheme-relative
+//     "//host").
+//
+// Only a path beginning with a single '/' is accepted; everything else (empty,
+// relative, authority, control/backslash smuggling, or percent-decoded bypasses
+// like "%2F%09%2Fhost" — the form parser decodes that to "/\t/host") falls back
+// to "/". The accepted path is collapsed with path.Clean; a query/fragment is
+// preserved.
+func safeSameOriginRedirect(raw string) string {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" || cleaned[0] != '/' {
+		return "/"
+	}
+	for i := 0; i < len(cleaned); i++ {
+		b := cleaned[i]
+		if b == '\\' || b < 0x20 || b == 0x7f {
+			return "/"
+		}
+	}
+	parsed, err := url.Parse(cleaned)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" {
+		return "/"
+	}
+	normalized := path.Clean(parsed.Path)
+	if normalized == "." || normalized == "" {
+		return "/"
+	}
+	if parsed.RawQuery != "" {
+		normalized += "?" + parsed.RawQuery
+	}
+	if parsed.Fragment != "" {
+		normalized += "#" + parsed.Fragment
+	}
+	return normalized
 }
