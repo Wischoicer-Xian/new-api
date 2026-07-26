@@ -22,6 +22,12 @@ func SetApiRouter(router *gin.Engine) {
 	ssoRouter.Use(middleware.BodyStorageCleanup())
 	ssoRouter.Use(middleware.AnonymousRequestBodyLimit())
 	ssoRouter.POST("/sso/login", middleware.SsoRateLimit(), controller.SsoLogin)
+	// RFC v4 §2 N1: SSO v2 浏览器入口。仅在 WischoicerSsoEnabled=true（boot 已校验 origin/
+	// authorize-url 合法）时挂载；SsoRateLimit 先于 handler（429 不建 flow，不写 auth_flows）。
+	// C2 authorize 走另一条 internal-auth group（N2/N4），不在此。
+	if common.WischoicerSsoEnabled {
+		ssoRouter.GET("/sso/wischoicer/start", middleware.SsoRateLimit(), controller.SsoStart)
+	}
 
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
