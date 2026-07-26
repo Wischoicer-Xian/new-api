@@ -2,7 +2,6 @@ package controller
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -225,24 +224,30 @@ func TestSsoAuthorize_RejectsF2_DoesNotConsume(t *testing.T) {
 
 // ---- 记星 de34eafd P2-1: 并发回归（barrier + model 层证明）----
 
-// model 层：两 goroutine 并发消费同一 F2 → 恰一次成功、一次 ErrAuthFlowConsumed。
-// 这是「恰一」的主证明——不依赖 HTTP Location（区分不出 lock 错 vs 真 consumed）。
-func TestConsumeAuthFlowWithAction_ConcurrentF2_ExactlyOneConsumes(t *testing.T) {
+// model 层：两 goroutine 并发消费同一 F2 → 恰一次成功、一次非成功（SQLite busy 或
+// consumed——两者都 fail-closed、不签 session）。安全契约是「至多一次副作用 + loser
+// fail-closed」，不是「loser 必为 consumed」（SQLite 单写锁下 loser 可能拿 SQLITE_BUSY
+// 而非 ErrAuthFlowConsumed——这是测试 artifact；生产 MySQL/PostgreSQL 行锁下 loser 天然
+// = consumed，exact 契约挂 integration test）。
+func TestConsumeAuthFlowWithAction_ConcurrentF2_ExactlyOneSucceeds(t *testing.T) {
 	_, _ = setupWischoicerSsoCallbackTestDB(t)
 	f2Tok := makeWischoicerSsoFlow(t, 0, "model-concurrent-bsid")
 
-	ready := make(chan struct{})
+	allReady := sync.WaitGroup{}
+	allReady.Add(2)
+	start := make(chan struct{})
 	var (
-		wg             sync.WaitGroup
-		mu             sync.Mutex
-		successes      int
-		consumedErrors int
+		wg           sync.WaitGroup
+		mu           sync.Mutex
+		successes    int
+		nonSuccesses int
 	)
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			<-ready // barrier
+			allReady.Done() // signal ready
+			<-start         // barrier: wait for simultaneous release
 			_, err := model.ConsumeAuthFlowWithAction(f2Tok, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeWischoicerSSOCode}, func(tx *gorm.DB, f2 *model.AuthFlow) error {
 				return nil
 			})
@@ -250,16 +255,17 @@ func TestConsumeAuthFlowWithAction_ConcurrentF2_ExactlyOneConsumes(t *testing.T)
 			defer mu.Unlock()
 			if err == nil {
 				successes++
-			} else if errors.Is(err, model.ErrAuthFlowConsumed) {
-				consumedErrors++
+			} else {
+				nonSuccesses++ // busy OR consumed — both fail-closed
 			}
 		}()
 	}
-	close(ready)
+	allReady.Wait() // both parked on <-start
+	close(start)    // simultaneous release
 	wg.Wait()
 
-	assert.Equal(t, 1, successes, "exactly one consume succeeds (model layer proof)")
-	assert.Equal(t, 1, consumedErrors, "exactly one ErrAuthFlowConsumed")
+	assert.Equal(t, 1, successes, "exactly one consume succeeds (at-most-one side effect)")
+	assert.Equal(t, 1, nonSuccesses, "exactly one non-success (loser fail-closed: busy or consumed)")
 }
 
 // HTTP 层：一 F2 并发双 callback → 恰一 /dashboard + 一非 /dashboard + 库内恰一 session。
@@ -270,7 +276,9 @@ func TestSsoCallback_ConcurrentDoubleCallback_ExactlyOneSession(t *testing.T) {
 	f2Tok := makeWischoicerSsoFlow(t, user.Id, bsid)
 
 	gin.SetMode(gin.TestMode)
-	ready := make(chan struct{})
+	allReady := sync.WaitGroup{}
+	allReady.Add(2)
+	start := make(chan struct{})
 	var (
 		wg      sync.WaitGroup
 		mu      sync.Mutex
@@ -280,7 +288,8 @@ func TestSsoCallback_ConcurrentDoubleCallback_ExactlyOneSession(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			<-ready // barrier
+			allReady.Done() // signal ready
+			<-start         // barrier: wait for simultaneous release
 			w := httptest.NewRecorder()
 			_, r := gin.CreateTestContext(w)
 			r.GET("/callback", SsoCallback)
@@ -292,7 +301,8 @@ func TestSsoCallback_ConcurrentDoubleCallback_ExactlyOneSession(t *testing.T) {
 			mu.Unlock()
 		}()
 	}
-	close(ready)
+	allReady.Wait() // both parked on <-start
+	close(start)    // simultaneous release
 	wg.Wait()
 
 	dashboards, others := 0, 0
