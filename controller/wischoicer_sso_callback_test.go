@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ func setupWischoicerSsoCallbackTestDB(t *testing.T) (*gorm.DB, *model.User) {
 	db, err := gorm.Open(sqlite.Open(dbFile), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.AuthFlow{}, &model.User{}, &model.UserSession{}))
+	db.Exec("PRAGMA busy_timeout = 5000") // P2-2: 并发测试——让第二个写事务等待而非立即报 "database is locked"
 	model.DB = db
 	common.RedisEnabled = false
 	common.SessionSecret = "wischoicer-sso-callback-test-secret"
@@ -214,4 +216,89 @@ func TestSsoAuthorize_RejectsF2_DoesNotConsume(t *testing.T) {
 	var f2 model.AuthFlow
 	require.NoError(t, db.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSOCode).First(&f2).Error)
 	assert.Nil(t, f2.ConsumedAt, "F2 must NOT be consumed by C2 (purpose mismatch)")
+}
+
+// ---- 记星 9c4b5fee P2-2: 并发回归 ----
+
+// 一 F2 并发双 callback → 恰一 session / 一成功（DB 并发 CAS 回归，-race）。
+func TestSsoCallback_ConcurrentDoubleCallback_ExactlyOneSession(t *testing.T) {
+	db, user := setupWischoicerSsoCallbackTestDB(t)
+	bsid := "concurrent-bsid"
+	f2Tok := makeWischoicerSsoFlow(t, user.Id, bsid)
+
+	gin.SetMode(gin.TestMode)
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		results []string
+	)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			_, r := gin.CreateTestContext(w)
+			r.GET("/callback", SsoCallback)
+			req := httptest.NewRequest(http.MethodGet, "/callback?code="+f2Tok, nil)
+			req.AddCookie(&http.Cookie{Name: wischoicerSsoStateCookie, Value: bsid})
+			r.ServeHTTP(w, req)
+			mu.Lock()
+			results = append(results, w.Header().Get("Location"))
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	dashboards, logins := 0, 0
+	for _, loc := range results {
+		if loc == "/dashboard" {
+			dashboards++
+		} else {
+			logins++
+		}
+	}
+	assert.Equal(t, 1, dashboards, "exactly one /dashboard (one session)")
+	assert.Equal(t, 1, logins, "exactly one /login (F2 consumed by the other)")
+	assert.Equal(t, int64(1), sessionCount(t, db, user.Id), "exactly one session in DB")
+}
+
+// CreateLoginSession 失败 → F2 仍 consumed、无 refresh cookie。
+func TestSsoCallback_CreateLoginSessionFails_F2ConsumedNoCookie(t *testing.T) {
+	db, _ := setupWischoicerSsoCallbackTestDB(t)
+	bsid := "fail-bsid"
+	f2Tok, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose:   model.AuthFlowPurposeWischoicerSSOCode,
+		Intent:    model.AuthFlowIntentLogin,
+		UserId:    999999, // 不存在的 user → CreateLoginSession 失败
+		Payload:   wischoicerSsoBsidHash(bsid),
+		ExpiresAt: time.Now().Add(wischoicerSsoFlowTTL),
+	})
+	require.NoError(t, err)
+	w := callCallback(t, f2Tok, bsid)
+	assert.Equal(t, "/login", w.Header().Get("Location"), "CreateLoginSession failed → unified failure")
+	var f2 model.AuthFlow
+	require.NoError(t, db.Where("purpose = ? AND user_id = ?", model.AuthFlowPurposeWischoicerSSOCode, 999999).First(&f2).Error)
+	assert.NotNil(t, f2.ConsumedAt, "F2 MUST be consumed even when CreateLoginSession fails")
+	for _, ck := range w.Result().Cookies() {
+		assert.NotContains(t, ck.Name, "refresh", "no refresh cookie on CreateLoginSession failure")
+	}
+}
+
+// clear cookie 的 Path/Secure/HttpOnly/SameSite/MaxAge 逐项对称（与 /start set 对称）。
+func TestSsoCallback_ClearCookieSymmetric(t *testing.T) {
+	_, user := setupWischoicerSsoCallbackTestDB(t)
+	f2Tok := makeWischoicerSsoFlow(t, user.Id, "clear-test-bsid")
+	w := callCallback(t, f2Tok, "clear-test-bsid")
+	var cleared *http.Cookie
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == wischoicerSsoStateCookie {
+			cleared = ck
+		}
+	}
+	require.NotNil(t, cleared, "state cookie clear must be in response")
+	assert.Equal(t, wischoicerSsoStateCookiePath, cleared.Path, "clear Path == set Path")
+	assert.True(t, cleared.Secure, "clear Secure == set Secure")
+	assert.True(t, cleared.HttpOnly, "clear HttpOnly == set HttpOnly")
+	assert.Equal(t, http.SameSiteLaxMode, cleared.SameSite, "clear SameSite == set SameSite")
+	assert.True(t, cleared.MaxAge < 0, "clear MaxAge < 0 (delete)")
 }
