@@ -52,7 +52,10 @@ func wischoicerTokenMatchesAnySlot(provided, current, next string) bool {
 	nxt := sha256.Sum256([]byte(next))
 	matchCur := subtle.ConstantTimeCompare(p[:], cur[:])
 	matchNext := subtle.ConstantTimeCompare(p[:], nxt[:])
-	return matchCur == 1 || matchNext == 1
+	// 位聚合（非 ||）：Go 的 || 按规范短路——matchCur==1 时跳过 next 判定，objdump 可见
+	// 基于 matchCur 的条件跳转，结果阶段残留槽位相关分支。改 (matchCur|matchNext)==1：两个
+	// ConstantTimeCompare 结果（各 0/1）位或，无分支、不短路，命中任一槽即放行。记星 R2 P1（f726d64e）。
+	return (matchCur | matchNext) == 1
 }
 
 // wischoicerBillingReject 统一输出鉴权失败响应：{success:false,code:"UNAUTHORIZED",message}

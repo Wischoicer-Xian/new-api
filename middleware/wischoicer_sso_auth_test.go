@@ -121,3 +121,28 @@ func TestWischoicerFeeReadAuth_CurrentOrNextSlotPasses(t *testing.T) {
 		})
 	}
 }
+
+// 记星 R2 P1 (f726d64e): wischoicerTokenMatchesAnySlot 用位聚合 (matchCur|matchNext)==1，
+// 非短路 ||（objdump 可见 || 的 matchCur 条件跳转）。钉住双槽聚合正确性——helper 服务
+// billing/SSO/fee-read 三条 middleware，本测试覆盖其纯比较语义。
+func TestWischoicerTokenMatchesAnySlot_BitOrAggregation(t *testing.T) {
+	cases := []struct {
+		name                    string
+		provided, current, next string
+		want                    bool
+	}{
+		{"both wrong", "p", "c", "n", false},
+		{"current matches", "c", "c", "n", true},
+		{"next matches", "n", "c", "n", true},
+		{"both match same value", "x", "x", "x", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wischoicerTokenMatchesAnySlot(tc.provided, tc.current, tc.next)
+			if got != tc.want {
+				t.Fatalf("matchesAnySlot(provided=%q,current=%q,next=%q) = %v, want %v",
+					tc.provided, tc.current, tc.next, got, tc.want)
+			}
+		})
+	}
+}
