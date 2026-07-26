@@ -48,13 +48,26 @@ const (
 // WischoicerSsoEnabled=true 但 origin/authorize-url 非法 → 返回 error（main FatalLog 拒启动）。
 // WischoicerSsoEnabled=false 时不校验（允许部署先配 origin 再开 gate）；两个 gate 各自独立解析。
 func initWischoicerSsoConfig() error {
-	WischoicerSsoEnabled = wischoicerBoolEnv(EnvWischoicerSsoEnabled)
-	LegacySsoPatDisabled = wischoicerBoolEnv(EnvWischoicerLegacySsoPatDisabled)
+	enabled, err := wischoicerBoolEnv(EnvWischoicerSsoEnabled)
+	if err != nil {
+		return err
+	}
+	WischoicerSsoEnabled = enabled
+	legacy, err := wischoicerBoolEnv(EnvWischoicerLegacySsoPatDisabled)
+	if err != nil {
+		return err
+	}
+	LegacySsoPatDisabled = legacy
 	WischoicerSsoPublicOrigin = os.Getenv(EnvWischoicerSsoPublicOrigin)
 	WischoicerSsoAuthorizeURL = os.Getenv(EnvWischoicerSsoAuthorizeURL)
 
 	if !WischoicerSsoEnabled {
 		return nil // 未启用：不校验，允许先配后开
+	}
+	// 记星 P1-2：SSO v2 callback 的 refresh cookie 必须 Secure（HTTPS）。SessionCookieSecure 由
+	// InitSessionCookieSettings（init.go:65，在本函数前执行）设置——enabled 但 !Secure → 拒启动。
+	if !SessionCookieSecure {
+		return fmt.Errorf("%s=true requires SESSION_COOKIE_SECURE=true (+ SESSION_COOKIE_TRUSTED_URL); refusing to start — callback refresh cookie must be Secure", EnvWischoicerSsoEnabled)
 	}
 	if err := ValidateWischoicerSsoPublicOrigin(WischoicerSsoPublicOrigin); err != nil {
 		return fmt.Errorf("%s invalid (WischoicerSSO enabled): %w", EnvWischoicerSsoPublicOrigin, err)
@@ -65,9 +78,18 @@ func initWischoicerSsoConfig() error {
 	return nil
 }
 
-// wischoicerBoolEnv 解析 "true"/"false"（大小写不敏感、去空白）；空/非 true → false。
-func wischoicerBoolEnv(name string) bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv(name)), "true")
+// wischoicerBoolEnv 解析 tri-state bool env（记星 P1-2）：空/unset/"false" → false（无错），
+// "true" → true，**任何其它非空值 → error**（报变量名 + 拒启动，防 gate 拼写错误静默失效）。
+func wischoicerBoolEnv(name string) (bool, error) {
+	v := strings.TrimSpace(os.Getenv(name))
+	switch {
+	case v == "" || strings.EqualFold(v, "false"):
+		return false, nil
+	case strings.EqualFold(v, "true"):
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be one of true|false (or unset); got %q — refusing to start (防止 gate 拼写错误静默失效)", name, v)
+	}
 }
 
 // ValidateWischoicerSsoPublicOrigin 校验公网 callback 纯 origin（RFC v4 §1.4 N3）：

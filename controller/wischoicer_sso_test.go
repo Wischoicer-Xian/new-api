@@ -62,7 +62,7 @@ func TestSsoStart_RedirectsWithFlowTokenAndStateCookie(t *testing.T) {
 	flowToken := parsed.Query().Get("flow_token")
 	assert.NotEmpty(t, flowToken, "flow_token in redirect must be non-empty")
 
-	// state cookie 种下、值 == redirect 的 flow_token（绑定发起浏览器）、属性齐。
+	// state cookie 种下。记星 P1-1 三秘密：cookie 值 = bsid（**不是 F1**）——持有 F1 ≠ 持有 cookie。
 	var cookie *http.Cookie
 	for _, ck := range w.Result().Cookies() {
 		if ck.Name == wischoicerSsoStateCookie {
@@ -70,12 +70,18 @@ func TestSsoStart_RedirectsWithFlowTokenAndStateCookie(t *testing.T) {
 		}
 	}
 	require.NotNil(t, cookie, "state cookie %q not set", wischoicerSsoStateCookie)
-	assert.Equal(t, flowToken, cookie.Value, "state cookie value must equal flow_token")
+	assert.NotEmpty(t, cookie.Value, "state cookie (bsid) must be non-empty")
+	assert.NotEqual(t, flowToken, cookie.Value, "state cookie must hold bsid, NOT F1 (three-secret)")
 	assert.True(t, cookie.HttpOnly, "state cookie must be HttpOnly")
 	assert.True(t, cookie.Secure, "state cookie must be Secure (HTTPS-only)")
 	assert.Equal(t, http.SameSiteLaxMode, cookie.SameSite, "state cookie must be SameSite=Lax")
 	// RFC §4 line 178: Path 收窄到 /api/sso/wischoicer（/start 与 callback 同前缀，不向其它路径泄漏）。
 	assert.Equal(t, wischoicerSsoStateCookiePath, cookie.Path, "state cookie Path must be narrowed to /api/sso/wischoicer")
+	// 记星 P1-1：F1.payload = HMAC(bsid)（上下文绑定，非空）——C2 带入 F2，callback 据此校验浏览器。
+	var flow model.AuthFlow
+	require.NoError(t, model.DB.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSO).First(&flow).Error, "F1 AuthFlow must exist")
+	assert.NotEmpty(t, flow.Payload, "F1 payload must be bsidHash (not empty)")
+	assert.Equal(t, wischoicerSsoBsidHash(cookie.Value), flow.Payload, "F1 payload must equal HMAC(bsid)")
 	// RFC §4 line 178: no-store（不缓存含 flow_token 的 302）+ no-referrer（不让 Location 里的 flow_token 经 Referer 泄漏）。
 	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))

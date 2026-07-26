@@ -64,7 +64,7 @@ func TestValidateWischoicerSsoAuthorizeURL(t *testing.T) {
 	}
 }
 
-// 双 gate 互不推导 + WischoicerSsoEnabled=true 时 origin/authorize-url 必须 valid（否则 boot reject）。
+// 双 gate 互不推导 + WischoicerSsoEnabled=true 时 origin/authorize-url/SessionCookieSecure 必须 valid（否则 boot reject）。
 func TestInitWischoicerSsoConfig_GateTruthTable(t *testing.T) {
 	const (
 		okOrigin = "https://test.wischoicer.com"
@@ -75,6 +75,11 @@ func TestInitWischoicerSsoConfig_GateTruthTable(t *testing.T) {
 		LegacySsoPatDisabled = false
 		WischoicerSsoPublicOrigin = ""
 		WischoicerSsoAuthorizeURL = ""
+	}
+	secure := func(on bool) func() {
+		prev := SessionCookieSecure
+		SessionCookieSecure = on
+		return func() { SessionCookieSecure = prev }
 	}
 
 	t.Run("disabled skips validation", func(t *testing.T) {
@@ -89,10 +94,11 @@ func TestInitWischoicerSsoConfig_GateTruthTable(t *testing.T) {
 		}
 	})
 
-	t.Run("enabled with valid origin+authorize", func(t *testing.T) {
+	t.Run("enabled with valid origin+authorize+secure", func(t *testing.T) {
 		t.Setenv(EnvWischoicerSsoEnabled, "true")
 		t.Setenv(EnvWischoicerSsoPublicOrigin, okOrigin)
 		t.Setenv(EnvWischoicerSsoAuthorizeURL, okAuth)
+		t.Cleanup(secure(true))
 		reset()
 		if err := initWischoicerSsoConfig(); err != nil {
 			t.Fatalf("enabled valid: want nil, got %v", err)
@@ -102,10 +108,23 @@ func TestInitWischoicerSsoConfig_GateTruthTable(t *testing.T) {
 		}
 	})
 
+	// 记星 P1-2：enabled 但 !SessionCookieSecure → 拒启动（callback refresh cookie 必须 Secure）。
+	t.Run("enabled but !SessionCookieSecure boot-rejects", func(t *testing.T) {
+		t.Setenv(EnvWischoicerSsoEnabled, "true")
+		t.Setenv(EnvWischoicerSsoPublicOrigin, okOrigin)
+		t.Setenv(EnvWischoicerSsoAuthorizeURL, okAuth)
+		t.Cleanup(secure(false))
+		reset()
+		if err := initWischoicerSsoConfig(); err == nil {
+			t.Fatal("enabled !Secure: want error, got nil")
+		}
+	})
+
 	t.Run("enabled with invalid origin boot-rejects", func(t *testing.T) {
 		t.Setenv(EnvWischoicerSsoEnabled, "true")
 		t.Setenv(EnvWischoicerSsoPublicOrigin, "http://invalid")
 		t.Setenv(EnvWischoicerSsoAuthorizeURL, okAuth)
+		t.Cleanup(secure(true))
 		reset()
 		if err := initWischoicerSsoConfig(); err == nil {
 			t.Fatal("enabled bad origin: want error, got nil")
@@ -116,9 +135,20 @@ func TestInitWischoicerSsoConfig_GateTruthTable(t *testing.T) {
 		t.Setenv(EnvWischoicerSsoEnabled, "true")
 		t.Setenv(EnvWischoicerSsoPublicOrigin, okOrigin)
 		t.Setenv(EnvWischoicerSsoAuthorizeURL, "https://x/wrong/path")
+		t.Cleanup(secure(true))
 		reset()
 		if err := initWischoicerSsoConfig(); err == nil {
 			t.Fatal("enabled bad authorize: want error, got nil")
+		}
+	})
+
+	// 记星 P1-2：wischoicerBoolEnv 仅接受 空/false/true，其它非空值 → 报变量名 + 拒启动（防 gate 拼错静默失效）。
+	t.Run("bad bool value boot-rejects", func(t *testing.T) {
+		t.Setenv(EnvWischoicerSsoEnabled, "yes") // not true|false
+		t.Cleanup(secure(true))
+		reset()
+		if err := initWischoicerSsoConfig(); err == nil {
+			t.Fatal("bad bool: want error, got nil")
 		}
 	})
 
