@@ -74,5 +74,9 @@ func TestSsoStart_RedirectsWithFlowTokenAndStateCookie(t *testing.T) {
 	assert.True(t, cookie.HttpOnly, "state cookie must be HttpOnly")
 	assert.True(t, cookie.Secure, "state cookie must be Secure (HTTPS-only)")
 	assert.Equal(t, http.SameSiteLaxMode, cookie.SameSite, "state cookie must be SameSite=Lax")
-	assert.Equal(t, "/", cookie.Path)
+	// RFC §4 line 178: Path 收窄到 /api/sso/wischoicer（/start 与 callback 同前缀，不向其它路径泄漏）。
+	assert.Equal(t, wischoicerSsoStateCookiePath, cookie.Path, "state cookie Path must be narrowed to /api/sso/wischoicer")
+	// RFC §4 line 178: no-store（不缓存含 flow_token 的 302）+ no-referrer（不让 Location 里的 flow_token 经 Referer 泄漏）。
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
 }
