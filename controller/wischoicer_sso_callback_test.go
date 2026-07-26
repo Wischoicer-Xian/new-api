@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -132,6 +133,7 @@ func TestSsoCallback_HappyPath_CreatesSession(t *testing.T) {
 	w := callCallback(t, f2Tok, bsid)
 	assert.Equal(t, http.StatusFound, w.Code)
 	assert.Equal(t, "/dashboard", w.Header().Get("Location"))
+	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"), "P2-2: referrer-policy on success")
 	assert.Equal(t, int64(1), sessionCount(t, db, user.Id), "one session created")
 }
 
@@ -143,6 +145,7 @@ func TestSsoCallback_WrongBsid_BurnsF2AndFailsUnified(t *testing.T) {
 	w := callCallback(t, f2Tok, "wrong-bsid")
 	assert.Equal(t, http.StatusFound, w.Code, "unified failure redirects (302)")
 	assert.Equal(t, "/login", w.Header().Get("Location"), "unified failure → /login")
+	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"), "P2-2: referrer-policy on failure too")
 	// F2 burned despite wrong bsid
 	var f2 model.AuthFlow
 	require.NoError(t, db.Where("purpose = ? AND user_id = ?", model.AuthFlowPurposeWischoicerSSOCode, user.Id).First(&f2).Error)
@@ -220,13 +223,54 @@ func TestSsoAuthorize_RejectsF2_DoesNotConsume(t *testing.T) {
 
 // ---- 记星 9c4b5fee P2-2: 并发回归 ----
 
-// 一 F2 并发双 callback → 恰一 session / 一成功（DB 并发 CAS 回归，-race）。
+// ---- 记星 de34eafd P2-1: 并发回归（barrier + model 层证明）----
+
+// model 层：两 goroutine 并发消费同一 F2 → 恰一次成功、一次 ErrAuthFlowConsumed。
+// 这是「恰一」的主证明——不依赖 HTTP Location（区分不出 lock 错 vs 真 consumed）。
+func TestConsumeAuthFlowWithAction_ConcurrentF2_ExactlyOneConsumes(t *testing.T) {
+	_, _ = setupWischoicerSsoCallbackTestDB(t)
+	f2Tok := makeWischoicerSsoFlow(t, 0, "model-concurrent-bsid")
+
+	ready := make(chan struct{})
+	var (
+		wg             sync.WaitGroup
+		mu             sync.Mutex
+		successes      int
+		consumedErrors int
+	)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-ready // barrier
+			_, err := model.ConsumeAuthFlowWithAction(f2Tok, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeWischoicerSSOCode}, func(tx *gorm.DB, f2 *model.AuthFlow) error {
+				return nil
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				successes++
+			} else if errors.Is(err, model.ErrAuthFlowConsumed) {
+				consumedErrors++
+			}
+		}()
+	}
+	close(ready)
+	wg.Wait()
+
+	assert.Equal(t, 1, successes, "exactly one consume succeeds (model layer proof)")
+	assert.Equal(t, 1, consumedErrors, "exactly one ErrAuthFlowConsumed")
+}
+
+// HTTP 层：一 F2 并发双 callback → 恰一 /dashboard + 一非 /dashboard + 库内恰一 session。
+// 带 ready/start barrier（防串行化掩盖真并发语义，记星 de34eafd P2-1）。
 func TestSsoCallback_ConcurrentDoubleCallback_ExactlyOneSession(t *testing.T) {
 	db, user := setupWischoicerSsoCallbackTestDB(t)
 	bsid := "concurrent-bsid"
 	f2Tok := makeWischoicerSsoFlow(t, user.Id, bsid)
 
 	gin.SetMode(gin.TestMode)
+	ready := make(chan struct{})
 	var (
 		wg      sync.WaitGroup
 		mu      sync.Mutex
@@ -236,6 +280,7 @@ func TestSsoCallback_ConcurrentDoubleCallback_ExactlyOneSession(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-ready // barrier
 			w := httptest.NewRecorder()
 			_, r := gin.CreateTestContext(w)
 			r.GET("/callback", SsoCallback)
@@ -247,18 +292,19 @@ func TestSsoCallback_ConcurrentDoubleCallback_ExactlyOneSession(t *testing.T) {
 			mu.Unlock()
 		}()
 	}
+	close(ready)
 	wg.Wait()
 
-	dashboards, logins := 0, 0
+	dashboards, others := 0, 0
 	for _, loc := range results {
 		if loc == "/dashboard" {
 			dashboards++
 		} else {
-			logins++
+			others++
 		}
 	}
 	assert.Equal(t, 1, dashboards, "exactly one /dashboard (one session)")
-	assert.Equal(t, 1, logins, "exactly one /login (F2 consumed by the other)")
+	assert.Equal(t, 1, others, "exactly one non-/dashboard (F2 consumed by the other)")
 	assert.Equal(t, int64(1), sessionCount(t, db, user.Id), "exactly one session in DB")
 }
 
@@ -301,4 +347,47 @@ func TestSsoCallback_ClearCookieSymmetric(t *testing.T) {
 	assert.True(t, cleared.HttpOnly, "clear HttpOnly == set HttpOnly")
 	assert.Equal(t, http.SameSiteLaxMode, cleared.SameSite, "clear SameSite == set SameSite")
 	assert.True(t, cleared.MaxAge < 0, "clear MaxAge < 0 (delete)")
+}
+
+// 记星 9c4b5fee / de34eafd P2-3: C2 重放同一 F1 → 首次 200、二次 400、恰一 F2、F1 已消费。
+func TestSsoAuthorize_ReplayF1_SecondRejectsOnlyOneF2(t *testing.T) {
+	db, user := setupWischoicerSsoCallbackTestDB(t)
+	f1Tok, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose:   model.AuthFlowPurposeWischoicerSSOStart,
+		Intent:    model.AuthFlowIntentLogin,
+		Payload:   wischoicerSsoBsidHash("replay-f1-bsid"),
+		ExpiresAt: time.Now().Add(wischoicerSsoFlowTTL),
+	})
+	require.NoError(t, err)
+
+	gin.SetMode(gin.TestMode)
+	body := `{"flow_token":"` + f1Tok + `","new_api_user_id":` + strconv.Itoa(user.Id) + `}`
+
+	// First C2 → 200
+	w1 := httptest.NewRecorder()
+	_, r1 := gin.CreateTestContext(w1)
+	r1.POST("/authorize", SsoAuthorize)
+	req1 := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(body))
+	req1.Header.Set("Content-Type", "application/json")
+	r1.ServeHTTP(w1, req1)
+	assert.Equal(t, http.StatusOK, w1.Code, "first C2(F1) → 200")
+
+	// Replay F1 → 400 (F1 already consumed)
+	w2 := httptest.NewRecorder()
+	_, r2 := gin.CreateTestContext(w2)
+	r2.POST("/authorize", SsoAuthorize)
+	req2 := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	r2.ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusBadRequest, w2.Code, "replay F1 → 400")
+
+	// Exactly one F2 (Code)
+	var f2Count int64
+	require.NoError(t, db.Model(&model.AuthFlow{}).Where("purpose = ?", model.AuthFlowPurposeWischoicerSSOCode).Count(&f2Count).Error)
+	assert.Equal(t, int64(1), f2Count, "exactly one F2 (replay produces no extra)")
+
+	// F1 consumed
+	var f1 model.AuthFlow
+	require.NoError(t, db.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSOStart).First(&f1).Error)
+	assert.NotNil(t, f1.ConsumedAt, "F1 consumed after first C2")
 }
