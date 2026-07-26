@@ -22,10 +22,14 @@ const (
 	AuthFlowPurposePasskeyStepUp     = "passkey_step_up"
 	AuthFlowPurposeTelegramBind      = "telegram_bind"
 	AuthFlowPurposeTelegramAssertion = "telegram_assertion"
-	AuthFlowIntentLogin              = "login"
-	AuthFlowIntentBind               = "bind"
-	AuthFlowTokenBytes               = 32
-	AuthFlowDefaultCleanupRetention  = 24 * time.Hour
+	// WIS-631 SSO v2 三秘密状态机阶段类型隔离（记星 9c4b5fee P1）：F1（/start 建）与 F2（C2 mint）
+	// 必须用不同 Purpose，C2 只精确匹配消费 F1、callback 只精确匹配消费 F2——避免两 consumer 互吃 token。
+	AuthFlowPurposeWischoicerSSOStart = "wischoicer_sso_start" // F1: /start 创建的 flow（C2 消费）
+	AuthFlowPurposeWischoicerSSOCode  = "wischoicer_sso_code"  // F2: C2 mint 的 one-time login code（callback 消费）
+	AuthFlowIntentLogin               = "login"
+	AuthFlowIntentBind                = "bind"
+	AuthFlowTokenBytes                = 32
+	AuthFlowDefaultCleanupRetention   = 24 * time.Hour
 )
 
 var (
@@ -94,6 +98,15 @@ func authFlowTokenHash(token string) string {
 }
 
 func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
+	return CreateAuthFlowWithTx(DB, input)
+}
+
+// CreateAuthFlowWithTx 在调用者的事务里建一个 AuthFlow（WIS-631 SSO v2 C2「消费 F1 ＋ 建 F2」
+// 同事务用：F1.payload 原样复制进 F2.payload 必须在同一 tx 内完成，记星 edec1c4b）。
+func CreateAuthFlowWithTx(tx *gorm.DB, input AuthFlowCreate) (string, *AuthFlow, error) {
+	if tx == nil {
+		return "", nil, ErrAuthFlowInvalid // P2-3: nil tx guard（镜像 ClaimExternalAuthAssertionWithTx），别让导出 helper panic
+	}
 	if strings.TrimSpace(input.Purpose) == "" || input.ExpiresAt.IsZero() || !input.ExpiresAt.After(time.Now()) {
 		return "", nil, ErrAuthFlowInvalid
 	}
@@ -112,7 +125,7 @@ func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
 		Payload:   input.Payload,
 		ExpiresAt: input.ExpiresAt,
 	}
-	if err := DB.Create(flow).Error; err != nil {
+	if err := tx.Create(flow).Error; err != nil {
 		return "", nil, err
 	}
 	return token, flow, nil

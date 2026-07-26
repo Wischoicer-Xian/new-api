@@ -39,6 +39,25 @@ var (
 	// WischoicerBillingInternalEnabled 标记 Token B 账务路由是否挂载（Token B 非空时 true）。
 	WischoicerBillingInternalEnabled = false
 
+	// WischoicerSsoServiceToken 是 user-service → new-api SSO authorize（C2，
+	// POST /api/sso/wischoicer/authorize）的入站服务凭据 sso-service-token（RFC v4 N2）。
+	// 与 Token A/B 完全独立、绝不复用。current/next 双槽恒时校验（镜像 Token B 接收端）；
+	// current 为空时 C2 路由不挂载（fail-closed）。
+	WischoicerSsoServiceToken = ""
+	// WischoicerSsoServiceTokenNext 是 sso-service-token 的 next 槽（24h 无损轮换，WIS-547 R3 同构）。
+	WischoicerSsoServiceTokenNext = ""
+	// WischoicerSsoInternalEnabled 标记 C2 SSO authorize 路由是否挂载（current 非空时 true）。
+	WischoicerSsoInternalEnabled = false
+
+	// WischoicerFeeReadToken 是 user-service → new-api fee-read（C5，/api/internal/wischoicer/**
+	// 或复用 /api/log/self/feature-usage/*——D3 待记星 round-4 R3 拍板）的入站服务凭据
+	// fee-read-token（RFC v4 N2/U4）。独立、不复用 Token A/B/sso-service-token。
+	WischoicerFeeReadToken = ""
+	// WischoicerFeeReadTokenNext 是 fee-read-token 的 next 槽（轮换）。
+	WischoicerFeeReadTokenNext = ""
+	// WischoicerFeeReadEnabled 标记 C5 fee-read 路由是否挂载（current 非空时 true）。
+	WischoicerFeeReadEnabled = false
+
 	// NewApiToBillingServiceToken 持有解析后的 Token A current（new-api → billing：
 	// /internal/new-api/v1/recharge-orders* 内部订单接口）。方向语义明确：仅 new-api
 	// 持有并发送，billing 仅用于验证 internal order 路由。为空时钱包 façade 不挂载（fail-closed）。
@@ -86,6 +105,11 @@ const (
 	EnvBillingToNewApiServiceToken     = "BILLING_TO_NEWAPI_SERVICE_TOKEN"
 	EnvBillingToNewApiServiceTokenNext = "BILLING_TO_NEWAPI_SERVICE_TOKEN_NEXT"
 	EnvWischoicerBillingInternalToken  = "WISCHOICER_BILLING_INTERNAL_SERVICE_TOKEN"
+	// RFC v4 N2: user-service → new-api 入站服务凭据（C2 sso-service-token / C5 fee-read-token）。
+	EnvWischoicerSsoServiceToken     = "WISCHOICER_SSO_SERVICE_TOKEN"
+	EnvWischoicerSsoServiceTokenNext = "WISCHOICER_SSO_SERVICE_TOKEN_NEXT"
+	EnvWischoicerFeeReadToken        = "WISCHOICER_FEE_READ_TOKEN"
+	EnvWischoicerFeeReadTokenNext    = "WISCHOICER_FEE_READ_TOKEN_NEXT"
 	// Token A（new-api → billing）方向语义主名 + next 槽。
 	EnvNewApiToBillingServiceToken      = "NEWAPI_TO_BILLING_SERVICE_TOKEN"
 	EnvNewApiToBillingServiceTokenNext  = "NEWAPI_TO_BILLING_SERVICE_TOKEN_NEXT"
@@ -148,6 +172,15 @@ func initWischoicerRechargeConfig() error {
 	// Token B next 槽（current/next 双槽轮换结构，WIS-547 R3 已锁）。current 为权威：
 	// current 为空时即便 next 非空也不挂载（fail-closed，避免只配半边）。
 	WischoicerBillingInternalServiceTokenNext = os.Getenv(EnvBillingToNewApiServiceTokenNext)
+
+	// RFC v4 N2: user-service → new-api 入站服务凭据（C2 sso-service-token / C5 fee-read-token），
+	// current/next 双槽、独立不复用 Token A/B。current 为空时对应路由不挂载（fail-closed）。
+	WischoicerSsoServiceToken = os.Getenv(EnvWischoicerSsoServiceToken)
+	WischoicerSsoServiceTokenNext = os.Getenv(EnvWischoicerSsoServiceTokenNext)
+	WischoicerSsoInternalEnabled = WischoicerSsoServiceToken != ""
+	WischoicerFeeReadToken = os.Getenv(EnvWischoicerFeeReadToken)
+	WischoicerFeeReadTokenNext = os.Getenv(EnvWischoicerFeeReadTokenNext)
+	WischoicerFeeReadEnabled = WischoicerFeeReadToken != ""
 
 	// Token A（new-api → billing）+ billing 基址：解析后决定钱包 façade 是否挂载。
 	NewApiToBillingServiceToken = os.Getenv(EnvNewApiToBillingServiceToken)

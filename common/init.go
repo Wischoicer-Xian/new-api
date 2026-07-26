@@ -138,6 +138,9 @@ func InitEnv() {
 	if err := initWischoicerRechargeConfig(); err != nil {
 		log.Fatal("wischoicer recharge config invalid: " + err.Error())
 	}
+	if err := initWischoicerSsoConfig(); err != nil {
+		log.Fatal("wischoicer sso config invalid: " + err.Error())
+	}
 }
 
 func initUserSessionSettings() {
