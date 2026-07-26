@@ -95,6 +95,12 @@ func authFlowTokenHash(token string) string {
 }
 
 func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
+	return CreateAuthFlowWithTx(DB, input)
+}
+
+// CreateAuthFlowWithTx 在调用者的事务里建一个 AuthFlow（WIS-631 SSO v2 C2「消费 F1 ＋ 建 F2」
+// 同事务用：F1.payload 原样复制进 F2.payload 必须在同一 tx 内完成，记星 edec1c4b）。
+func CreateAuthFlowWithTx(tx *gorm.DB, input AuthFlowCreate) (string, *AuthFlow, error) {
 	if strings.TrimSpace(input.Purpose) == "" || input.ExpiresAt.IsZero() || !input.ExpiresAt.After(time.Now()) {
 		return "", nil, ErrAuthFlowInvalid
 	}
@@ -113,7 +119,7 @@ func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
 		Payload:   input.Payload,
 		ExpiresAt: input.ExpiresAt,
 	}
-	if err := DB.Create(flow).Error; err != nil {
+	if err := tx.Create(flow).Error; err != nil {
 		return "", nil, err
 	}
 	return token, flow, nil

@@ -27,6 +27,11 @@ func SetApiRouter(router *gin.Engine) {
 	// C2 authorize 走另一条 internal-auth group（N2/N4），不在此。
 	if common.WischoicerSsoEnabled {
 		ssoRouter.GET("/sso/wischoicer/start", middleware.SsoRateLimit(), controller.SsoStart)
+		// RFC v4 §2 N5 + 记星 edec1c4b: callback（浏览器回跳，消费 F2 + bsid 校验建 session）。public。
+		ssoRouter.GET("/sso/wischoicer/callback", controller.SsoCallback)
+		// RFC v4 §2 N4-C2 + 记星 edec1c4b: C2 authorize（user-service broker 调，mint F2）。
+		// 挂 WischoicerSsoInternalAuth（sso-service-token，N2）——internal-auth group，禁落 public/UserAuth 无鉴权。
+		ssoRouter.POST("/sso/wischoicer/authorize", middleware.WischoicerSsoInternalAuth(), controller.SsoAuthorize)
 	}
 
 	apiRouter := router.Group("/api")
