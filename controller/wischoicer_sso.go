@@ -54,7 +54,7 @@ func SsoStart(c *gin.Context) {
 	bsidHash := wischoicerSsoBsidHash(bsid)
 
 	flowToken, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
-		Purpose:   model.AuthFlowPurposeWischoicerSSO,
+		Purpose:   model.AuthFlowPurposeWischoicerSSOStart, // F1（记星 9c4b5fee P1 阶段隔离）
 		Intent:    model.AuthFlowIntentLogin,
 		Payload:   bsidHash,
 		ExpiresAt: time.Now().Add(wischoicerSsoFlowTTL),
@@ -101,9 +101,9 @@ func SsoAuthorize(c *gin.Context) {
 		return
 	}
 	var callbackURL string
-	_, err := model.ConsumeAuthFlowWithAction(req.FlowToken, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeWischoicerSSO}, func(tx *gorm.DB, f1 *model.AuthFlow) error {
+	_, err := model.ConsumeAuthFlowWithAction(req.FlowToken, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeWischoicerSSOStart}, func(tx *gorm.DB, f1 *model.AuthFlow) error { // C2 只精确匹配消费 F1（记星 9c4b5fee P1）
 		f2Token, _, err := model.CreateAuthFlowWithTx(tx, model.AuthFlowCreate{
-			Purpose:   model.AuthFlowPurposeWischoicerSSO,
+			Purpose:   model.AuthFlowPurposeWischoicerSSOCode, // F2（记星 9c4b5fee P1）
 			Intent:    model.AuthFlowIntentLogin,
 			UserId:    req.NewApiUserId,
 			Payload:   f1.Payload, // 记星 edec1c4b：原样复制，不解码/不重算
@@ -126,7 +126,7 @@ func SsoAuthorize(c *gin.Context) {
 // SsoCallback (N5) handles GET /api/sso/wischoicer/callback?code=F2 (RFC v4 §2 N5 + 记星 edec1c4b).
 //
 // 浏览器从 user-service 302 回此端点（带 state cookie）。在消费 F2 的同事务内恒时校验 bsid
-//（cookie(bsid) → HMAC → 比 F2.payload）。**cookie 缺失 / 格式错 / hash 不符都先提交 F2 消费、再返回
+// （cookie(bsid) → HMAC → 比 F2.payload）。**cookie 缺失 / 格式错 / hash 不符都先提交 F2 消费、再返回
 // 统一失败**（记星 edec1c4b：失败也提交，防 bsid 爆破——每次错探都烧一个 F2）。匹配则 CreateLoginSession
 // + refresh cookie → /dashboard；否则 → /login（统一失败，不泄原因）。
 func SsoCallback(c *gin.Context) {
@@ -141,7 +141,7 @@ func SsoCallback(c *gin.Context) {
 	// 在消费 F2 的事务内恒时校验 bsid——action 始终返回 nil（**失败也提交**：cookie 缺失 / 格式错 /
 	// hash 不符都先提交 F2 消费、再统一失败，记星 edec1c4b——每次错探都烧一个 F2）。session 创建移到
 	// 事务外，避免 ConsumeAuthFlowWithAction 事务内再开 CreateLoginSession 写事务→sqlite 单写锁死锁。
-	_, err := model.ConsumeAuthFlowWithAction(code, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeWischoicerSSO}, func(tx *gorm.DB, f2 *model.AuthFlow) error {
+	_, err := model.ConsumeAuthFlowWithAction(code, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeWischoicerSSOCode}, func(tx *gorm.DB, f2 *model.AuthFlow) error { // callback 只精确匹配消费 F2（记星 9c4b5fee P1）
 		userID = f2.UserId
 		if bsid == "" {
 			return nil // cookie 缺失——F2 烧掉、不建 session
@@ -154,6 +154,7 @@ func SsoCallback(c *gin.Context) {
 	})
 
 	setAuthNoStore(c)
+	c.Header("Referrer-Policy", "no-referrer") // P2-1（RFC §4 line 178）：成功 + 统一失败都带
 	if err != nil || !matched {
 		// 统一失败（cookie 缺失 / 格式错 / hash 不符 / F1 已消费）——bsid 类失败已提交 F2 烧码。不泄原因。
 		c.Redirect(http.StatusFound, "/login")

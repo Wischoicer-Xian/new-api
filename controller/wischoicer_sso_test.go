@@ -79,7 +79,7 @@ func TestSsoStart_RedirectsWithFlowTokenAndStateCookie(t *testing.T) {
 	assert.Equal(t, wischoicerSsoStateCookiePath, cookie.Path, "state cookie Path must be narrowed to /api/sso/wischoicer")
 	// 记星 P1-1：F1.payload = HMAC(bsid)（上下文绑定，非空）——C2 带入 F2，callback 据此校验浏览器。
 	var flow model.AuthFlow
-	require.NoError(t, model.DB.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSO).First(&flow).Error, "F1 AuthFlow must exist")
+	require.NoError(t, model.DB.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSOStart).First(&flow).Error, "F1 AuthFlow must exist")
 	assert.NotEmpty(t, flow.Payload, "F1 payload must be bsidHash (not empty)")
 	assert.Equal(t, wischoicerSsoBsidHash(cookie.Value), flow.Payload, "F1 payload must equal HMAC(bsid)")
 	// RFC §4 line 178: no-store（不缓存含 flow_token 的 302）+ no-referrer（不让 Location 里的 flow_token 经 Referer 泄漏）。

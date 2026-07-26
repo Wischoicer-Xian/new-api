@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func setupWischoicerSsoCallbackTestDB(t *testing.T) (*gorm.DB, *model.User) {
 func makeWischoicerSsoFlow(t *testing.T, userID int, bsid string) string {
 	t.Helper()
 	tok, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
-		Purpose:   model.AuthFlowPurposeWischoicerSSO,
+		Purpose:   model.AuthFlowPurposeWischoicerSSOCode, // F2（记星 9c4b5fee P1）
 		Intent:    model.AuthFlowIntentLogin,
 		UserId:    userID,
 		Payload:   wischoicerSsoBsidHash(bsid),
@@ -67,9 +68,6 @@ func callCallback(t *testing.T, code, cookieBsid string) *httptest.ResponseRecor
 	_, r := gin.CreateTestContext(w)
 	r.GET("/callback", SsoCallback)
 	req := httptest.NewRequest(http.MethodGet, "/callback?code="+code, nil)
-	if cookieBsid != "" || cookieBsid == "__none__" {
-		// placeholder
-	}
 	if cookieBsid != "" && cookieBsid != "__none__" {
 		req.AddCookie(&http.Cookie{Name: wischoicerSsoStateCookie, Value: cookieBsid})
 	}
@@ -90,7 +88,7 @@ func TestSsoAuthorize_MintsF2WithF1PayloadVerbatim(t *testing.T) {
 	bsid := "c2-test-bsid"
 	bsidHash := wischoicerSsoBsidHash(bsid)
 	f1Tok, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
-		Purpose: model.AuthFlowPurposeWischoicerSSO, Intent: model.AuthFlowIntentLogin,
+		Purpose: model.AuthFlowPurposeWischoicerSSOStart, Intent: model.AuthFlowIntentLogin, // F1（记星 9c4b5fee P1）
 		Payload: bsidHash, ExpiresAt: time.Now().Add(wischoicerSsoFlowTTL),
 	})
 	require.NoError(t, err)
@@ -99,7 +97,7 @@ func TestSsoAuthorize_MintsF2WithF1PayloadVerbatim(t *testing.T) {
 	w := httptest.NewRecorder()
 	_, r := gin.CreateTestContext(w)
 	r.POST("/authorize", SsoAuthorize)
-	body := `{"flow_token":"` + f1Tok + `","new_api_user_id":` + itoa(user.Id) + `}`
+	body := `{"flow_token":"` + f1Tok + `","new_api_user_id":` + strconv.Itoa(user.Id) + `}`
 	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
@@ -110,7 +108,7 @@ func TestSsoAuthorize_MintsF2WithF1PayloadVerbatim(t *testing.T) {
 	assert.Contains(t, resp["callback_url"].(string), "/api/sso/wischoicer/callback?code=")
 
 	var flows []model.AuthFlow
-	require.NoError(t, db.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSO).Find(&flows).Error)
+	require.NoError(t, db.Where("purpose IN ?", []string{model.AuthFlowPurposeWischoicerSSOStart, model.AuthFlowPurposeWischoicerSSOCode}).Find(&flows).Error)
 	require.Len(t, flows, 2, "F1 + F2 should both exist")
 	var f2 *model.AuthFlow
 	for i := range flows {
@@ -145,7 +143,7 @@ func TestSsoCallback_WrongBsid_BurnsF2AndFailsUnified(t *testing.T) {
 	assert.Equal(t, "/login", w.Header().Get("Location"), "unified failure → /login")
 	// F2 burned despite wrong bsid
 	var f2 model.AuthFlow
-	require.NoError(t, db.Where("purpose = ? AND user_id = ?", model.AuthFlowPurposeWischoicerSSO, user.Id).First(&f2).Error)
+	require.NoError(t, db.Where("purpose = ? AND user_id = ?", model.AuthFlowPurposeWischoicerSSOCode, user.Id).First(&f2).Error)
 	assert.NotNil(t, f2.ConsumedAt, "F2 MUST be burned even on wrong bsid (记星: 失败也提交)")
 	assert.Equal(t, int64(0), sessionCount(t, db, user.Id), "no session on wrong bsid")
 }
@@ -159,7 +157,7 @@ func TestSsoCallback_MissingCookie_BurnsF2AndFailsUnified(t *testing.T) {
 	assert.Equal(t, http.StatusFound, w.Code)
 	assert.Equal(t, "/login", w.Header().Get("Location"))
 	var f2 model.AuthFlow
-	require.NoError(t, db.Where("purpose = ? AND user_id = ?", model.AuthFlowPurposeWischoicerSSO, user.Id).First(&f2).Error)
+	require.NoError(t, db.Where("purpose = ? AND user_id = ?", model.AuthFlowPurposeWischoicerSSOCode, user.Id).First(&f2).Error)
 	assert.NotNil(t, f2.ConsumedAt, "F2 MUST be burned even when cookie missing")
 	assert.Equal(t, int64(0), sessionCount(t, db, user.Id), "no session when cookie missing")
 }
@@ -176,24 +174,44 @@ func TestSsoCallback_F2NotReplayable(t *testing.T) {
 	assert.Equal(t, "/login", w2.Header().Get("Location"), "replayed F2 → unified failure (not replayable)")
 }
 
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var b [20]byte
-	pos := len(b)
-	for i > 0 {
-		pos--
-		b[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
+// 记星 9c4b5fee P1: callback 只消费 F2(Code)，收到 F1(Start) 拒绝且不消费。
+func TestSsoCallback_RejectsF1_DoesNotConsume(t *testing.T) {
+	db, _ := setupWischoicerSsoCallbackTestDB(t)
+	f1Tok, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose:   model.AuthFlowPurposeWischoicerSSOStart,
+		Intent:    model.AuthFlowIntentLogin,
+		Payload:   wischoicerSsoBsidHash("x"),
+		ExpiresAt: time.Now().Add(wischoicerSsoFlowTTL),
+	})
+	require.NoError(t, err)
+	w := callCallback(t, f1Tok, "x")
+	assert.Equal(t, "/login", w.Header().Get("Location"), "callback(F1) → unified failure (purpose mismatch)")
+	var f1 model.AuthFlow
+	require.NoError(t, db.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSOStart).First(&f1).Error)
+	assert.Nil(t, f1.ConsumedAt, "F1 must NOT be consumed by callback (purpose mismatch)")
+}
+
+// 记星 9c4b5fee P1: C2 只消费 F1(Start)，收到 F2(Code) 拒绝且不消费。
+func TestSsoAuthorize_RejectsF2_DoesNotConsume(t *testing.T) {
+	db, user := setupWischoicerSsoCallbackTestDB(t)
+	f2Tok, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose:   model.AuthFlowPurposeWischoicerSSOCode,
+		Intent:    model.AuthFlowIntentLogin,
+		UserId:    user.Id,
+		Payload:   wischoicerSsoBsidHash("x"),
+		ExpiresAt: time.Now().Add(wischoicerSsoFlowTTL),
+	})
+	require.NoError(t, err)
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	_, r := gin.CreateTestContext(w)
+	r.POST("/authorize", SsoAuthorize)
+	body := `{"flow_token":"` + f2Tok + `","new_api_user_id":` + strconv.Itoa(user.Id) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "C2(F2) → 400 (purpose mismatch)")
+	var f2 model.AuthFlow
+	require.NoError(t, db.Where("purpose = ?", model.AuthFlowPurposeWischoicerSSOCode).First(&f2).Error)
+	assert.Nil(t, f2.ConsumedAt, "F2 must NOT be consumed by C2 (purpose mismatch)")
 }
