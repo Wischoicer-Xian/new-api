@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	relaykitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
@@ -113,7 +114,7 @@ func createImageTask(c *gin.Context, operation service.ImageOperation) {
 		}
 		input.SpecificChannelID = channelID
 	}
-	if setting, ok := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting); ok {
+	if setting, ok := common.GetContextKeyType[relaykitdto.UserSetting](c, constant.ContextKeyUserSetting); ok {
 		input.AcceptUnsetRatioModel = setting.AcceptUnsetRatioModel
 	}
 	if attr := common.ParseWischoicerAttribution(c.Request.Header); attr != nil {

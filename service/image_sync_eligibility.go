@@ -7,7 +7,7 @@ import (
 
 // WIS-580: synchronous image relay paths (/v1/images/generations|/edits, served
 // by relay.ImageHelper via relay.GetAdaptor) must not be served by channels
-// whose image provider is async/task-only — e.g. ChannelTypeApiNebula (type-59),
+// whose image provider is async/task-only — e.g. ChannelTypeApiNebula (type 61),
 // which Phase-7 serves exclusively through /v1/image-tasks/* + ChannelRevision.
 // Such apiTypes have NO entry in relay.GetAdaptor's switch, so if a sync image
 // request selects one, relay.ImageHelper hits GetAdaptor(info.ApiType)==nil and

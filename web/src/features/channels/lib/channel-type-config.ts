@@ -144,6 +144,37 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Models exposed by this channel',
     },
   },
+  59: {
+    id: 59,
+    name: CHANNEL_TYPES[59],
+    icon: 'Sub2API',
+    hints: {
+      baseUrl: 'Sub2API gateway base URL',
+      key: 'Sub2API API Key',
+      models: 'Models fetched from upstream /v1/models',
+    },
+  },
+  60: {
+    id: 60,
+    name: CHANNEL_TYPES[60],
+    icon: 'NewAPI',
+    hints: {
+      baseUrl: 'Base URL is required for this channel type',
+      key: 'Enter API key for this channel',
+      models: 'Models',
+    },
+  },
+  61: {
+    id: 61,
+    name: CHANNEL_TYPES[61],
+    icon: 'NewAPI',
+    defaultBaseUrl: 'https://apinebula.com',
+    hints: {
+      baseUrl: 'Default: https://apinebula.com',
+      key: 'ApiNebula API Key',
+      models: 'Async image task models',
+    },
+  },
 }
 
 /**

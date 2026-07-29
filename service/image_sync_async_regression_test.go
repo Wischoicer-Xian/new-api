@@ -14,10 +14,10 @@ import (
 // WIS-580 P2 async regression (记星 review round 2): the sync-image candidate
 // filtering must NOT touch the async /v1/image-tasks/* path. This DRIVES the real
 // async candidate enumeration (model.ListImageCapableChannelsForGroupModel) and
-// selection (trySelectImageTaskChannel) with a type-59 (ApiNebula) channel + its
+// selection (trySelectImageTaskChannel) with an ApiNebula channel + its
 // frozen revision, asserting type-59 is still selectable end-to-end. If the
 // sync-image fix leaked into the async pool, this fails.
-func TestAsyncImageTaskSelection_StillSelectsType59ApiNebula(t *testing.T) {
+func TestAsyncImageTaskSelection_StillSelectsApiNebula(t *testing.T) {
 	setupCreateTest(t)
 
 	const chID = 7059
@@ -45,7 +45,7 @@ func TestAsyncImageTaskSelection_StillSelectsType59ApiNebula(t *testing.T) {
 
 	// 1) Async candidate enumeration must still surface the type-59 channel.
 	candidates := model.ListImageCapableChannelsForGroupModel("default", "gpt-image-2")
-	require.Len(t, candidates, 1, "async pool must still contain the type-59 ApiNebula channel")
+	require.Len(t, candidates, 1, "async pool must still contain the ApiNebula channel")
 	assert.Equal(t, chID, candidates[0].Id)
 	assert.Equal(t, constant.ChannelTypeApiNebula, candidates[0].Type)
 

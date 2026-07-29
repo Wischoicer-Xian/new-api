@@ -102,7 +102,7 @@ func TestExcludeChannelForSyncImage_HookDriven(t *testing.T) {
 // TestFilterAbilitiesByRequestPathAndModel_ExcludesAsyncOnlyImageChannel is the
 // end-to-end repro for WIS-580: a sync /v1/images/generations request for
 // gpt-image-2, homed on both a sync-capable (OpenAI type-1) and an async-only
-// (ApiNebula type-59) channel, must select ONLY the sync-capable channel.
+// ApiNebula async-only channel, must select ONLY the sync-capable channel.
 func TestFilterAbilitiesByRequestPathAndModel_ExcludesAsyncOnlyImageChannel(t *testing.T) {
 	withStubSyncImageEligibility(t)
 	chSync := Channel{Type: constant.ChannelTypeOpenAI, Status: 1, Group: "default", Models: "gpt-image-2", Name: "sync-image"}

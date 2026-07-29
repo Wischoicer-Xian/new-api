@@ -11,8 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 )
 
 // TestDoResponseMasksModelForHiddenToken is the adaptor-level behavior
@@ -32,7 +33,7 @@ func TestDoResponseMasksModelForHiddenToken(t *testing.T) {
 
 	// doResponse drives vertex.DoResponse against a fake upstream submit
 	// response and returns the model field serialized into the client JSON.
-	doResponse := func(t *testing.T, tokenHidden bool) (string, *dto.TaskError) {
+	doResponse := func(t *testing.T, tokenHidden bool) (string, *taskdto.TaskError) {
 		info := &relaycommon.RelayInfo{
 			OriginModelName: realModel,
 			TokenHidden:     tokenHidden,

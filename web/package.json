@@ -17,7 +17,7 @@
     "copyright": "node scripts/add-copyright.mjs",
     "i18n:sync": "node scripts/sync-i18n.mjs",
     "knip": "knip",
-    "test": "bun test --path-ignore-patterns='**/channel-image-capability-section.test.tsx' --path-ignore-patterns='**/image-config.test.ts' && vitest run",
+    "test": "bun test src/features/system-settings/models/__tests__/tool-price-validation.test.tsx && bun test --path-ignore-patterns='**/tool-price-validation.test.tsx' --path-ignore-patterns='**/channel-image-capability-section.test.tsx' --path-ignore-patterns='**/image-config.test.ts' && vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {

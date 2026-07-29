@@ -37,6 +37,8 @@ const (
 	APITypeReplicate
 	APITypeCodex
 	APITypeAdvancedCustom
+	APITypeSub2API
+	APITypeNewAPI
 	// APITypeApiNebula is the ApiNebula image-task provider. Unlike the
 	// sync-only OpenAI adapter, its generation/edit operations are async_task:
 	// submit returns a task id and the processor polls for completion. The
