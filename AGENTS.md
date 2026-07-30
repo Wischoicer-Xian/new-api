@@ -114,6 +114,8 @@ Do NOT directly import or call `encoding/json` in business code. `json.RawMessag
 - Fields parsed into unsigned types (`*uint`) accept huge positive JSON numbers (e.g. `18446744073686646784`, a wrapped negative); a `>= 0` check is not sufficient, an upper bound is mandatory.
 - Regression tests for these invariants belong with the boundary they protect (request validators, converter helpers). See `relay/helper/openai_image_request_test.go`, `relay/common/relay_utils_test.go`, and `common/quota_math_test.go` for the expected style.
 
+**充值后余额一致性：** `GET /api/user/self` 的 `quota` 是支付到账后的权威展示字段，必须直接从数据库读取并返回 `Cache-Control: no-store, no-cache, must-revalidate`；不得改回 Redis 用户对象中的旧 quota，也不得允许 BFF/浏览器缓存该响应。
+
 **Backend test quality:** Backend tests must protect real behavior, API contracts, billing/accounting invariants, data compatibility, or regression paths.
 
 - Do not add tests that only improve coverage numbers, prove that code happens to run, or lock in implementation details without a user-visible or cross-module contract.

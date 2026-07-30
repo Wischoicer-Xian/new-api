@@ -519,6 +519,19 @@ func GetSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// 余额是支付到账后的强一致展示字段：每次 self 查询都以数据库 quota
+	// 为准，并明确禁止浏览器/BFF 缓存。充值入账已在事务提交后删除 Redis
+	// user:{id}，这里再避免 HTTP 中间层复用旧 self 响应，保证 new-api
+	// 控制台和 Wischoicer「费用与成本」页面看到同一余额。
+	quota, err := model.GetUserQuota(id, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	user.Quota = quota
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	responseData := buildSelfUserData(user)
 	// The authenticated role is loaded from GetUserCache. It should equal the
 	// row role, but use it for capabilities so GetSelf and login/refresh remain
