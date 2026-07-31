@@ -116,6 +116,8 @@ Do NOT directly import or call `encoding/json` in business code. `json.RawMessag
 
 **充值后余额一致性：** `GET /api/user/self` 的 `quota` 是支付到账后的权威展示字段，必须直接从数据库读取并返回 `Cache-Control: no-store, no-cache, must-revalidate`；不得改回 Redis 用户对象中的旧 quota，也不得允许 BFF/浏览器缓存该响应。
 
+**外部充值额度：** billing 的 reserve/credit 协议允许单笔充值 quota 超过 `common.MaxQuota`（单请求消费的 int32 饱和值），但不得超过 `common.WischoicerMaxUserQuota`；`wischoicer_recharge_credits.quota` 必须保持 `BIGINT`，以支持 ¥100000 对应的 500 亿 quota。
+
 **Backend test quality:** Backend tests must protect real behavior, API contracts, billing/accounting invariants, data compatibility, or regression paths.
 
 - Do not add tests that only improve coverage numbers, prove that code happens to run, or lock in implementation details without a user-visible or cross-module contract.

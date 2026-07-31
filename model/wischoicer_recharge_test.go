@@ -86,6 +86,38 @@ func TestReserveExternalRecharge_FirstReservationSucceeds(t *testing.T) {
 	assert.Equal(t, WischoicerCreditStatusReserved, c.Status)
 }
 
+func TestExternalRecharge_SupportsOneHundredThousandYuanQuota(t *testing.T) {
+	truncateWischoicerTables(t)
+	setWischoicerCapacity(t, 500_000_000_000)
+	seedWischoicerUser(t, 50100, 0)
+	const quota = 50_000_000_000
+
+	_, err := ReserveExternalRecharge(nil, ReserveExternalRechargeRequest{
+		OrderNo:         "ORDER_100K_CNY",
+		NewApiUserId:    50100,
+		Quota:           quota,
+		AmountCents:     10_000_000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+	})
+	require.NoError(t, err)
+
+	result, err := CreditExternalRecharge(nil, CreditExternalRechargeRequest{
+		OrderNo:         "ORDER_100K_CNY",
+		NewApiUserId:    50100,
+		Quota:           quota,
+		AmountCents:     10_000_000,
+		Currency:        "CNY",
+		PaymentProvider: "wischoicer_wechat",
+		TransactionId:   "WX_100K_CNY",
+		PaidAt:          1_785_456_000,
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Credited)
+	assert.Equal(t, quota, reloadUserQuota(t, 50100))
+	assert.Equal(t, quota, reloadCredit(t, "ORDER_100K_CNY").Quota)
+}
+
 func TestReserveExternalRecharge_DuplicateSameFieldsReturnsDuplicate(t *testing.T) {
 	truncateWischoicerTables(t)
 	setWischoicerCapacity(t, 1000000)

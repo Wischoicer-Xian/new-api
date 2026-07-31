@@ -24,7 +24,7 @@ type WischoicerRechargeCredit struct {
 	Id                    int     `json:"id"`
 	OrderNo               string  `json:"order_no" gorm:"type:varchar(32);not null;uniqueIndex"`
 	NewAPIUserId          int     `json:"new_api_user_id" gorm:"type:int;not null;index:idx_wis_credit_user_status,priority:1"`
-	Quota                 int     `json:"quota" gorm:"type:int;not null"`
+	Quota                 int     `json:"quota" gorm:"type:bigint;not null"`
 	AmountCents           int64   `json:"amount_cents" gorm:"type:bigint;not null"`
 	Currency              string  `json:"currency" gorm:"type:varchar(8);not null"`
 	PaymentProvider       string  `json:"payment_provider" gorm:"type:varchar(32);not null"`
@@ -609,7 +609,7 @@ func validateReserveRequest(req ReserveExternalRechargeRequest) error {
 	if req.NewApiUserId <= 0 {
 		return ErrWischoicerCreditUserUnavailable
 	}
-	if req.Quota <= 0 || req.Quota > common.MaxQuota {
+	if req.Quota <= 0 || int64(req.Quota) > common.WischoicerMaxUserQuota {
 		return ErrWischoicerInvalidArgument
 	}
 	if req.AmountCents <= 0 {
@@ -628,7 +628,7 @@ func validateCreditRequest(req CreditExternalRechargeRequest) error {
 	if req.NewApiUserId <= 0 {
 		return ErrWischoicerCreditUserUnavailable
 	}
-	if req.Quota <= 0 || req.Quota > common.MaxQuota {
+	if req.Quota <= 0 || int64(req.Quota) > common.WischoicerMaxUserQuota {
 		return ErrWischoicerInvalidArgument
 	}
 	if req.AmountCents <= 0 {
