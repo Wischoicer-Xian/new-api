@@ -42,5 +42,27 @@
       "suggestion": 0
     },
     "scope": "new-api 知言云策属组钱包入口策略及受影响导航/路由模块"
+  },
+  {
+    "date": "2026-08-03",
+    "mode": "PR Review",
+    "score": 100,
+    "findings": {
+      "critical": 0,
+      "warning": 0,
+      "suggestion": 0
+    },
+    "scope": "Dashboard 钱包按钮与 Add credits 引导入口属组过滤补齐"
+  },
+  {
+    "date": "2026-08-03",
+    "mode": "Health Dashboard",
+    "score": 100,
+    "findings": {
+      "critical": 0,
+      "warning": 0,
+      "suggestion": 0
+    },
+    "scope": "new-api 所有已发现钱包入口、直接路由及 Dashboard 引导入口"
   }
 ]
