@@ -26,6 +26,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import useDialogState from '@/hooks/use-dialog'
+import { useIsSidebarModuleVisible } from '@/hooks/use-sidebar-config'
 import { useUserDisplay } from '@/hooks/use-user-display'
 import type { AuthUser } from '@/stores/auth-store'
 
@@ -81,6 +82,7 @@ function MobileUserProfile({ user, onNavigate }: MobileUserProfileProps) {
   const { t } = useTranslation()
   const [signOutOpen, setSignOutOpen] = useDialogState()
   const { displayName, initials, roleLabel } = useUserDisplay(user)
+  const isWalletVisible = useIsSidebarModuleVisible('/wallet')
 
   if (!user) return null
 
@@ -122,14 +124,16 @@ function MobileUserProfile({ user, onNavigate }: MobileUserProfileProps) {
           {t('Profile')}
         </Link>
 
-        <Link
-          to='/wallet'
-          onClick={onNavigate}
-          className='text-primary/60 hover:text-primary/80 border-border flex items-center gap-2.5 border-b p-2.5 transition-colors'
-        >
-          <Wallet className='size-4' />
-          {t('Wallet')}
-        </Link>
+        {isWalletVisible && (
+          <Link
+            to='/wallet'
+            onClick={onNavigate}
+            className='text-primary/60 hover:text-primary/80 border-border flex items-center gap-2.5 border-b p-2.5 transition-colors'
+          >
+            <Wallet className='size-4' />
+            {t('Wallet')}
+          </Link>
+        )}
 
         {/* Sign out - consistent style */}
         <Button
@@ -261,9 +265,9 @@ export function MobileDrawer({
                   </div>
                 ) : (
                   <AnimatePresence>
-                    {mobileLinksList.map((link, index) => (
+                    {mobileLinksList.map((link) => (
                       <motion.div
-                        key={`${link.href}-${index}`}
+                        key={link.href}
                         className='border-border border-b p-2.5 last:border-b-0'
                         variants={MOBILE_DRAWER_ANIMATION.menuItem as Variants}
                       >

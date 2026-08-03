@@ -52,6 +52,7 @@ import type { ApiKey } from '@/features/keys/types'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { getUserModels } from '@/lib/api'
 import { MOTION_TRANSITION } from '@/lib/motion'
+import { canAccessNewApiWallet } from '@/lib/new-api-wallet-access'
 import { ROLE } from '@/lib/roles'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -472,6 +473,7 @@ export function OverviewDashboard() {
   const requestCount = Number(user?.request_count ?? 0)
   const remainQuota = Number(user?.quota ?? 0)
   const usedQuota = Number(user?.used_quota ?? 0)
+  const walletVisible = canAccessNewApiWallet(user?.group)
   const isAdmin = Boolean(user?.role && user.role >= ROLE.ADMIN)
 
   const apiKeysQuery = useQuery({
@@ -502,26 +504,30 @@ export function OverviewDashboard() {
       {
         title: t('Create API Key'),
         description: t('Create a key for your app or service'),
-        to: '/keys',
+        to: '/keys' as const,
         icon: KeyRound,
         completed: Boolean(preferredKey),
       },
-      {
-        title: t('Add credits'),
-        description: t('Keep enough balance before production traffic'),
-        to: '/wallet',
-        icon: CreditCard,
-        completed: remainQuota > 0 || usedQuota > 0,
-      },
+      ...(walletVisible
+        ? [
+            {
+              title: t('Add credits'),
+              description: t('Keep enough balance before production traffic'),
+              to: '/wallet' as const,
+              icon: CreditCard,
+              completed: remainQuota > 0 || usedQuota > 0,
+            },
+          ]
+        : []),
       {
         title: t('Send a request'),
         description: t('Verify routing with Playground or your client'),
-        to: '/playground',
+        to: '/playground' as const,
         icon: TerminalSquare,
         completed: requestCount > 0,
       },
     ],
-    [preferredKey, remainQuota, requestCount, t, usedQuota]
+    [preferredKey, remainQuota, requestCount, t, usedQuota, walletVisible]
   )
 
   const quickActions = useMemo<QuickAction[]>(

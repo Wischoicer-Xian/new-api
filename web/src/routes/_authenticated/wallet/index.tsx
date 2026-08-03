@@ -16,16 +16,24 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 import { z } from 'zod'
 
 import { Wallet } from '@/features/wallet'
+import { canAccessNewApiWallet } from '@/lib/new-api-wallet-access'
+import { useAuthStore } from '@/stores/auth-store'
 
 const walletSearchSchema = z.object({
   show_history: z.boolean().optional(),
 })
 
 export const Route = createFileRoute('/_authenticated/wallet/')({
+  beforeLoad: () => {
+    const userGroup = useAuthStore.getState().auth.user?.group
+    if (!canAccessNewApiWallet(userGroup)) {
+      throw redirect({ to: '/dashboard' })
+    }
+  },
   component: RouteComponent,
   validateSearch: walletSearchSchema,
 })
