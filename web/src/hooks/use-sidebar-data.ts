@@ -36,8 +36,10 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { type SidebarData } from '@/components/layout/types'
+import type { SidebarData } from '@/components/layout/types'
+import { canAccessNewApiWallet } from '@/lib/new-api-wallet-access'
 import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 /**
  * Root navigation groups for the application sidebar.
@@ -47,6 +49,8 @@ import { ROLE } from '@/lib/roles'
  */
 export function useSidebarData(): SidebarData {
   const { t } = useTranslation()
+  const userGroup = useAuthStore((state) => state.auth.user?.group)
+  const walletVisible = canAccessNewApiWallet(userGroup)
 
   return {
     navGroups: [
@@ -103,11 +107,15 @@ export function useSidebarData(): SidebarData {
         id: 'personal',
         title: t('Personal'),
         items: [
-          {
-            title: t('Wallet'),
-            url: '/wallet',
-            icon: Wallet,
-          },
+          ...(walletVisible
+            ? [
+                {
+                  title: t('Wallet'),
+                  url: '/wallet' as const,
+                  icon: Wallet,
+                },
+              ]
+            : []),
           {
             title: t('Profile'),
             url: '/profile',

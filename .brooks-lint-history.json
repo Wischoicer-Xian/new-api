@@ -1,0 +1,46 @@
+[
+  {
+    "date": "2026-08-03",
+    "mode": "Architecture Audit",
+    "score": 95,
+    "findings": {
+      "critical": 0,
+      "warning": 1,
+      "suggestion": 0
+    },
+    "scope": "new-api 钱包入口、认证属组与导航/路由模块"
+  },
+  {
+    "date": "2026-08-03",
+    "mode": "PR Review",
+    "score": 100,
+    "findings": {
+      "critical": 0,
+      "warning": 0,
+      "suggestion": 0
+    },
+    "scope": "知言云策属组钱包入口隐藏、路由保护及策略单元测试"
+  },
+  {
+    "date": "2026-08-03",
+    "mode": "Test Quality Review",
+    "score": 100,
+    "findings": {
+      "critical": 0,
+      "warning": 0,
+      "suggestion": 0
+    },
+    "scope": "new-api-wallet-access 单元测试（1 个文件，7 个用例）"
+  },
+  {
+    "date": "2026-08-03",
+    "mode": "Health Dashboard",
+    "score": 100,
+    "findings": {
+      "critical": 0,
+      "warning": 0,
+      "suggestion": 0
+    },
+    "scope": "new-api 知言云策属组钱包入口策略及受影响导航/路由模块"
+  }
+]
