@@ -311,7 +311,8 @@ export interface WischoicerCreateRechargeRequest {
 }
 
 /** Single recharge order response (create / get). */
-export type WischoicerRechargeResponse = ApiResponse<WischoicerWalletRechargeView>
+export type WischoicerRechargeResponse =
+  ApiResponse<WischoicerWalletRechargeView>
 
 /** One page of recharge order history. */
 export interface WischoicerRechargeListData {
@@ -320,4 +321,5 @@ export interface WischoicerRechargeListData {
 }
 
 /** Recharge history list response. */
-export type WischoicerRechargeListResponse = ApiResponse<WischoicerRechargeListData>
+export type WischoicerRechargeListResponse =
+  ApiResponse<WischoicerRechargeListData>

@@ -291,10 +291,12 @@ export async function getWischoicerRecharge(
 /**
  * List recharge order history with cursor pagination.
  */
-export async function listWischoicerRecharges(opts: {
-  cursor?: string
-  limit?: number
-} = {}): Promise<WischoicerRechargeListResponse> {
+export async function listWischoicerRecharges(
+  opts: {
+    cursor?: string
+    limit?: number
+  } = {}
+): Promise<WischoicerRechargeListResponse> {
   const params = new URLSearchParams()
   if (opts.cursor) {
     params.set('cursor', opts.cursor)

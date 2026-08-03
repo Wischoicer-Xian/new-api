@@ -13,15 +13,15 @@
       // Pinning <base href> to the detected proxy basepath makes every relative
       // asset resolve from the base instead. Detection mirrors src/lib/basepath.ts.
       // See WIS-518.
-      (function () {
-        var p = window.location.pathname;
-        var base = '/';
-        if (p.indexOf('/token-platform-fe') === 0) base = '/token-platform-fe/';
-        else if (p.indexOf('/token-platform') === 0) base = '/token-platform/';
-        var el = document.createElement('base');
-        el.href = base;
-        document.head.appendChild(el);
-      })();
+      ;(function () {
+        var p = window.location.pathname
+        var base = '/'
+        if (p.indexOf('/token-platform-fe') === 0) base = '/token-platform-fe/'
+        else if (p.indexOf('/token-platform') === 0) base = '/token-platform/'
+        var el = document.createElement('base')
+        el.href = base
+        document.head.appendChild(el)
+      })()
     </script>
     <link rel="icon" type="image/png" href="./logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

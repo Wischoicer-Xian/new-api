@@ -98,11 +98,7 @@ export function getWischoicerRechargePhase(
 export function isWischoicerRechargeTerminal(
   phase: WischoicerRechargePhase
 ): boolean {
-  return (
-    phase === 'success' ||
-    phase === 'closed' ||
-    phase === 'credit_failed'
-  )
+  return phase === 'success' || phase === 'closed' || phase === 'credit_failed'
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +117,8 @@ export function formatCentsAsYuan(cents: number): string {
 
 /** localStorage key holding the single in-flight pending order, so a page
  * refresh recovers it instead of placing a duplicate. */
-export const WISCHOICER_PENDING_RECHARGE_KEY = 'wischoicer_wallet_pending_recharge'
+export const WISCHOICER_PENDING_RECHARGE_KEY =
+  'wischoicer_wallet_pending_recharge'
 
 export interface PersistedPendingRecharge {
   clientRequestId: string
@@ -391,7 +388,9 @@ export function toSafeRechargeView(raw: unknown): WischoicerWalletRechargeView {
 /** Project a whole history page through `toSafeRechargeView`, so the list path
  * gets the same defense in depth as the create/get path — a leaked quota / token
  * / internal field in any item is dropped before it reaches state. */
-export function toSafeRechargeList(items: unknown): WischoicerWalletRechargeView[] {
+export function toSafeRechargeList(
+  items: unknown
+): WischoicerWalletRechargeView[] {
   if (!Array.isArray(items)) return []
   return items.map((item) => toSafeRechargeView(item))
 }

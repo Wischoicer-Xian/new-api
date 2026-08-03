@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 // Hook-level tests for useWischoicerRecharge — the wiring pure-logic tests
 // cannot reach: idempotent reuse across a lost-response retry, terminal routing
 // of an immediate SUCCESS on create/retry, mount-recovery balance refresh, and
@@ -24,7 +25,7 @@ For commercial licensing, please contact support@quantumnous.com
 //
 // Run with: cd web/default && bun test src/features/wallet/hooks/use-wischoicer-recharge.test.ts
 import { resolve } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
+
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -32,8 +33,9 @@ import { createRoot } from 'react-dom/client'
 // Provide a DOM (window / document / localStorage / ...) for React + the hook.
 GlobalRegistrator.register()
 // Tell React this is an act environment so effects flush inside act().
-;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
-  true
+;(
+  globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true
 
 const PENDING_KEY = 'wischoicer_wallet_pending_recharge'
 const UID_KEY = 'uid'
@@ -118,7 +120,9 @@ describe('useWischoicerRecharge — idempotency wiring', () => {
     })
 
     const onSuccess = mock()
-    const { result, unmount } = renderHook(() => useWischoicerRecharge(onSuccess))
+    const { result, unmount } = renderHook(() =>
+      useWischoicerRecharge(onSuccess)
+    )
 
     let ok = true
     await act(async () => {
@@ -147,7 +151,11 @@ describe('useWischoicerRecharge — idempotency wiring', () => {
     // order that has already been paid/credited.
     globalThis.localStorage.setItem(
       PENDING_KEY,
-      JSON.stringify({ clientRequestId: 'rc-immediate', amountCents: 5000, uid: 'U1' })
+      JSON.stringify({
+        clientRequestId: 'rc-immediate',
+        amountCents: 5000,
+        uid: 'U1',
+      })
     )
     api.available.mockResolvedValue(true)
     api.create.mockResolvedValue({
@@ -162,7 +170,9 @@ describe('useWischoicerRecharge — idempotency wiring', () => {
     })
 
     const onSuccess = mock()
-    const { result, unmount } = renderHook(() => useWischoicerRecharge(onSuccess))
+    const { result, unmount } = renderHook(() =>
+      useWischoicerRecharge(onSuccess)
+    )
 
     let ok = false
     await act(async () => {

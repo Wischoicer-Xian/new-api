@@ -286,7 +286,11 @@ export function useWischoicerRecharge(
 
       // Persist the intent BEFORE the POST so a lost response is recoverable:
       // mount recovery will re-POST with this same key and get the original order.
-      writePendingRecharge({ clientRequestId, amountCents, uid: uid ?? undefined })
+      writePendingRecharge({
+        clientRequestId,
+        amountCents,
+        uid: uid ?? undefined,
+      })
 
       orderRef.current = null
       setOrder(null)

@@ -17,7 +17,7 @@
     "copyright": "node scripts/add-copyright.mjs",
     "i18n:sync": "node scripts/sync-i18n.mjs",
     "knip": "knip",
-    "test": "bun test src/features/system-settings/models/__tests__/tool-price-validation.test.tsx && bun test --path-ignore-patterns='**/tool-price-validation.test.tsx' --path-ignore-patterns='**/channel-image-capability-section.test.tsx' --path-ignore-patterns='**/image-config.test.ts' && vitest run",
+    "test": "bun test src/features/system-settings/models/__tests__/tool-price-validation.test.tsx && bun test --parallel=1 --path-ignore-patterns='**/tool-price-validation.test.tsx' --path-ignore-patterns='**/channel-image-capability-section.test.tsx' --path-ignore-patterns='**/image-config.test.ts' && vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -81,16 +81,16 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.11.1",
     "@rsbuild/core": "^2.1.4",
     "@rsbuild/plugin-react": "^2.1.0",
     "@rsbuild/plugin-tailwindcss": "^2.0.3",
-    "@happy-dom/global-registrator": "^20.11.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
     "@tanstack/react-query-devtools": "^5.101.2",
     "@tanstack/react-router-devtools": "^1.167.0",
     "@tanstack/router-plugin": "^1.168.19",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^26.1.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

@@ -100,7 +100,9 @@ describe('wischoicer recharge — tiers', () => {
 
 describe('wischoicer recharge — status state machine', () => {
   it('maps every backend status to its user-facing phase', () => {
-    expect(getWischoicerRechargePhase('PENDING_PAYMENT')).toBe('pending_payment')
+    expect(getWischoicerRechargePhase('PENDING_PAYMENT')).toBe(
+      'pending_payment'
+    )
     expect(getWischoicerRechargePhase('CREDITING')).toBe('crediting')
     expect(getWischoicerRechargePhase('SUCCESS')).toBe('success')
     expect(getWischoicerRechargePhase('CLOSED')).toBe('closed')

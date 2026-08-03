@@ -20,8 +20,8 @@ import { useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { withBasepath } from '@/lib/basepath'
 import { clearAuthentication, isAuthBundle } from '@/lib/api'
+import { withBasepath } from '@/lib/basepath'
 
 import { createOAuthFlow, logout, telegramLogin } from '../api'
 import {

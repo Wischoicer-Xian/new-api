@@ -212,10 +212,14 @@ export function WischoicerRechargeHistoryDialog(
       <DialogContent className='sm:max-w-lg'>
         <DialogHeader>
           <DialogTitle>{t('Recharge History')}</DialogTitle>
-          <DialogDescription>{t('Your WeChat recharge orders')}</DialogDescription>
+          <DialogDescription>
+            {t('Your WeChat recharge orders')}
+          </DialogDescription>
         </DialogHeader>
 
-        <div className='max-h-[60vh] overflow-y-auto pr-1'>{renderContent()}</div>
+        <div className='max-h-[60vh] overflow-y-auto pr-1'>
+          {renderContent()}
+        </div>
 
         {!loading && !error && nextCursor ? (
           <div className='flex justify-center'>

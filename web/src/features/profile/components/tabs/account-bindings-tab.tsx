@@ -40,8 +40,8 @@ import {
 import type { CustomOAuthProviderInfo } from '@/features/auth/types'
 import { useDialogs } from '@/hooks/use-dialog'
 import { useStatus } from '@/hooks/use-status'
-import { withBasepath } from '@/lib/basepath'
 import { api } from '@/lib/api'
+import { withBasepath } from '@/lib/basepath'
 import {
   buildDiscordOAuthUrl,
   buildGitHubOAuthUrl,
