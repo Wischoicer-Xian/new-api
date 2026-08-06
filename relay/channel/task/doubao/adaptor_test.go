@@ -1,11 +1,13 @@
 package doubao
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/common"
 )
 
@@ -67,3 +69,43 @@ func TestConvertToRequestPayload_DurationPassthrough(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// TestConvertToOpenAIVideo_LastFrameURL 锁定 doubao 尾帧透出合同（video-clone 首尾帧衔接）：
+// 上游 return_last_frame=true 时查询响应带 content.last_frame_url（官方文档已锁定字段名），
+// 必须透出到 OpenAI Video metadata.last_frame_url 供调用方下载转存；上游未返回时 metadata 不含该键。
+func TestConvertToOpenAIVideo_LastFrameURL(t *testing.T) {
+	newTask := func(data string) *model.Task {
+		return &model.Task{
+			TaskID:     "cgt-test",
+			Status:     model.TaskStatusSuccess,
+			Progress:   "100%",
+			CreatedAt:  1,
+			UpdatedAt:  2,
+			Data:       json.RawMessage(data),
+			Properties: model.Properties{OriginModelName: "doubao-seedance-2-0-260128"},
+		}
+	}
+
+	t.Run("有尾帧则透出", func(t *testing.T) {
+		task := newTask(`{"id":"cgt-test","status":"succeeded","content":{"video_url":"https://x/v.mp4","last_frame_url":"https://x/last.png"}}`)
+		out, err := (&TaskAdaptor{}).ConvertToOpenAIVideo(task)
+		require.NoError(t, err)
+		var ov map[string]any
+		require.NoError(t, json.Unmarshal(out, &ov))
+		meta, ok := ov["metadata"].(map[string]any)
+		require.True(t, ok, "metadata 必须存在（url 恒透出有值）")
+		assert.Equal(t, "https://x/last.png", meta["last_frame_url"])
+		assert.Equal(t, "https://x/v.mp4", meta["url"])
+	})
+
+	t.Run("无尾帧不透出", func(t *testing.T) {
+		task := newTask(`{"id":"cgt-test","status":"succeeded","content":{"video_url":"https://x/v.mp4"}}`)
+		out, err := (&TaskAdaptor{}).ConvertToOpenAIVideo(task)
+		require.NoError(t, err)
+		var ov map[string]any
+		require.NoError(t, json.Unmarshal(out, &ov))
+		meta, _ := ov["metadata"].(map[string]any)
+		_, has := meta["last_frame_url"]
+		assert.False(t, has, "上游未返回尾帧时不得出现 last_frame_url 键")
+	})
+}

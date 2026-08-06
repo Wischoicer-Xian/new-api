@@ -74,6 +74,9 @@ type responseTask struct {
 	Status  string `json:"status"`
 	Content struct {
 		VideoURL string `json:"video_url"`
+		// LastFrameURL 是 return_last_frame=true 时上游返回的尾帧图 URL（png，24h 有效）。
+		// 透出给 OpenAI Video metadata，供调用方下载转存（video-clone 首尾帧衔接）。
+		LastFrameURL string `json:"last_frame_url"`
 	} `json:"content"`
 	Seed            int    `json:"seed"`
 	Resolution      string `json:"resolution"`
@@ -361,6 +364,9 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(originTask *model.Task) ([]byte, erro
 	openAIVideo.Status = originTask.Status.ToVideoStatus()
 	openAIVideo.SetProgressStr(originTask.Progress)
 	openAIVideo.SetMetadata("url", dResp.Content.VideoURL)
+	if dResp.Content.LastFrameURL != "" {
+		openAIVideo.SetMetadata("last_frame_url", dResp.Content.LastFrameURL)
+	}
 	openAIVideo.CreatedAt = originTask.CreatedAt
 	openAIVideo.CompletedAt = originTask.UpdatedAt
 	openAIVideo.Model = originTask.Properties.OriginModelName
