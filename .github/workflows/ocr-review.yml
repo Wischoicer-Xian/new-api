@@ -83,10 +83,9 @@ jobs:
       # luna 恢复后删备步骤并去掉主的 continue-on-error 即可。
       - name: Run OpenCodeReview (primary)
         id: ocr-primary
-        uses: alibaba/open-code-review@v1.8.8  # 钉版：v1.8.9 未经实证（其窗口正逢 provider 故障），v1.8.8 为最后实证好版
+        uses: alibaba/open-code-review@main
         continue-on-error: true  # 主模型失败不挂 job，走 fallback
         with:
-          ocr_version: '1.8.8'  # CLI 版本（npm spec）——action 默认装 latest
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_MODEL }}
@@ -100,11 +99,10 @@ jobs:
 
       - name: Run OpenCodeReview (fallback sol/medium)
         if: steps.ocr-primary.outcome == 'failure'
-        uses: alibaba/open-code-review@v1.8.8
+        uses: alibaba/open-code-review@main
         with:
           # 备步骤禁 artifact 上传：主备同名 ocr-review-result-{run}-1 撞 409（实测把成功审查判成 job 红）
           upload_artifacts: false
-          ocr_version: '1.8.8'
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: 'gpt-5.6-sol'
