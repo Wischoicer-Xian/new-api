@@ -54,6 +54,14 @@ web/           — Frontend (React 19, Rsbuild, Base UI, Tailwind)
 
 ## Rules
 
+### 容器与 OpenShip 约定（2026-08-11）
+
+- Dockerfile 是 Bun 前端 + Go 后端的双阶段源码构建入口；前端使用 `NODE_BUILD_RESOURCE_MODE=auto|low|normal`，后端使用 `GO_BUILD_RESOURCE_MODE=auto|low|normal`，默认以 2 GiB `MemAvailable` 自动选档。
+- low 前端模式必须在真实 Bun 命令上使用 `--smol`、生命周期脚本并发 1、网络并发 1；low Go 模式必须在真实 `go mod download` / `go build` 上使用 `GOMAXPROCS=1`、`GOMEMLIMIT`、`GOGC` 和 `go build -p 1`。normal 模式清理低资源参数，不得永久降级。
+- 构建日志只记录最终模式、可用内存、阈值和公开参数；`SESSION_SECRET`、`CRYPTO_SECRET`、`SQL_DSN`、`REDIS_CONN_STRING`、数据库密码、OAuth 凭据和其他运行期 secret 只能由部署环境注入，不得作为 Docker build arg、镜像层或构建日志内容。
+- 运行镜像使用非 root `newapi`，监听 `3000`，预创建可写的 `/data` SQLite/运行数据目录和 `/app/logs` 日志目录，使用 `/api/status` 做 healthcheck；OpenShip/Compose 的 `/data` 挂载后仍需核对宿主目录权限。
+- 保持 Bun lockfile、Go module、`relaykit` 独立构建、`github.com/QuantumNous/new-api` 与 QuantumNous 受保护元数据不变。OpenShip 的项目、分支、端口、资源、readiness、secret 注入、active deployment 和回滚只能只读核对；后端测试机不可达或代码未合入 `origin/develop` 时不得部署。
+
 ### Common Code Quality
 
 - New code should stay direct and readable. Prefer early returns, clear branches, and well-named local variables to deep nesting or layered control flow.
