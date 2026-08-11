@@ -9,8 +9,8 @@ docs
 .gocache
 /web/node_modules
 /web/dist
-data
-logs
+/data
+/logs
 *.db
 *.sqlite
 *.sqlite3

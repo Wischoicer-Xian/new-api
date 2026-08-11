@@ -143,8 +143,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates \
     && useradd --system --create-home --home-dir /home/newapi --shell /usr/sbin/nologin newapi \
-    && mkdir -p /data /app/logs \
-    && chown -R newapi:newapi /data /app/logs
+    && mkdir -p /data /data/logs \
+    && chown -R newapi:newapi /data
 
 COPY --from=builder2 /build/new-api /
 COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
