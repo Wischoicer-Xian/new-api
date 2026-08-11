@@ -183,7 +183,7 @@ func getMinTopup() int64 {
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
 		dMinTopup := decimal.NewFromInt(int64(minTopup))
 		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-		minTopup = int(dMinTopup.Mul(dQuotaPerUnit).IntPart())
+		minTopup = common.QuotaFromDecimal(dMinTopup.Mul(dQuotaPerUnit))
 	}
 	return int64(minTopup)
 }
@@ -355,9 +355,8 @@ func EpayNotify(c *gin.Context) {
 	verifyInfo, err := client.Verify(params)
 	if err != nil || !verifyInfo.VerifyStatus {
 		// 验签失败：不 ACK success，让 epay 按协议重试。
-		_, werr := c.Writer.Write([]byte("fail"))
-		if werr != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), werr.Error()))
+		if _, writeErr := c.Writer.Write([]byte("fail")); writeErr != nil {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), writeErr.Error()))
 		}
 		if err != nil {
 			logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 验签失败 path=%q client_ip=%s verify_error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
@@ -366,13 +365,14 @@ func EpayNotify(c *gin.Context) {
 		}
 		return
 	}
-
 	logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 webhook 验签成功 trade_no=%s callback_type=%s trade_status=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, verifyInfo.TradeStatus, c.ClientIP(), common.GetJsonString(verifyInfo)))
 
 	if verifyInfo.TradeStatus != epay.StatusTradeSuccess {
 		// 验签通过但非交易成功事件（如 wait）：ACK success 让 epay 停止重试，无需到账。
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 webhook 忽略事件 trade_no=%s callback_type=%s trade_status=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, verifyInfo.TradeStatus, c.ClientIP(), common.GetJsonString(verifyInfo)))
-		_, _ = c.Writer.Write([]byte("success"))
+		if _, writeErr := c.Writer.Write([]byte("success")); writeErr != nil {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 trade_no=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, c.ClientIP(), writeErr.Error()))
+		}
 		return
 	}
 
@@ -451,7 +451,9 @@ func EpayNotify(c *gin.Context) {
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值订单已处理，跳过重复通知 trade_no=%s user_id=%d client_ip=%s", topUp.TradeNo, topUp.UserId, c.ClientIP()))
 	}
 	// 事务提交成功（新建到账或幂等命中），ACK success 让 epay 停止重试。
-	_, _ = c.Writer.Write([]byte("success"))
+	if _, writeErr := c.Writer.Write([]byte("success")); writeErr != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 trade_no=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, c.ClientIP(), writeErr.Error()))
+	}
 }
 
 func RequestAmount(c *gin.Context) {
