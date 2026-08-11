@@ -149,6 +149,20 @@ docker run --name new-api -d --restart always \
 
 </details>
 
+### 源码容器构建与 OpenShip 约定
+
+Dockerfile 会先构建 Bun/Rsbuild 前端，再构建并嵌入 Go 后端。默认按构建容器可用内存自动选档，也可显式选择两个阶段的模式：
+
+```bash
+docker build --build-arg NODE_BUILD_RESOURCE_MODE=auto --build-arg GO_BUILD_RESOURCE_MODE=auto -t new-api:local .
+docker build --build-arg NODE_BUILD_RESOURCE_MODE=low --build-arg GO_BUILD_RESOURCE_MODE=low -t new-api:low .
+docker build --build-arg NODE_BUILD_RESOURCE_MODE=normal --build-arg GO_BUILD_RESOURCE_MODE=normal -t new-api:normal .
+```
+
+low 前端模式使用 Bun `--smol`、安装生命周期脚本并发 1 和网络并发 1；low Go 模式使用 `GOMAXPROCS=1`、`GOMEMLIMIT=768MiB`、`GOGC=50` 和 `go build -p 1`。运行镜像以非 root 用户监听 `3000`，`/api/status` 用于健康检查，`/data` 保存 SQLite/运行数据，`/app/logs` 用于显式 `--log-dir` 日志目录；挂载宿主目录后需确认 `newapi` 可写。
+
+容器仍需运行期注入 `SQL_DSN`、`REDIS_CONN_STRING`、`SESSION_SECRET`、`CRYPTO_SECRET`、OAuth/上游凭据和其他部署配置；这些值不得通过 Docker build arg、Dockerfile 或镜像层传递。OpenShip 发布前须重新只读核对 Docker 构建契约、端口、`/data` 卷、readiness、secret 注入、active deployment 和回滚条件。
+
 ---
 
 🎉 After deployment is complete, visit `http://localhost:3000` to start using!
