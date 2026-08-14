@@ -64,7 +64,7 @@ const (
 // 已启用的 feature_code（RFC §3.1）。预留枚举也收录，便于未来扩展时不被误判为 uncategorized。
 var wischoicerFeatureCodes = map[string]string{
 	"reference_copy":       "爆款复刻中心 - 图文爆款复刻",
-	"merch_video_clone":    "爆款复刻中心 - 带货视频爆款复刻",
+	"merch_video_clone":    "爆款复刻中心 - 视频爆款复刻",
 	"image_creation":       "爆款内容工坊 - 图片创作",
 	"copywriting_creation": "爆款内容工坊 - 文案创作",
 	"video_creation":       "爆款内容工坊 - 视频创作",
