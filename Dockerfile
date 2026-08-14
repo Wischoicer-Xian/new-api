@@ -8,6 +8,7 @@ ARG GO_BUILD_LOW_MEMORY_LIMIT_MB=768
 ARG GO_BUILD_LOW_MAX_PROCS=1
 ARG GO_BUILD_LOW_BUILD_PARALLELISM=1
 ARG GO_BUILD_LOW_GOGC=50
+ARG BUN_REGISTRY=https://registry.npmmirror.com
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ARG APT_RETRIES=5
@@ -18,11 +19,13 @@ ARG NODE_BUILD_RESOURCE_MODE
 ARG NODE_BUILD_LOW_MEMORY_KB
 ARG NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS
 ARG NODE_BUILD_LOW_BUN_NETWORK_CONCURRENCY
+ARG BUN_REGISTRY
 
 WORKDIR /build/web
 COPY web/package.json web/bun.lock ./
 RUN set -eu; \
     case "$NODE_BUILD_RESOURCE_MODE" in auto|low|normal) ;; *) echo "invalid NODE_BUILD_RESOURCE_MODE=$NODE_BUILD_RESOURCE_MODE (expected auto|low|normal)" >&2; exit 1 ;; esac; \
+    case "$BUN_REGISTRY" in http://*|https://*) ;; *) echo "BUN_REGISTRY must be an http(s) URL" >&2; exit 1 ;; esac; \
     case "$NODE_BUILD_LOW_MEMORY_KB" in ''|*[!0-9]*) echo "NODE_BUILD_LOW_MEMORY_KB must be a positive integer" >&2; exit 1 ;; esac; \
     case "$NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS" in ''|*[!0-9]*) echo "NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS must be a positive integer" >&2; exit 1 ;; esac; \
     case "$NODE_BUILD_LOW_BUN_NETWORK_CONCURRENCY" in ''|*[!0-9]*) echo "NODE_BUILD_LOW_BUN_NETWORK_CONCURRENCY must be a positive integer" >&2; exit 1 ;; esac; \
@@ -36,11 +39,11 @@ RUN set -eu; \
       if [ "$available_memory_kb" -gt 0 ] && [ "$available_memory_kb" -lt "$NODE_BUILD_LOW_MEMORY_KB" ]; then selected_mode=low; else selected_mode=normal; fi; \
     fi; \
     if [ "$selected_mode" = low ]; then \
-      echo "[container-build] stage=frontend-install mode=$selected_mode available_memory_kb=$available_memory_kb threshold_kb=$NODE_BUILD_LOW_MEMORY_KB bun_flags=--smol concurrent_scripts=$NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS network_concurrency=$NODE_BUILD_LOW_BUN_NETWORK_CONCURRENCY"; \
-      bun --smol install --frozen-lockfile --concurrent-scripts="$NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS" --network-concurrency="$NODE_BUILD_LOW_BUN_NETWORK_CONCURRENCY"; \
+      echo "[container-build] stage=frontend-install mode=$selected_mode available_memory_kb=$available_memory_kb threshold_kb=$NODE_BUILD_LOW_MEMORY_KB bun_registry=$BUN_REGISTRY bun_flags=--smol concurrent_scripts=$NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS network_concurrency=$NODE_BUILD_LOW_BUN_NETWORK_CONCURRENCY"; \
+      bun --smol install --frozen-lockfile --registry="$BUN_REGISTRY" --concurrent-scripts="$NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS" --network-concurrency="$NODE_BUILD_LOW_BUN_NETWORK_CONCURRENCY"; \
     else \
-      echo "[container-build] stage=frontend-install mode=$selected_mode available_memory_kb=$available_memory_kb threshold_kb=$NODE_BUILD_LOW_MEMORY_KB bun_flags=default concurrent_scripts=default network_concurrency=default"; \
-      bun install --frozen-lockfile; \
+      echo "[container-build] stage=frontend-install mode=$selected_mode available_memory_kb=$available_memory_kb threshold_kb=$NODE_BUILD_LOW_MEMORY_KB bun_registry=$BUN_REGISTRY bun_flags=default concurrent_scripts=default network_concurrency=default"; \
+      bun install --frozen-lockfile --registry="$BUN_REGISTRY"; \
     fi
 COPY ./web ./
 COPY ./VERSION /build/VERSION
