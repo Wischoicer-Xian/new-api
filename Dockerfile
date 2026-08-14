@@ -8,8 +8,8 @@ ARG GO_BUILD_LOW_MEMORY_LIMIT_MB=768
 ARG GO_BUILD_LOW_MAX_PROCS=1
 ARG GO_BUILD_LOW_BUILD_PARALLELISM=1
 ARG GO_BUILD_LOW_GOGC=50
-ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
-ARG DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
+ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
+ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ARG APT_RETRIES=5
 ARG APT_TIMEOUT_SECONDS=30
 
