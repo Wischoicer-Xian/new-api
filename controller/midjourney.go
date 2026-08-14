@@ -213,26 +213,7 @@ func runMidjourneyTaskUpdateOnce(ctx context.Context, report func(processed, tot
 			if err != nil {
 				logger.LogError(ctx, "UpdateMidjourneyTask task error: "+err.Error())
 			} else if won && shouldReturnQuota {
-				// 这是任务失败后退还先前扣除的额度，必须到账：走 RefundUserQuota
-				// （容量守卫通过或在软上限瞬时打满时降级直写，仍守 int32 物理硬界），
-				// 不能用 IncreaseUserQuota db=true——那是新预约的软上限守卫，会在容量
-				// 打满时让退款丢失额度。
-				err = model.RefundUserQuota(task.UserId, task.Quota)
-				if err != nil {
-					logger.LogError(ctx, "fail to increase user quota: "+err.Error())
-				}
-				model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-					UserId:    task.UserId,
-					LogType:   model.LogTypeRefund,
-					Content:   "",
-					ChannelId: task.ChannelId,
-					ModelName: service.CovertMjpActionToModelName(task.Action),
-					Quota:     task.Quota,
-					Other: map[string]interface{}{
-						"task_id": task.MjId,
-						"reason":  "构图失败",
-					},
-				})
+				service.RefundMidjourneyQuota(ctx, task, "构图失败")
 			}
 		}
 	}
