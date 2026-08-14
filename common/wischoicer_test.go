@@ -13,7 +13,7 @@ func TestParseWischoicerAttribution_HappyPath(t *testing.T) {
 	h.Set(HeaderWischoicerSourceService, "content-workstation")
 	h.Set(HeaderWischoicerInternalFunction, "true")
 	h.Set(HeaderWischoicerFeatureCode, "merch_video_clone")
-	h.Set(HeaderWischoicerFeatureName, "爆款复刻中心 - 带货视频爆款复刻")
+	h.Set(HeaderWischoicerFeatureName, "爆款复刻中心 - 视频爆款复刻")
 	h.Set(HeaderWischoicerOperationCode, "merch_video_clone.step2.reference_sheet.generate")
 	h.Set(HeaderWischoicerBizTaskID, "019f-task")
 	h.Set(HeaderWischoicerAppUserID, "019f-user")
