@@ -8,6 +8,10 @@ ARG GO_BUILD_LOW_MEMORY_LIMIT_MB=768
 ARG GO_BUILD_LOW_MAX_PROCS=1
 ARG GO_BUILD_LOW_BUILD_PARALLELISM=1
 ARG GO_BUILD_LOW_GOGC=50
+ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
+ARG DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
+ARG APT_RETRIES=5
+ARG APT_TIMEOUT_SECONDS=30
 
 FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS builder
 ARG NODE_BUILD_RESOURCE_MODE
@@ -137,19 +141,44 @@ RUN set -eu; \
     fi
 
 FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
+ARG DEBIAN_MIRROR
+ARG DEBIAN_SECURITY_MIRROR
+ARG APT_RETRIES
+ARG APT_TIMEOUT_SECONDS
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-ca-certificates \
-    && useradd --system --create-home --home-dir /home/newapi --shell /usr/sbin/nologin newapi \
-    && mkdir -p /data /data/logs \
-    && chown -R newapi:newapi /data
+RUN set -eu; \
+    case "$APT_RETRIES" in ''|*[!0-9]*) echo "APT_RETRIES must be a positive integer" >&2; exit 1 ;; esac; \
+    case "$APT_TIMEOUT_SECONDS" in ''|*[!0-9]*) echo "APT_TIMEOUT_SECONDS must be a positive integer" >&2; exit 1 ;; esac; \
+    [ "$APT_RETRIES" -gt 0 ] && [ "$APT_TIMEOUT_SECONDS" -gt 0 ] || { echo "APT retry parameters must be greater than zero" >&2; exit 1; }; \
+    for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+      if [ -f "$source_file" ]; then \
+        sed -i \
+          -e "s|http://deb.debian.org/debian-security|$DEBIAN_SECURITY_MIRROR|g" \
+          -e "s|https://deb.debian.org/debian-security|$DEBIAN_SECURITY_MIRROR|g" \
+          -e "s|http://deb.debian.org/debian|$DEBIAN_MIRROR|g" \
+          -e "s|https://deb.debian.org/debian|$DEBIAN_MIRROR|g" \
+          "$source_file"; \
+      fi; \
+    done; \
+    printf 'Acquire::Retries "%s";\nAcquire::http::Timeout "%s";\nAcquire::https::Timeout "%s";\n' \
+      "$APT_RETRIES" "$APT_TIMEOUT_SECONDS" "$APT_TIMEOUT_SECONDS" \
+      > /etc/apt/apt.conf.d/80-openship-retries; \
+    echo "[container-build] apt_mirror=$DEBIAN_MIRROR apt_security_mirror=$DEBIAN_SECURITY_MIRROR retries=$APT_RETRIES timeout_seconds=$APT_TIMEOUT_SECONDS"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget gosu; \
+    rm -rf /var/lib/apt/lists/*; \
+    update-ca-certificates; \
+    useradd --system --create-home --home-dir /home/newapi --shell /usr/sbin/nologin newapi; \
+    mkdir -p /data /data/logs; \
+    chown -R newapi:newapi /data
 
 COPY --from=builder2 /build/new-api /
 COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 EXPOSE 3000
 WORKDIR /data
-USER newapi
+USER root
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD wget -q -O - http://127.0.0.1:3000/api/status | grep -Eq '"success"[[:space:]]*:[[:space:]]*true'
-ENTRYPOINT ["/new-api"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/new-api"]
