@@ -78,13 +78,38 @@ jobs:
             core.setOutput('base_ref', pullRequest.base.ref);
             core.setOutput('head_sha', pullRequest.head.sha);
 
-      - name: Run OpenCodeReview
+      # 主备模型（8/7 排障实证：luna 从网关下线 → provider 0 token 全挂；非 OCR 版本问题）：
+      # 主 = vars.OCR_LLM_MODEL（luna，max 思考）；主失败 → 备 = gpt-5.6-sol（medium）。
+      # luna 恢复后删备步骤并去掉主的 continue-on-error 即可。
+      - name: Run OpenCodeReview (primary)
+        id: ocr-primary
         uses: alibaba/open-code-review@main
+        continue-on-error: true  # 主模型失败不挂 job，走 fallback
         with:
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+          # max 思考（网关实测接受 reasoning_effort=max；action 默认 thinking=disabled）
+          llm_extra_body: '{"reasoning_effort": "max"}'
+
+          language: '中文'
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}
+
+      - name: Run OpenCodeReview (fallback sol/medium)
+        if: steps.ocr-primary.outcome == 'failure'
+        uses: alibaba/open-code-review@main
+        with:
+          # 备步骤禁 artifact 上传：主备同名 ocr-review-result-{run}-1 撞 409（实测把成功审查判成 job 红）
+          upload_artifacts: false
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: 'gpt-5.6-sol'
+          llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+          # 备模型用 medium（max 在 sol 上未实证）
+          llm_extra_body: '{"reasoning_effort": "medium"}'
+
           language: '中文'
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}

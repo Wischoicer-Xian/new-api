@@ -448,11 +448,10 @@ func generateAndSetAccessToken(user *model.User) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	user.SetAccessToken(key)
-	if model.DB.Where("access_token = ?", user.AccessToken).First(&model.User{}).RowsAffected != 0 {
+	if model.DB.Where("access_token = ?", key).First(&model.User{}).RowsAffected != 0 {
 		return "", fmt.Errorf("duplicate access token")
 	}
-	if err := user.Update(false); err != nil {
+	if err := model.UpdateUserAccessToken(user.Id, key); err != nil {
 		return "", err
 	}
 	return key, nil
