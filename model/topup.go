@@ -48,6 +48,7 @@ var (
 	ErrPaymentMethodMismatch = errors.New("payment method mismatch")
 	ErrTopUpNotFound         = errors.New("topup not found")
 	ErrTopUpStatusInvalid    = errors.New("topup status invalid")
+	ErrInvalidTopUpQuota     = errors.New("invalid top-up quota")
 	ErrEpayMoneyMismatch     = errors.New("epay notify money mismatch")
 )
 
@@ -233,7 +234,7 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (
 			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
 		)
 		if quotaErr != nil || quotaToAdd <= 0 {
-			return errors.New("无效的充值额度")
+			return ErrInvalidTopUpQuota
 		}
 		topUp.CompleteTime = common.GetTimestamp()
 		topUp.Status = common.TopUpStatusSuccess
@@ -301,7 +302,7 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 			decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
 		)
 		if err != nil || quota <= 0 {
-			return errors.New("无效的充值额度")
+			return ErrInvalidTopUpQuota
 		}
 		// 正向额度增加统一走已收款到账入口 CreditPaidTopUpTx：钱已确认支付，
 		// 不能被「新售卖软上限」拒绝导致已付款却拿不到额度（方案 §3.2）。
@@ -386,7 +387,7 @@ func CompleteEpayTopUpTx(tx *gorm.DB, tradeNo string, quotaToAdd int, actualPaym
 		}
 	}
 	if quotaToAdd <= 0 {
-		return false, errors.New("无效的充值额度")
+		return false, ErrInvalidTopUpQuota
 	}
 	if actualPaymentMethod != "" && topUp.PaymentMethod != actualPaymentMethod {
 		topUp.PaymentMethod = actualPaymentMethod
@@ -607,7 +608,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 			)
 		}
 		if quotaErr != nil || quotaToAdd <= 0 {
-			return errors.New("无效的充值额度")
+			return ErrInvalidTopUpQuota
 		}
 
 		// 标记完成
@@ -675,7 +676,7 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 		// Creem 直接使用 Amount 作为充值额度（整数）
 		quota, err = common.QuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
 		if err != nil || quota <= 0 {
-			return errors.New("无效的充值额度")
+			return ErrInvalidTopUpQuota
 		}
 
 		// 如果有客户邮箱，尝试更新用户邮箱（仅当用户邮箱为空时）
@@ -745,7 +746,7 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
 		)
 		if err != nil || quotaToAdd <= 0 {
-			return errors.New("无效的充值额度")
+			return ErrInvalidTopUpQuota
 		}
 
 		topUp.CompleteTime = common.GetTimestamp()
@@ -810,7 +811,7 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
 		)
 		if err != nil || quotaToAdd <= 0 {
-			return errors.New("无效的充值额度")
+			return ErrInvalidTopUpQuota
 		}
 
 		topUp.CompleteTime = common.GetTimestamp()
