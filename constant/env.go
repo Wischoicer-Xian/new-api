@@ -18,6 +18,10 @@ var GenerateDefaultToken bool
 var ErrorLogEnabled bool
 var TaskQueryLimit int
 var TaskTimeoutMinutes int
+var TaskPluginProtocolTimeoutSeconds int
+var TaskPluginProtocolTickMilliseconds int
+var TaskPluginProtocolTickJitterMilliseconds int
+var TaskPluginProtocolHeartbeatSeconds int
 
 // ImageTaskCreateEnabled is the §14.1 create-allowlist placeholder for the
 // public single-image task API. It defaults off: the create routes stay

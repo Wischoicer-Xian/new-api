@@ -61,7 +61,10 @@ const (
 	// ChannelTypeApiNebula is the ApiNebula async image-task provider. Its base
 	// URL is per-channel configurable; the entry below is the documented default.
 	ChannelTypeApiNebula = 61
-	ChannelTypeDummy     // this one is only for count, do not add any channel after this
+	// ChannelTypeTaskPlugin uses a new value so existing ApiNebula rows keep
+	// their meaning after the fork/upstream channel-number collision.
+	ChannelTypeTaskPlugin = 62
+	ChannelTypeDummy      // this one is only for count, do not add any channel after this
 
 )
 
@@ -128,6 +131,14 @@ var ChannelBaseURLs = []string{
 	"",                                          //59
 	"",                                          //60
 	"https://apinebula.com",                     //61
+	"",                                          //62
+}
+
+func GetChannelBaseURL(channelType int) string {
+	if channelType < 0 || channelType >= len(ChannelBaseURLs) {
+		return ""
+	}
+	return ChannelBaseURLs[channelType]
 }
 
 var ChannelTypeNames = map[int]string{
@@ -189,6 +200,7 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeSub2API:        "Sub2API",
 	ChannelTypeNewAPI:         "New API",
 	ChannelTypeApiNebula:      "ApiNebula",
+	ChannelTypeTaskPlugin:     "Task Plugin",
 }
 
 func GetChannelTypeName(channelType int) string {

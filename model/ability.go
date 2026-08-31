@@ -3,12 +3,14 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/dto"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -105,23 +107,40 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
-func GetChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+func GetChannel(
+	group string,
+	model string,
+	retry int,
+	filters []dto.ChannelFilter,
+) (*Channel, error) {
 	var abilities []Ability
-
-	var err error = nil
-	channelQuery, err := getChannelQuery(group, model, retry)
+	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
 		return nil, err
 	}
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) || common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
-	} else {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
+	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	if len(abilities) > 0 {
+		priorities := make([]int64, 0)
+		seen := make(map[int64]bool)
+		for _, ability := range abilities {
+			priority := int64(0)
+			if ability.Priority != nil {
+				priority = *ability.Priority
+			}
+			if !seen[priority] {
+				seen[priority] = true
+				priorities = append(priorities, priority)
+			}
+		}
+		sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+		if retry >= len(priorities) {
+			retry = len(priorities) - 1
+		}
+		targetPriority := priorities[retry]
+		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
+			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
+		})
 	}
-	if err != nil {
-		return nil, err
-	}
-	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
 	channel := Channel{}
 	if len(abilities) > 0 {
 		// Randomly choose one
@@ -146,45 +165,33 @@ func GetChannel(group string, model string, retry int, requestPath string) (*Cha
 	return &channel, err
 }
 
-// filterAbilitiesByRequestPathAndModel restricts candidates by request path and
-// model for the DB (non-memory-cache) selection path. Only Advanced Custom
-// (type 58) channels are path-checked: kept only when one of their routes matches
-// requestPath and model; all other channel types always pass — except that
-// synchronous image paths also exclude async-only image providers (e.g.
-// ChannelTypeApiNebula) via excludeChannelForSyncImage (WIS-580). When
-// requestPath is empty, filtering is skipped. The metadata-dependent filtering
-// (including the WIS-580 P1 fail-close) lives in filterAbilitiesByChannelMetadata
-// so it is unit-testable without a real DB fault.
+// filterAbilitiesByRequestPathAndModel is retained for the fork's explicit
+// request-path selection path. It applies the async-image fail-closed rule
+// before the generic task-plugin constraint predicate.
 func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath string, model string) []Ability {
 	if requestPath == "" || len(abilities) == 0 {
 		return abilities
 	}
 
-	channelIds := make([]int, 0, len(abilities))
+	channelIDs := make([]int, 0, len(abilities))
 	seen := make(map[int]struct{}, len(abilities))
 	for _, ability := range abilities {
 		if _, ok := seen[ability.ChannelId]; ok {
 			continue
 		}
 		seen[ability.ChannelId] = struct{}{}
-		channelIds = append(channelIds, ability.ChannelId)
+		channelIDs = append(channelIDs, ability.ChannelId)
 	}
 
 	var channels []*Channel
-	err := DB.Where("id IN ?", channelIds).Find(&channels).Error
+	err := DB.Where("id IN ?", channelIDs).Find(&channels).Error
 	return filterAbilitiesByChannelMetadata(abilities, requestPath, model, channels, err)
 }
 
-// filterAbilitiesByChannelMetadata applies the request-path/model filters given
-// the resolved channel metadata. queryErr non-nil means the metadata query
-// failed and channel type info is unavailable.
-//
-// WIS-580 P1 (记星 review round 2): for synchronous image paths, unavailable OR
-// missing metadata MUST fail-close — returning unfiltered candidates would let an
-// async-only image channel (e.g. ChannelTypeApiNebula) be selected and 500 in
-// relay.ImageHelper, which is exactly the regression this fix closes. Non-image
-// paths keep the historical fail-open behavior so a metadata hiccup never blocks
-// chat/embedding selection (their filtering is best-effort AdvancedCustom routing).
+// filterAbilitiesByChannelMetadata applies fork-side request-path filtering
+// using already loaded channel metadata. Synchronous image requests fail
+// closed when metadata is unavailable or the channel is async-only; other
+// paths retain the historical best-effort behavior.
 func filterAbilitiesByChannelMetadata(abilities []Ability, requestPath string, model string, channels []*Channel, queryErr error) []Ability {
 	if queryErr != nil {
 		if IsSyncImagePath(requestPath) {
@@ -193,7 +200,7 @@ func filterAbilitiesByChannelMetadata(abilities []Ability, requestPath string, m
 		return abilities
 	}
 
-	advancedConfigs := make(map[int]*dto.AdvancedCustomConfig)
+	advancedConfigs := make(map[int]*kitdto.AdvancedCustomConfig)
 	channelTypeByID := make(map[int]int, len(channels))
 	channelFound := make(map[int]bool, len(channels))
 	for _, channel := range channels {
@@ -209,16 +216,7 @@ func filterAbilitiesByChannelMetadata(abilities []Ability, requestPath string, m
 		config, isAdvancedCustom := advancedConfigs[ability.ChannelId]
 		if !isAdvancedCustom {
 			if IsSyncImagePath(requestPath) {
-				// WIS-580 P1 fail-close: a channel whose type metadata is missing
-				// cannot be proven sync-capable, so drop it rather than guess —
-				// treating unknown as sync-capable would re-open the type-59 bug.
-				if !channelFound[ability.ChannelId] {
-					continue
-				}
-				// Exclude async-only image providers (e.g. ChannelTypeApiNebula);
-				// they have no sync GetAdaptor, so relay.ImageHelper would return
-				// "invalid api type" 500 if selected.
-				if excludeChannelForSyncImage(requestPath, channelTypeByID[ability.ChannelId]) {
+				if !channelFound[ability.ChannelId] || excludeChannelForSyncImage(requestPath, channelTypeByID[ability.ChannelId]) {
 					continue
 				}
 			}
@@ -230,6 +228,79 @@ func filterAbilitiesByChannelMetadata(abilities []Ability, requestPath string, m
 		}
 	}
 	return filtered
+}
+
+// filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
+// predicate used by the memory-cache path. A failed channel lookup fails
+// closed when a task-plugin identity is required and fails open otherwise.
+func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
+	if len(abilities) == 0 {
+		return nil
+	}
+
+	channelIds := make([]int, 0, len(abilities))
+	seen := make(map[int]struct{}, len(abilities))
+	for _, ability := range abilities {
+		if _, ok := seen[ability.ChannelId]; ok {
+			continue
+		}
+		seen[ability.ChannelId] = struct{}{}
+		channelIds = append(channelIds, ability.ChannelId)
+	}
+
+	var channels []*Channel
+	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
+		if identityFilterRequiresKey(filters) || syncImageFilterRequiresMetadata(filters) {
+			return nil
+		}
+		return abilities
+	}
+
+	channelsByID := make(map[int]*Channel, len(channels))
+	for _, channel := range channels {
+		channelsByID[channel.Id] = channel
+	}
+
+	filtered := make([]Ability, 0, len(abilities))
+	for _, ability := range abilities {
+		channel := channelsByID[ability.ChannelId]
+		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok &&
+			!channelExcludedFromSyncImage(channel, filters) {
+			filtered = append(filtered, ability)
+		}
+	}
+	return filtered
+}
+
+func syncImageFilterRequiresMetadata(filters []dto.ChannelFilter) bool {
+	for _, filter := range filters {
+		if filter.Kind == dto.FilterRequestPath && IsSyncImagePath(filter.RequestPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func channelExcludedFromSyncImage(channel *Channel, filters []dto.ChannelFilter) bool {
+	if channel == nil {
+		return true
+	}
+	for _, filter := range filters {
+		if filter.Kind == dto.FilterRequestPath && IsSyncImagePath(filter.RequestPath) &&
+			excludeChannelForSyncImage(filter.RequestPath, channel.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+func identityFilterRequiresKey(filters []dto.ChannelFilter) bool {
+	for _, filter := range filters {
+		if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
