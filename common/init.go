@@ -236,6 +236,8 @@ func initConstantEnv() {
 		log.Fatal("image task in-flight per-user cap config invalid: " + err.Error())
 	}
 	constant.MaxImageTasksInFlightPerUser = parsedInFlight
+	// Consecutive unrecognized/transient poll failures before the task is failed and refunded.
+	constant.TaskPollMaxFailures = GetEnvOrDefault("TASK_POLL_MAX_FAILURES", 20)
 	// 声明式任务协议桥只观察数据库；这些值控制一次客户端观察连接，
 	// 不改变后台轮询或结算生命周期。
 	constant.TaskPluginProtocolTimeoutSeconds = GetEnvOrDefault("TASK_PLUGIN_PROTOCOL_TIMEOUT_SECONDS", 600)

@@ -116,22 +116,7 @@ func assignDisplayLogIds(logs []*Log, startIdx int) {
 func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
 		logs[i].ChannelName = ""
-		var otherMap map[string]interface{}
-		otherMap, _ = common.StrToMap(logs[i].Other)
-		if otherMap != nil {
-			// Remove admin-only debug fields.
-			delete(otherMap, "admin_info")
-			// Remove diagnostics reserved for root.
-			delete(otherMap, "root_info")
-			// Remove operation-audit details (operator/route info), admin-only.
-			delete(otherMap, "audit_info")
-			// delete(otherMap, "reject_reason")
-			// delete(otherMap, "stream_status")
-			// Remove model mapping fields visible only to admins.
-			delete(otherMap, "is_model_mapped")
-			delete(otherMap, "upstream_model_name")
-		}
-		logs[i].Other = common.MapToJsonStr(otherMap)
+		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityUser)
 	}
 	assignDisplayLogIds(logs, startIdx)
 }
@@ -183,12 +168,15 @@ func maskHiddenSystemLogsForUser(logs []*Log, hiddenTokenIds map[int]bool) {
 // admin_info. Root callers must not pass their results through this formatter.
 func FormatAdminLogs(logs []*Log) {
 	for i := range logs {
-		otherMap, _ := common.StrToMap(logs[i].Other)
-		if otherMap == nil {
-			continue
-		}
-		delete(otherMap, "root_info")
-		logs[i].Other = common.MapToJsonStr(otherMap)
+		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityAdmin)
+	}
+}
+
+// FormatRootLogs normalizes legacy metadata into the current scoped shape
+// without removing root-only diagnostics.
+func FormatRootLogs(logs []*Log) {
+	for i := range logs {
+		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityRoot)
 	}
 }
 
@@ -244,10 +232,9 @@ func RecordLogWithAdminInfo(userId int, logType int, content string, adminInfo m
 		Content:   content,
 	}
 	if len(adminInfo) > 0 {
-		other := map[string]interface{}{
-			"admin_info": adminInfo,
-		}
-		log.Other = common.MapToJsonStr(other)
+		other := NewLogOther()
+		other.MergeAdmin(adminInfo)
+		log.Other = other.JSONString()
 	}
 	if err := createLog(log); err != nil {
 		common.SysLog("failed to record log: " + err.Error())
@@ -272,11 +259,9 @@ func buildOpField(action string, params map[string]interface{}) map[string]inter
 // content 为英文兜底文本（用于导出）；action+params 供前端本地化渲染。
 // extra 可携带 login_method、user_agent 等附加信息（普通用户可见）。
 func RecordLoginLog(userId int, username string, content string, ip string, action string, params map[string]interface{}, extra map[string]interface{}) {
-	other := map[string]interface{}{}
-	for k, v := range extra {
-		other[k] = v
-	}
-	other["op"] = buildOpField(action, params)
+	other := NewLogOther()
+	other.MergePublic(extra)
+	other.SetPublic("op", buildOpField(action, params))
 	log := &Log{
 		UserId:    userId,
 		Username:  username,
@@ -284,7 +269,7 @@ func RecordLoginLog(userId int, username string, content string, ip string, acti
 		Type:      LogTypeLogin,
 		Content:   content,
 		Ip:        ip,
-		Other:     common.MapToJsonStr(other),
+		Other:     other.JSONString(),
 	}
 	if err := createLog(log); err != nil {
 		common.SysLog("failed to record login log: " + err.Error())
@@ -299,15 +284,10 @@ func RecordLoginLog(userId int, username string, content string, ip string, acti
 // auditInfo 存放路由/方法/结果等中间件兜底信息（写入 Other.audit_info，普通用户查询时剥离）。
 func RecordOperationAuditLog(logUserId int, content string, ip string, action string, params map[string]interface{}, adminInfo map[string]interface{}, auditInfo map[string]interface{}) {
 	username, _ := GetUsernameById(logUserId, false)
-	other := map[string]interface{}{
-		"op": buildOpField(action, params),
-	}
-	if len(adminInfo) > 0 {
-		other["admin_info"] = adminInfo
-	}
-	if len(auditInfo) > 0 {
-		other["audit_info"] = auditInfo
-	}
+	other := NewLogOther()
+	other.SetPublic("op", buildOpField(action, params))
+	other.MergeAdmin(adminInfo)
+	other.MergeAudit(auditInfo)
 	log := &Log{
 		UserId:    logUserId,
 		Username:  username,
@@ -315,7 +295,7 @@ func RecordOperationAuditLog(logUserId int, content string, ip string, action st
 		Type:      LogTypeManage,
 		Content:   content,
 		Ip:        ip,
-		Other:     common.MapToJsonStr(other),
+		Other:     other.JSONString(),
 	}
 	if err := createLog(log); err != nil {
 		common.SysLog("failed to record operation audit log: " + err.Error())
@@ -324,17 +304,15 @@ func RecordOperationAuditLog(logUserId int, content string, ip string, action st
 
 func RecordTopupLog(userId int, content string, callerIp string, paymentMethod string, callbackPaymentMethod string) {
 	username, _ := GetUsernameById(userId, false)
-	adminInfo := map[string]interface{}{
+	other := NewLogOther()
+	other.MergeAdmin(map[string]interface{}{
 		"server_ip":               common.GetIp(),
 		"node_name":               common.NodeName,
 		"caller_ip":               callerIp,
 		"payment_method":          paymentMethod,
 		"callback_payment_method": callbackPaymentMethod,
 		"version":                 common.Version,
-	}
-	other := map[string]interface{}{
-		"admin_info": adminInfo,
-	}
+	})
 	log := &Log{
 		UserId:    userId,
 		Username:  username,
@@ -342,7 +320,7 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 		Type:      LogTypeTopup,
 		Content:   content,
 		Ip:        callerIp,
-		Other:     common.MapToJsonStr(other),
+		Other:     other.JSONString(),
 	}
 	err := createLog(log)
 	if err != nil {
@@ -351,24 +329,22 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 }
 
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
-	isStream bool, group string, other map[string]interface{}) {
+	isStream bool, group string, other *LogOther) {
 	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
 	// Mask the user-facing model name for hidden tokens (zero DB; token_hidden is
 	// set in TokenAuth / SetupContextForToken). Retain the real name in the
 	// admin-only other.upstream_model_name for debugging.
 	if c.GetBool("token_hidden") && modelName != "" {
 		if other == nil {
-			other = map[string]interface{}{}
+			other = NewLogOther()
 		}
-		if _, ok := other["upstream_model_name"]; !ok {
-			other["upstream_model_name"] = modelName
-		}
+		setLogOtherMappingIfAbsent(other, "upstream_model_name", modelName)
 		modelName = common.MaskedSystemModelAlias
 	}
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
-	otherStr := common.MapToJsonStr(other)
+	otherStr := other.JSONString()
 	// 判断是否需要记录 IP
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
@@ -409,18 +385,18 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 }
 
 type RecordConsumeLogParams struct {
-	ChannelId        int                    `json:"channel_id"`
-	PromptTokens     int                    `json:"prompt_tokens"`
-	CompletionTokens int                    `json:"completion_tokens"`
-	ModelName        string                 `json:"model_name"`
-	TokenName        string                 `json:"token_name"`
-	Quota            int                    `json:"quota"`
-	Content          string                 `json:"content"`
-	TokenId          int                    `json:"token_id"`
-	UseTimeSeconds   int                    `json:"use_time_seconds"`
-	IsStream         bool                   `json:"is_stream"`
-	Group            string                 `json:"group"`
-	Other            map[string]interface{} `json:"other"`
+	ChannelId        int       `json:"channel_id"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	ModelName        string    `json:"model_name"`
+	TokenName        string    `json:"token_name"`
+	Quota            int       `json:"quota"`
+	Content          string    `json:"content"`
+	TokenId          int       `json:"token_id"`
+	UseTimeSeconds   int       `json:"use_time_seconds"`
+	IsStream         bool      `json:"is_stream"`
+	Group            string    `json:"group"`
+	Other            *LogOther `json:"other"`
 	// BillingStage 业务计费阶段（WIS-499）：request=同步 chat/image 消费，
 	// submit=异步视频首次提交。非空时 RecordConsumeLog 会从请求 header 解析归因
 	// 注入 other.wischoicer（若 other 未预置），并写入 billing_stage。
@@ -438,19 +414,18 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	// strips for non-admin queries, so admins can still debug. Billing is
 	// unaffected: it reads relayInfo.OriginModelName, not this log row.
 	if c.GetBool("token_hidden") && params.ModelName != "" {
-		if _, ok := params.Other["upstream_model_name"]; !ok {
-			if params.Other == nil {
-				params.Other = map[string]interface{}{}
-			}
-			params.Other["upstream_model_name"] = params.ModelName
+		if params.Other == nil {
+			params.Other = NewLogOther()
 		}
+		setLogOtherMappingIfAbsent(params.Other, "upstream_model_name", params.ModelName)
 		params.ModelName = common.MaskedSystemModelAlias
 	}
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
-	otherStr := common.MapToJsonStr(injectWischoicerConsumeOther(params.Other, c, params.BillingStage))
+	other := injectWischoicerConsumeOther(params.Other, c, params.BillingStage)
+	otherStr := other.JSONString()
 	// 判断是否需要记录 IP
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
@@ -513,7 +488,7 @@ type RecordTaskBillingLogParams struct {
 	Quota             int
 	TokenId           int
 	Group             string
-	Other             map[string]interface{}
+	Other             *LogOther
 	NodeName          string // 任务发起节点；为空时回退当前节点
 	RequestId         string
 	UpstreamRequestId string
@@ -543,11 +518,9 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	// PrivateData.BillingContext.OriginModelName, not this log row.
 	if hidden && params.ModelName != "" {
 		if params.Other == nil {
-			params.Other = map[string]interface{}{}
+			params.Other = NewLogOther()
 		}
-		if _, ok := params.Other["upstream_model_name"]; !ok {
-			params.Other["upstream_model_name"] = params.ModelName
-		}
+		setLogOtherMappingIfAbsent(params.Other, "upstream_model_name", params.ModelName)
 		params.ModelName = common.MaskedSystemModelAlias
 	}
 	createdAt := common.GetTimestamp()
@@ -566,7 +539,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		Group:             params.Group,
 		RequestId:         params.RequestId,
 		UpstreamRequestId: params.UpstreamRequestId,
-		Other:             common.MapToJsonStr(other),
+		Other:             other.JSONString(),
 	}
 	err := createLog(log)
 	if err != nil {
@@ -591,38 +564,75 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
-// injectWischoicerConsumeOther 把业务归因注入同步消费日志的 other map。
-// 若 other 已预置 wischoicer（异步 submit 阶段快照，由 LogTaskConsumption 注入），
-// 仅补 billing_stage；否则从请求 header 现解析（同步 request 阶段）。
-// 无归因（普通 API Key 调用、上游未带 header）时不写入，保证历史普通消耗不被误伤。
-func injectWischoicerConsumeOther(other map[string]interface{}, c *gin.Context, billingStage string) map[string]interface{} {
+func setLogOtherMappingIfAbsent(other *LogOther, key string, value any) {
+	if other == nil {
+		return
+	}
+	if snapshot := other.Snapshot(); snapshot != nil {
+		if _, exists := snapshot[key]; exists {
+			return
+		}
+		if adminInfo, ok := snapshot[logOtherAdminInfoKey].(map[string]any); ok {
+			if _, exists := adminInfo[key]; exists {
+				return
+			}
+		}
+	}
+	// Keep the fork's top-level mapping shape so existing admin log UI remains
+	// compatible; formatLogOtherJSON removes these keys for user projections.
+	other.SetPublic(key, value)
+}
+
+func copyLogOtherPublicMap(other *LogOther, key string) (map[string]any, bool) {
+	if other == nil {
+		return nil, false
+	}
+	value, ok := other.Snapshot()[key].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	copyValue := make(map[string]any, len(value))
+	for k, v := range value {
+		copyValue[k] = v
+	}
+	return copyValue, true
+}
+
+// injectWischoicerConsumeOther 把业务归因注入同步消费日志的 other。
+// 若 other 已预置 wischoicer（异步 submit 阶段快照），仅补 billing_stage；
+// 否则从请求 header 现解析。无归因时不写入，保证历史普通消耗不被误伤。
+func injectWischoicerConsumeOther(other *LogOther, c *gin.Context, billingStage string) *LogOther {
 	if !common.WischoicerIsValidBillingStage(billingStage) {
 		return other
 	}
-	if w, ok := other["wischoicer"].(map[string]interface{}); ok {
+	if other == nil {
+		other = NewLogOther()
+	}
+	if w, ok := copyLogOtherPublicMap(other, "wischoicer"); ok {
 		w["billing_stage"] = billingStage
+		other.SetPublic("wischoicer", w)
+		return other
+	}
+	if c == nil || c.Request == nil {
 		return other
 	}
 	attr := common.ParseWischoicerAttribution(c.Request.Header)
-	if attr == nil {
-		return other
+	if attr != nil {
+		other.SetPublic("wischoicer", attr.ToOtherMap(billingStage))
 	}
-	if other == nil {
-		other = make(map[string]interface{})
-	}
-	other["wischoicer"] = attr.ToOtherMap(billingStage)
 	return other
 }
 
 // stampWischoicerBillingStage 把 billing_stage 盖到异步日志 other.wischoicer 上。
 // 异步 settle/refund 的归因由 taskBillingOther 从 task.PrivateData 快照预置；
 // billing_stage 由调用方按差额/退款语义传入。无 wischoicer 时不写入。
-func stampWischoicerBillingStage(other map[string]interface{}, billingStage string) map[string]interface{} {
-	if !common.WischoicerIsValidBillingStage(billingStage) {
+func stampWischoicerBillingStage(other *LogOther, billingStage string) *LogOther {
+	if !common.WischoicerIsValidBillingStage(billingStage) || other == nil {
 		return other
 	}
-	if w, ok := other["wischoicer"].(map[string]interface{}); ok {
+	if w, ok := copyLogOtherPublicMap(other, "wischoicer"); ok {
 		w["billing_stage"] = billingStage
+		other.SetPublic("wischoicer", w)
 	}
 	return other
 }
