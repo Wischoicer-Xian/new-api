@@ -73,45 +73,82 @@ Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
 })
 
 // jsdom may not expose `window.localStorage` in every Node/jsdom combination,
-// but several stores (e.g. zustand auth-store) touch it at module-load time.
-// Keep the fork's in-memory fallback so those imports remain safe in tests.
-if (typeof window !== 'undefined') {
-  let storage: Storage | undefined
+// while Node.js 25+ can expose global storage accessors that resolve to
+// `undefined`. Keep one shared localStorage fallback for browser and global
+// consumers, and provide the same in-memory behavior for sessionStorage.
+function createMemoryStorage(): Storage {
+  const entries = new Map<string, string>()
+  return {
+    get length() {
+      return entries.size
+    },
+    clear: () => entries.clear(),
+    getItem: (key) => entries.get(String(key)) ?? null,
+    key: (index) => [...entries.keys()][index] ?? null,
+    removeItem: (key) => {
+      entries.delete(String(key))
+    },
+    setItem: (key, value) => {
+      entries.set(String(key), String(value))
+    },
+  }
+}
+
+function getGlobalStorage(
+  name: 'localStorage' | 'sessionStorage'
+): Storage | undefined {
   try {
-    storage = window.localStorage
+    const storage = globalThis[name]
+    return typeof storage?.setItem === 'function' ? storage : undefined
   } catch {
-    storage = undefined
+    return undefined
+  }
+}
+
+let localStorage: Storage | undefined
+if (typeof window !== 'undefined') {
+  try {
+    localStorage = window.localStorage
+  } catch {
+    localStorage = undefined
   }
 
-  if (!storage) {
-    const store = new Map<string, string>()
-    storage = {
-      getItem: (key: string) => store.get(key) ?? null,
-      setItem: (key: string, value: string) => {
-        store.set(key, String(value))
-      },
-      removeItem: (key: string) => {
-        store.delete(key)
-      },
-      clear: () => {
-        store.clear()
-      },
-      key: (index: number) => [...store.keys()][index] ?? null,
-      get length() {
-        return store.size
-      },
-    }
+  if (!localStorage || typeof localStorage.setItem !== 'function') {
+    localStorage = createMemoryStorage()
     Object.defineProperty(window, 'localStorage', {
-      value: storage,
       configurable: true,
+      value: localStorage,
     })
   }
+}
 
-  // Node's bare `localStorage` global is separate from jsdom's window
-  // property in some Vitest/jsdom versions; expose the same store through
-  // both names so persisted zustand stores behave consistently.
-  Object.defineProperty(globalThis, 'localStorage', {
-    value: storage,
+localStorage ??= getGlobalStorage('localStorage') ?? createMemoryStorage()
+
+// Node's bare `localStorage` global can be separate from jsdom's window
+// property. Expose the same store through both names so persisted stores behave
+// consistently regardless of which global a module reads at import time.
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  enumerable: true,
+  writable: true,
+  value: localStorage,
+})
+
+if (
+  typeof window !== 'undefined' &&
+  getGlobalStorage('localStorage') !== window.localStorage
+) {
+  Object.defineProperty(window, 'localStorage', {
     configurable: true,
+    value: localStorage,
+  })
+}
+
+if (!getGlobalStorage('sessionStorage')) {
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: createMemoryStorage(),
   })
 }

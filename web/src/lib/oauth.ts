@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { getBasepath } from './basepath'
+import type { SystemStatus } from '@/features/auth/types'
 // ============================================================================
 // OAuth URL Builders
 // ============================================================================
@@ -35,6 +36,11 @@ export function indexCustomOAuthBindings(
   return new Map(bindings.map((binding) => [binding.provider_id, binding]))
 }
 
+function getOAuthRedirectBase(): string {
+  const bp = getBasepath()
+  return bp ? `${window.location.origin}${bp}` : window.location.origin
+}
+
 /**
  * Build GitHub OAuth URL
  */
@@ -46,8 +52,7 @@ export function buildGitHubOAuthUrl(clientId: string, state: string): string {
  * Build Discord OAuth URL
  */
 export function buildDiscordOAuthUrl(clientId: string, state: string): string {
-  const bp = getBasepath()
-  const base = bp ? `${window.location.origin}${bp}` : window.location.origin
+  const base = getOAuthRedirectBase()
   const url = new URL('https://discord.com/oauth2/authorize')
   url.searchParams.set('client_id', clientId)
   url.searchParams.set('redirect_uri', `${base}/oauth/discord`)
@@ -65,8 +70,7 @@ export function buildOIDCOAuthUrl(
   clientId: string,
   state: string
 ): string {
-  const bp = getBasepath()
-  const base = bp ? `${window.location.origin}${bp}` : window.location.origin
+  const base = getOAuthRedirectBase()
   const url = new URL(authUrl)
   url.searchParams.set('client_id', clientId)
   url.searchParams.set('redirect_uri', `${base}/oauth/oidc`)
@@ -81,4 +85,55 @@ export function buildOIDCOAuthUrl(
  */
 export function buildLinuxDOOAuthUrl(clientId: string, state: string): string {
   return `https://connect.linux.do/oauth2/authorize?response_type=code&client_id=${clientId}&state=${state}`
+}
+
+export function buildOAuthAuthorizationUrl(
+  provider: string,
+  state: string,
+  status: SystemStatus
+): string {
+  switch (provider) {
+    case 'github':
+      if (status.github_client_id) {
+        return buildGitHubOAuthUrl(status.github_client_id, state)
+      }
+      break
+    case 'discord':
+      if (status.discord_client_id) {
+        return buildDiscordOAuthUrl(status.discord_client_id, state)
+      }
+      break
+    case 'oidc':
+      if (status.oidc_authorization_endpoint && status.oidc_client_id) {
+        return buildOIDCOAuthUrl(
+          status.oidc_authorization_endpoint,
+          status.oidc_client_id,
+          state
+        )
+      }
+      break
+    case 'linuxdo':
+      if (status.linuxdo_client_id) {
+        return buildLinuxDOOAuthUrl(status.linuxdo_client_id, state)
+      }
+      break
+    default: {
+      const custom = status.custom_oauth_providers?.find(
+        (candidate) => candidate.slug === provider
+      )
+      if (custom) {
+        const url = new URL(custom.authorization_endpoint)
+        url.searchParams.set('client_id', custom.client_id)
+        url.searchParams.set(
+          'redirect_uri',
+          `${getOAuthRedirectBase()}/oauth/${provider}`
+        )
+        url.searchParams.set('response_type', 'code')
+        url.searchParams.set('state', state)
+        if (custom.scopes) url.searchParams.set('scope', custom.scopes)
+        return url.toString()
+      }
+    }
+  }
+  throw new Error('No linked OAuth provider is available.')
 }
