@@ -31,6 +31,7 @@ import { useStatus } from '@/hooks/use-status'
 import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
 import { formatNumber, formatQuota } from '@/lib/format'
 import { canAccessNewApiWallet } from '@/lib/new-api-wallet-access'
+import { requireServerSuccess } from '@/lib/server-error-message'
 import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -157,11 +158,13 @@ export function SummaryCards() {
       summaryTimeRange.end_timestamp,
     ],
     queryFn: async () =>
-      getUserQuotaDates({
-        start_timestamp: summaryTimeRange.start_timestamp,
-        end_timestamp: summaryTimeRange.end_timestamp,
-        default_time: 'hour',
-      }),
+      requireServerSuccess(
+        await getUserQuotaDates({
+          start_timestamp: summaryTimeRange.start_timestamp,
+          end_timestamp: summaryTimeRange.end_timestamp,
+          default_time: 'hour',
+        })
+      ),
     staleTime: 60 * 1000,
   })
 
