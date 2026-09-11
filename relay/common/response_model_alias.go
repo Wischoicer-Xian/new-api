@@ -24,6 +24,11 @@ func GetCallerModelName(c *gin.Context, info *RelayInfo) string {
 	return ""
 }
 
+// JSONFieldExists reports whether the given JSON path exists in the raw payload.
+func JSONFieldExists(data []byte, path string) bool {
+	return len(data) > 0 && gjson.GetBytes(data, path).Exists()
+}
+
 // PatchJSONStringFieldRaw rewrites a string field at the given JSON path in a
 // raw payload. Returns (patched data, whether a change was made, error).
 // No-op when the field is absent, already equals the target value, or the

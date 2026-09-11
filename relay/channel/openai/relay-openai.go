@@ -40,7 +40,9 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 	// Same rewrite as the raw passthrough path above so the whole stream is
 	// consistent: without this the reformatted chunks would leak the upstream
 	// (mapped) model while the final usage chunk still shows the caller model.
-	if callerModel != "" {
+	// Field presence is preserved: a chunk without a model field must not gain
+	// one on re-serialization (the DTO's Model has no omitempty).
+	if callerModel != "" && relaycommon.JSONFieldExists(common.StringToByteSlice(data), "model") {
 		lastStreamResponse.Model = callerModel
 	}
 
