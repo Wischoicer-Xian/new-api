@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 // buildAudioSSE constructs an SSE stream body that mimics OpenAI audio model
@@ -197,4 +198,79 @@ func TestOaiStreamHandler_NonAudioModel_SkipsSecondLastUsage(t *testing.T) {
 	// it falls through to text-based estimation or last-chunk usage.
 	require.Equal(t, 10, usage.PromptTokens,
 		"Non-audio model should use estimated prompt tokens, not second-to-last usage")
+}
+
+// requireAllChunksUseCallerModel parses an SSE response body and asserts every
+// data chunk's top-level model field equals the caller's requested model.
+func requireAllChunksUseCallerModel(t *testing.T, body, callerModel string) {
+	t.Helper()
+	lines := strings.Split(body, "\n")
+	chunks := 0
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		model := gjson.Get(strings.TrimPrefix(line, "data: "), "model").String()
+		require.Equal(t, callerModel, model, "stream chunk should report the caller model")
+		chunks++
+	}
+	require.Greater(t, chunks, 0, "expected at least one stream chunk")
+}
+
+// TestOaiStreamHandlerRewritesModelToCallerModel verifies that every streamed
+// chunk reports the caller's model, on both the raw passthrough path (default
+// channel settings) and the reformatted path (ForceFormat / ThinkingToContent),
+// so a mapped channel never leaks the upstream model name mid-stream.
+func TestOaiStreamHandlerRewritesModelToCallerModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	oldStreamingTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 300
+	t.Cleanup(func() { constant.StreamingTimeout = oldStreamingTimeout })
+
+	callerModel := "my-fast-model"
+	upstreamModel := "gpt-4o-2024-11-20"
+
+	buildSSE := func() string {
+		return "data: " + fmt.Sprintf(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"%s","choices":[{"index":0,"delta":{"content":"Hel"}}]}`, upstreamModel) + "\n" +
+			"data: " + fmt.Sprintf(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"%s","choices":[{"index":0,"delta":{"content":"lo"}}]}`, upstreamModel) + "\n" +
+			"data: " + fmt.Sprintf(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"%s","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`, upstreamModel) + "\n" +
+			"data: [DONE]\n"
+	}
+
+	for _, tc := range []struct {
+		name        string
+		forceFormat bool
+	}{
+		{name: "raw passthrough", forceFormat: false},
+		{name: "force format", forceFormat: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{
+				Body:   nopCloser{strings.NewReader(buildSSE())},
+				Header: make(http.Header),
+			}
+			resp.Header.Set("Content-Type", "text/event-stream")
+
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+			info := &relaycommon.RelayInfo{
+				RelayFormat:     types.RelayFormatOpenAI,
+				OriginModelName: callerModel,
+				ChannelMeta: &relaycommon.ChannelMeta{
+					UpstreamModelName: upstreamModel,
+					ChannelSetting:    dto.ChannelSettings{ForceFormat: tc.forceFormat},
+				},
+				RelayMode: relayconstant.RelayModeChatCompletions,
+			}
+			info.SetEstimatePromptTokens(5)
+
+			_, apiErr := OaiStreamHandler(c, info, resp)
+			require.Nil(t, apiErr, "OaiStreamHandler should not return an error")
+
+			requireAllChunksUseCallerModel(t, rec.Body.String(), callerModel)
+		})
+	}
 }

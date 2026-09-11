@@ -24,20 +24,24 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 		return nil
 	}
 
+	callerModel := relaycommon.GetCallerModelName(c, info)
+
 	// Patch top-level model to caller model for raw passthrough path
 	if !forceFormat && !thinkToContent {
-		callerModel := relaycommon.GetCallerModelName(c, info)
-		patched, changed, err := relaycommon.PatchTopLevelModelRaw(common.StringToByteSlice(data), callerModel)
-		if err == nil && changed {
-			relaycommon.MarkResponseBodyRewritten(c)
-			return helper.StringData(c, string(patched))
-		}
-		return helper.StringData(c, data)
+		patched := relaycommon.RewriteCallerModelRaw(c, info, common.StringToByteSlice(data), "model")
+		return helper.StringData(c, string(patched))
 	}
 
 	var lastStreamResponse dto.ChatCompletionsStreamResponse
 	if err := common.UnmarshalJsonStr(data, &lastStreamResponse); err != nil {
 		return err
+	}
+
+	// Same rewrite as the raw passthrough path above so the whole stream is
+	// consistent: without this the reformatted chunks would leak the upstream
+	// (mapped) model while the final usage chunk still shows the caller model.
+	if callerModel != "" {
+		lastStreamResponse.Model = callerModel
 	}
 
 	if !thinkToContent {

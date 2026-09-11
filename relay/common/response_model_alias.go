@@ -24,43 +24,54 @@ func GetCallerModelName(c *gin.Context, info *RelayInfo) string {
 	return ""
 }
 
-// PatchTopLevelModelRaw rewrites the top-level "model" field in a raw JSON payload.
-// Returns (patched data, whether a change was made, error).
-func PatchTopLevelModelRaw(data []byte, callerModel string) ([]byte, bool, error) {
-	if len(data) == 0 || callerModel == "" {
+// PatchJSONStringFieldRaw rewrites a string field at the given JSON path in a
+// raw payload. Returns (patched data, whether a change was made, error).
+// No-op when the field is absent, already equals the target value, or the
+// target value is empty.
+func PatchJSONStringFieldRaw(data []byte, path string, value string) ([]byte, bool, error) {
+	if len(data) == 0 || value == "" {
 		return data, false, nil
 	}
 
-	existing := gjson.GetBytes(data, "model")
-	if !existing.Exists() || existing.String() == callerModel {
+	existing := gjson.GetBytes(data, path)
+	if !existing.Exists() || existing.String() == value {
 		return data, false, nil
 	}
 
-	patched, err := sjson.SetBytes(data, "model", callerModel)
+	patched, err := sjson.SetBytes(data, path, value)
 	if err != nil {
 		return data, false, err
 	}
 	return patched, true, nil
 }
 
+// RewriteCallerModelRaw patches the JSON string field at path to the caller's
+// model and marks the response body rewritten. Returns data unchanged when the
+// caller model is empty, the field is absent, or the value already matches.
+func RewriteCallerModelRaw(c *gin.Context, info *RelayInfo, data []byte, path string) []byte {
+	callerModel := GetCallerModelName(c, info)
+	if callerModel == "" {
+		return data
+	}
+	patched, changed, err := PatchJSONStringFieldRaw(data, path, callerModel)
+	if err != nil || !changed {
+		return data
+	}
+	MarkResponseBodyRewritten(c)
+	return patched
+}
+
+// PatchTopLevelModelRaw rewrites the top-level "model" field in a raw JSON payload.
+// Returns (patched data, whether a change was made, error).
+func PatchTopLevelModelRaw(data []byte, callerModel string) ([]byte, bool, error) {
+	return PatchJSONStringFieldRaw(data, "model", callerModel)
+}
+
 // PatchResponsesEventModelRaw rewrites response.model in a Responses API SSE event payload.
 // It applies to any event that contains a response.model field, regardless of event type.
 // Returns (patched data, whether a change was made, error).
 func PatchResponsesEventModelRaw(data []byte, callerModel string) ([]byte, bool, error) {
-	if len(data) == 0 || callerModel == "" {
-		return data, false, nil
-	}
-
-	existing := gjson.GetBytes(data, "response.model")
-	if !existing.Exists() || existing.String() == callerModel {
-		return data, false, nil
-	}
-
-	patched, err := sjson.SetBytes(data, "response.model", callerModel)
-	if err != nil {
-		return data, false, err
-	}
-	return patched, true, nil
+	return PatchJSONStringFieldRaw(data, "response.model", callerModel)
 }
 
 const responseBodyRewrittenKey = "response_body_rewritten"
