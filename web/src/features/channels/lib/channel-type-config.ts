@@ -175,6 +175,16 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Async image task models',
     },
   },
+  62: {
+    id: 62,
+    name: CHANNEL_TYPES[62],
+    icon: 'newapi',
+    hints: {
+      baseUrl: 'Task plugin endpoint base URL',
+      key: 'Task plugin API key',
+      models: 'Models exposed by the plugin',
+    },
+  },
 }
 
 /**

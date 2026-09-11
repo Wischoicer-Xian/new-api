@@ -1,25 +1,46 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { defineConfig } from 'vitest/config'
 
-// Vitest config for the DOM-heavy component tests. Other tests use node:test
-// and are executed by Bun, which can run both node:test and Vitest-style APIs.
-// Mirrors the rsbuild `@/` -> ./src alias so
-// component tests resolve the same imports as the build. The jsdom environment
-// lets @testing-library/react render the DOM; the setup file wires jest-dom
-// matchers.
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
 export default defineConfig({
   resolve: {
     alias: {
-      '@': path.resolve(import.meta.dirname, 'src'),
+      '@': path.resolve(__dirname, './src'),
     },
   },
   test: {
     environment: 'jsdom',
-    setupFiles: ['./vitest.setup.ts'],
-    include: [
-      'src/features/channels/components/drawers/sections/channel-image-capability-section.test.tsx',
-      'src/features/channels/lib/image-config.test.ts',
+    server: {
+      deps: { inline: [/@lobehub\//, /antd-style/] },
+    },
+    setupFiles: ['./src/test-setup.ts'],
+    clearMocks: true,
+    restoreMocks: true,
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    exclude: [
+      'src/features/wallet/hooks/use-wischoicer-recharge.test.ts',
+      'src/features/wallet/lib/wischoicer-recharge.test.ts',
     ],
     css: false,
   },

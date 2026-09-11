@@ -12,13 +12,26 @@ import (
 
 // wischoicerBillingAudit 记录 wischoicer-billing → new-api 内部接口的操作审计。
 // operator 为目标 new-api user id（billing 内部接口无登录管理员）；source 标记调用方。
+// 该调用没有可验证的管理员身份，因此直接写 operation 类别，避免把 billing
+// 服务伪装成管理员，同时保留 fork 原有的管理操作日志语义。
 func wischoicerBillingAudit(c *gin.Context, action string, targetUserId int, params map[string]interface{}) {
 	if params == nil {
 		params = map[string]interface{}{}
 	}
 	params["source"] = "wischoicer-billing"
 	params["client_ip"] = c.ClientIP()
-	model.RecordOperationAuditLog(targetUserId, action, c.ClientIP(), action, params, nil, nil)
+	model.RecordAuditLog(c, model.AuditLog{
+		UserId:    targetUserId,
+		ActorRole: 0,
+		Category:  model.AuditCategoryOperation,
+		Action:    action,
+		Content:   action,
+		Ip:        c.ClientIP(),
+		Success:   true,
+		Other: model.AuditOther{
+			Op: &model.AuditOperation{Action: action, Params: model.AuditFields(params)},
+		},
+	})
 }
 
 // ---------------------------------------------------------------------------

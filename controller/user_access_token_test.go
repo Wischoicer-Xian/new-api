@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
@@ -53,18 +54,20 @@ func callAccessTokenHandler(t *testing.T, handler gin.HandlerFunc, userID int, t
 }
 
 func TestGenerateAccessTokenPersistsToken(t *testing.T) {
-	db := setupAccessTokenControllerTestDB(t)
-	user := &model.User{Username: "self-token-user", Password: "password", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}
-	require.NoError(t, db.Create(user).Error)
-
-	response := callAccessTokenHandler(t, GenerateAccessToken, user.Id, "/api/user/token")
-	require.True(t, response.Success)
-	require.NotEmpty(t, response.Data)
+	user, identity := setupSecurityEnrollmentTest(t)
+	proof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeAccessTokenGenerate}, "password")
+	response := securityEnrollmentRequest(http.MethodGet, "/api/user/token", "", proof, identity, GenerateAccessToken)
+	var body securityEnrollmentResponse
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body), response.Body.String())
+	require.True(t, body.Success, body.Message)
+	var token string
+	require.NoError(t, common.Unmarshal(body.Data, &token))
+	require.NotEmpty(t, token)
 
 	var stored model.User
-	require.NoError(t, db.First(&stored, user.Id).Error)
-	require.Equal(t, response.Data, stored.GetAccessToken())
-	validated, err := model.ValidateAccessToken(response.Data)
+	require.NoError(t, model.DB.First(&stored, user.Id).Error)
+	require.Equal(t, token, stored.GetAccessToken())
+	validated, err := model.ValidateAccessToken(token)
 	require.NoError(t, err)
 	require.Equal(t, user.Id, validated.Id)
 }

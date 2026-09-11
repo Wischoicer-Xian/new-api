@@ -146,17 +146,16 @@ func recordImageTaskReserveConsumption(outcome model.ImageTaskReserveOutcome, pr
 	if task.Action == string(ImageOperationEdit) {
 		requestPath = "/v1/image-tasks/edits"
 	}
-	other := map[string]interface{}{
-		"is_task":      true,
-		"request_path": requestPath,
-		"task_id":      task.TaskID,
-		"model_price":  price.ModelPrice(),
-		"group_ratio":  price.GroupRatio(),
-	}
+	other := model.NewLogOther()
+	other.SetPublic("is_task", true)
+	other.SetPublic("request_path", requestPath)
+	other.SetPublic("task_id", task.TaskID)
+	other.SetPublic("model_price", price.ModelPrice())
+	other.SetPublic("group_ratio", price.GroupRatio())
 	if len(attribution) > 0 {
 		var attr common.WischoicerAttribution
 		if err := common.Unmarshal(attribution, &attr); err == nil && attr.IsAttributed() {
-			other["wischoicer"] = attr.ToOtherMap(common.WischoicerStageSubmit)
+			other.SetPublic("wischoicer", attr.ToOtherMap(common.WischoicerStageSubmit))
 		}
 	}
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{

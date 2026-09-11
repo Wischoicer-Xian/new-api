@@ -16,39 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import assert from 'node:assert/strict'
-import { after, describe, test } from 'node:test'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, test } from 'vitest'
 
-import { Window } from 'happy-dom'
-
-const domWindow = new Window()
-const domGlobals = [
-  'window',
-  'document',
-  'navigator',
-  'HTMLElement',
-  'HTMLButtonElement',
-  'SVGElement',
-  'Node',
-  'Element',
-  'Event',
-  'CustomEvent',
-  'MutationObserver',
-  'ResizeObserver',
-  'requestAnimationFrame',
-  'cancelAnimationFrame',
-  'getComputedStyle',
-] as const
-
-for (const key of domGlobals) {
-  Object.defineProperty(globalThis, key, {
-    configurable: true,
-    value: domWindow[key],
-  })
-}
-
-const { act } = await import('react')
-const { createRoot } = await import('react-dom/client')
 const { createInstance } = await import('i18next')
 const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { TooltipProvider } = await import('@/components/ui/tooltip')
@@ -69,11 +40,6 @@ await i18n.use(initReactI18next).init({
     },
   },
 })
-
-const reactTestGlobals = globalThis as typeof globalThis & {
-  IS_REACT_ACT_ENVIRONMENT?: boolean
-}
-reactTestGlobals.IS_REACT_ACT_ENVIRONMENT = true
 
 function CellHarness(props: {
   group: string
@@ -96,141 +62,133 @@ function CellHarness(props: {
 }
 
 describe('API key group table cell', () => {
-  after(() => {
-    domWindow.close()
-  })
-
-  test('renders two unclipped rings and a localized Auto ratio when API data uses a nonlocalized string', async () => {
-    const container = document.createElement('div')
-    document.body.append(container)
-    const root = createRoot(container)
-
-    await act(async () =>
-      root.render(
-        <CellHarness
-          group='auto'
-          ratio='自动'
-          crossGroupRetry
-          shouldReduceMotion={false}
-        />
-      )
+  test('renders two unclipped rings and a localized Auto ratio when API data uses a nonlocalized string', () => {
+    const { container } = render(
+      <CellHarness group='auto' ratio='自动' crossGroupRetry />
     )
 
     const badgeCell = container.querySelector<HTMLElement>(
       '[data-api-key-group-cell="auto"]'
     )
-    assert.ok(badgeCell)
-    assert.equal(badgeCell.classList.contains('overflow-visible'), true)
-    assert.equal(badgeCell.classList.contains('overflow-hidden'), false)
+    expect(badgeCell).toHaveClass('overflow-visible')
+    expect(badgeCell).not.toHaveClass('overflow-hidden')
 
     const frames = container.querySelectorAll('[data-auto-group-frame]')
     const movingRings = container.querySelectorAll(
       '[data-auto-group-flow-border]'
     )
-    assert.equal(frames.length, 2)
-    assert.equal(movingRings.length, 2)
+    expect(frames.length).toBe(2)
+    expect(movingRings.length).toBe(2)
     for (const frame of frames) {
-      assert.equal(frame.classList.contains('relative'), true)
-      assert.equal(frame.classList.contains('overflow-visible'), true)
-      assert.equal(frame.classList.contains('rounded-4xl'), true)
-      assert.equal(frame.classList.contains('p-px'), true)
+      expect(frame).toHaveClass(
+        'relative',
+        'overflow-visible',
+        'rounded-4xl',
+        'p-px'
+      )
     }
 
     const ratio = container.querySelector<HTMLElement>(
       '[data-auto-group-effect="ratio"]'
     )
-    assert.ok(ratio)
-    assert.equal(ratio.textContent, 'Auto Ratio')
-    assert.equal(ratio.textContent?.includes('x'), false)
-    assert.equal(container.textContent?.includes('自动'), false)
-    assert.equal(container.textContent?.includes('Cross-group'), true)
+    expect(ratio).toHaveTextContent('Auto Ratio')
+    expect(ratio).not.toHaveTextContent('x')
+    expect(container).not.toHaveTextContent('自动')
+    expect(container).toHaveTextContent('Cross-group')
 
     const crossGroupBadge = [
       ...container.querySelectorAll<HTMLElement>('[data-slot="status-badge"]'),
     ].find((badge) => badge.textContent === 'Cross-group')
-    assert.ok(crossGroupBadge)
-    assert.equal(crossGroupBadge.closest('[data-auto-group-frame]'), null)
-
-    await act(async () => root.unmount())
-    container.remove()
+    expect(crossGroupBadge).not.toBeUndefined()
+    expect(crossGroupBadge?.closest('[data-auto-group-frame]')).toBeNull()
   })
 
-  test('keeps static Auto frames but omits both moving layers for reduced motion', async () => {
-    const container = document.createElement('div')
-    document.body.append(container)
-    const root = createRoot(container)
-
-    await act(async () =>
-      root.render(<CellHarness group='auto' ratio='Auto' shouldReduceMotion />)
+  test('keeps both static Auto frames but omits their moving layers for reduced motion', () => {
+    const { container } = render(
+      <CellHarness group='auto' ratio='Auto' shouldReduceMotion />
     )
 
-    assert.equal(
-      container.querySelectorAll('[data-auto-group-frame]').length,
-      2
-    )
-    assert.equal(
-      container.querySelectorAll('[data-auto-group-flow-border]').length,
-      0
-    )
-
-    await act(async () => root.unmount())
-    container.remove()
+    expect(container.querySelectorAll('[data-auto-group-frame]').length).toBe(2)
+    expect(
+      container.querySelectorAll('[data-auto-group-flow-border]').length
+    ).toBe(0)
   })
 
-  test('shows only the Auto badge when ratio data is unavailable', async () => {
-    const container = document.createElement('div')
-    document.body.append(container)
-    const root = createRoot(container)
-
-    await act(async () =>
-      root.render(<CellHarness group='auto' shouldReduceMotion={false} />)
+  test('shows the Auto badge when ratio data is unavailable', () => {
+    const { container } = render(
+      <CellHarness group='auto' shouldReduceMotion={false} />
     )
 
-    assert.equal(
-      container.querySelectorAll('[data-auto-group-frame]').length,
-      1
-    )
-    assert.equal(
-      container.querySelectorAll('[data-auto-group-flow-border]').length,
-      1
-    )
-    assert.equal(
-      container.querySelector('[data-auto-group-effect="ratio"]'),
+    expect(container.querySelectorAll('[data-auto-group-frame]').length).toBe(1)
+    expect(
+      container.querySelectorAll('[data-auto-group-flow-border]').length
+    ).toBe(1)
+    expect(container.querySelector('[data-auto-group-effect="ratio"]')).toBe(
       null
     )
-    assert.equal(container.textContent?.includes('Auto'), true)
-    assert.equal(container.textContent?.includes('Ratio'), false)
-
-    await act(async () => root.unmount())
-    container.remove()
+    expect(container).toHaveTextContent('Cross-group')
+    expect(container).toHaveTextContent('Auto')
+    expect(container).not.toHaveTextContent('Ratio')
   })
 
-  test('narrows normal group ratios to numbers and never applies Auto rings', async () => {
-    const container = document.createElement('div')
-    document.body.append(container)
-    const root = createRoot(container)
-
-    await act(async () =>
-      root.render(
-        <CellHarness group='vip' ratio='自动' shouldReduceMotion={false} />
+  test.each([
+    [0.8, 'bg-info/10', 'text-info', 'border-info/30'],
+    [1, 'bg-muted', 'text-muted-foreground', 'border-muted-foreground/30'],
+    [3, 'bg-warning/10', 'text-warning', 'border-warning/30'],
+  ])(
+    'preserves the original %s multiplier color in the compact layout',
+    (ratio, background, color, border) => {
+      const { container } = render(
+        <CellHarness group='default' ratio={ratio} />
       )
-    )
-
-    assert.equal(container.textContent?.includes('vip'), true)
-    assert.equal(container.textContent?.includes('自动'), false)
-    assert.equal(container.querySelector('[data-auto-group-frame]'), null)
-    assert.equal(container.querySelector('[data-auto-group-flow-border]'), null)
-
-    await act(async () =>
-      root.render(
-        <CellHarness group='vip' ratio={3} shouldReduceMotion={false} />
+      const multiplier = screen.getByText(`${ratio}x`).parentElement
+      expect(multiplier).toHaveClass(
+        background,
+        color,
+        border,
+        'rounded-full',
+        'tabular-nums',
+        'h-5',
+        'min-w-12'
       )
+      expect(
+        container.querySelector('[data-auto-group-flow-border]')
+      ).toBeNull()
+    }
+  )
+
+  test('labels the user group multiplier as inherited without inventing a numeric value', async () => {
+    render(<CellHarness group='' />)
+    expect(screen.getByText('User Group')).toBeInTheDocument()
+    expect(screen.getByText('Inherited')).toBeInTheDocument()
+    expect(screen.getByText('Inherited').parentElement).toHaveClass(
+      'border-muted-foreground/30',
+      'rounded-full'
     )
+    expect(screen.queryByText('1x')).not.toBeInTheDocument()
+    await userEvent.tab()
+    expect(await screen.findByText('Follow user group')).toBeVisible()
+  })
 
-    assert.equal(container.textContent?.includes('3x'), true)
-    assert.equal(container.querySelector('[data-auto-group-frame]'), null)
+  test('keeps a long group name and exact multiplier available through keyboard focus', async () => {
+    const groupName = 'production-with-a-very-long-custom-group-name'
+    render(<CellHarness group={groupName} ratio={12.345678} />)
+    expect(
+      screen.getByText(groupName).closest('[data-slot="tooltip-trigger"]')
+    ).toHaveClass('max-w-50')
+    expect(screen.getByText('12.345678x')).toBeInTheDocument()
+    await userEvent.tab()
+    expect(
+      await screen.findByText(groupName, {
+        selector: '[data-slot="tooltip-content"]',
+      })
+    ).toBeVisible()
+  })
 
-    await act(async () => root.unmount())
-    container.remove()
+  test('never turns a string-valued normal group ratio into an automatic multiplier', () => {
+    render(<CellHarness group='vip' ratio='自动' />)
+    expect(screen.getByText('vip')).toBeInTheDocument()
+    expect(screen.queryByText('Auto')).not.toBeInTheDocument()
+    expect(screen.queryByText('自动')).not.toBeInTheDocument()
   })
 })

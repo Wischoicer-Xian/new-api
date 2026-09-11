@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -14,7 +15,132 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
+
+func TestStreamResponseGeminiChat2OpenAIAttachesUsageMetadata(t *testing.T) {
+	t.Parallel()
+
+	withUsage, isStop := streamResponseGeminiChat2OpenAI(&dto.GeminiChatResponse{
+		Candidates: []dto.GeminiChatCandidate{{
+			Content: dto.GeminiChatContent{
+				Role:  "model",
+				Parts: []dto.GeminiPart{{Text: "hello"}},
+			},
+		}},
+		UsageMetadata: dto.GeminiUsageMetadata{
+			PromptTokenCount:     3868,
+			CandidatesTokenCount: 0,
+			TotalTokenCount:      3868,
+		},
+	})
+	require.False(t, isStop)
+	require.NotNil(t, withUsage)
+	require.NotNil(t, withUsage.Usage)
+	require.Equal(t, 3868, withUsage.Usage.PromptTokens)
+	require.Equal(t, 3868, withUsage.Usage.TotalTokens)
+	require.NotNil(t, withUsage.Usage.BillingUsage)
+	require.Equal(t, dto.BillingUsageSourceGeminiChat, withUsage.Usage.BillingUsage.Source)
+	require.Equal(t, dto.BillingUsageSemanticGemini, withUsage.Usage.BillingUsage.Semantic)
+	require.NotNil(t, withUsage.Usage.BillingUsage.GeminiUsageMetadata)
+	require.Equal(t, 3868, withUsage.Usage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
+	require.False(t, withUsage.Usage.BillingUsage.Estimated)
+
+	withoutUsage, _ := streamResponseGeminiChat2OpenAI(&dto.GeminiChatResponse{
+		Candidates: []dto.GeminiChatCandidate{{
+			Content: dto.GeminiChatContent{
+				Role:  "model",
+				Parts: []dto.GeminiPart{{Text: "hello"}},
+			},
+		}},
+	})
+	require.NotNil(t, withoutUsage)
+	require.Nil(t, withoutUsage.Usage)
+}
+
+func TestGeminiChatStreamHandlerClaudeFirstFrameUsesUpstreamUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	oldStreamingTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 300
+	t.Cleanup(func() {
+		constant.StreamingTimeout = oldStreamingTimeout
+	})
+
+	info := &relaycommon.RelayInfo{
+		RelayFormat:     types.RelayFormatClaude,
+		OriginModelName: "gemini-2.5-flash",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gemini-2.5-flash",
+		},
+		ClaudeConvertInfo: &relaycommon.ClaudeConvertInfo{
+			LastMessagesType: relaycommon.LastMessageTypeNone,
+		},
+	}
+	info.SetEstimatePromptTokens(4994)
+
+	chunkData, err := common.Marshal(dto.GeminiChatResponse{
+		Candidates: []dto.GeminiChatCandidate{{
+			Content: dto.GeminiChatContent{
+				Role:  "model",
+				Parts: []dto.GeminiPart{{Text: "hello"}},
+			},
+		}},
+		UsageMetadata: dto.GeminiUsageMetadata{
+			PromptTokenCount: 3868,
+			TotalTokenCount:  3868,
+		},
+	})
+	require.NoError(t, err)
+	resp := &http.Response{
+		Body: io.NopCloser(bytes.NewReader([]byte("data: " + string(chunkData) + "\n" + "data: [DONE]\n"))),
+	}
+
+	usage, newAPIError := GeminiChatStreamHandler(c, info, resp)
+	require.Nil(t, newAPIError)
+	require.NotNil(t, usage)
+	require.Equal(t, 3868, usage.PromptTokens)
+
+	var startUsage, deltaUsage *dto.ClaudeUsage
+	for line := range strings.SplitSeq(recorder.Body.String(), "\n") {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data: ")
+		if !ok {
+			continue
+		}
+		var event dto.ClaudeResponse
+		if err := common.UnmarshalJsonStr(payload, &event); err != nil {
+			continue
+		}
+		switch event.Type {
+		case "message_start":
+			if event.Message != nil {
+				startUsage = event.Message.Usage
+			}
+		case "message_delta":
+			deltaUsage = event.Usage
+		}
+	}
+
+	require.NotNil(t, startUsage)
+	require.Equal(t, 3868, startUsage.InputTokens)
+	require.NotNil(t, startUsage.BillingUsage)
+	require.Equal(t, dto.BillingUsageSourceGeminiChat, startUsage.BillingUsage.Source)
+	require.Equal(t, dto.BillingUsageSemanticGemini, startUsage.BillingUsage.Semantic)
+	require.NotNil(t, startUsage.BillingUsage.GeminiUsageMetadata)
+	require.Equal(t, 3868, startUsage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
+	require.False(t, startUsage.BillingUsage.Estimated)
+
+	require.NotNil(t, deltaUsage)
+	require.Equal(t, 3868, deltaUsage.InputTokens)
+	require.NotNil(t, deltaUsage.BillingUsage)
+	require.Equal(t, dto.BillingUsageSourceGeminiChat, deltaUsage.BillingUsage.Source)
+	require.Equal(t, dto.BillingUsageSemanticGemini, deltaUsage.BillingUsage.Semantic)
+	require.NotNil(t, deltaUsage.BillingUsage.GeminiUsageMetadata)
+	require.Equal(t, 3868, deltaUsage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
+}
 
 func TestGeminiChatHandlerCompletionTokensExcludeToolUsePromptTokens(t *testing.T) {
 	t.Parallel()
@@ -513,4 +639,77 @@ func TestGeminiStreamHandlerEmptyUsageMetadataBuildsEstimatedBillingUsage(t *tes
 	require.Equal(t, usage.PromptTokens, usage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
 	require.Equal(t, usage.CompletionTokens, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount)
 	require.True(t, common.GetContextKeyBool(c, constant.ContextKeyLocalCountTokens))
+}
+
+// TestGeminiNativeHandlersRewriteModelVersionToCaller verifies that the native
+// Gemini text-generation exits (non-stream, stream, and the Gemini-format
+// branch of GeminiChatHandler) rewrite modelVersion to the caller's model so a
+// mapped channel never leaks the upstream model name.
+func TestGeminiNativeHandlersRewriteModelVersionToCaller(t *testing.T) {
+	callerModel := "my-gemini-alias"
+	upstreamModel := "gemini-2.5-flash"
+
+	newInfo := func() *relaycommon.RelayInfo {
+		return &relaycommon.RelayInfo{
+			OriginModelName: callerModel,
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: upstreamModel,
+			},
+		}
+	}
+
+	nativeBody := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6},"modelVersion":"` + upstreamModel + `"}`
+
+	t.Run("non-stream native handler", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/my-gemini-alias:generateContent", nil)
+
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(nativeBody))}
+		usage, apiErr := GeminiTextGenerationHandler(c, newInfo(), resp)
+		require.Nil(t, apiErr)
+		require.NotNil(t, usage)
+		require.Equal(t, callerModel, gjson.Get(rec.Body.String(), "modelVersion").String(),
+			"non-stream native response should report the caller model")
+	})
+
+	t.Run("stream native handler", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		oldStreamingTimeout := constant.StreamingTimeout
+		constant.StreamingTimeout = 300
+		t.Cleanup(func() { constant.StreamingTimeout = oldStreamingTimeout })
+
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/my-gemini-alias:streamGenerateContent", nil)
+
+		streamBody := "data: " + nativeBody + "\ndata: [DONE]\n"
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(streamBody))}
+		resp.Header = make(http.Header)
+		resp.Header.Set("Content-Type", "text/event-stream")
+
+		_, apiErr := GeminiTextGenerationStreamHandler(c, newInfo(), resp)
+		require.Nil(t, apiErr)
+		require.Equal(t, callerModel, gjson.Get(rec.Body.String(), "modelVersion").String(),
+			"stream chunks should report the caller model")
+		require.NotContains(t, rec.Body.String(), upstreamModel,
+			"no chunk should leak the mapped upstream model name")
+	})
+
+	t.Run("gemini-format exit of GeminiChatHandler", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		info := newInfo()
+		info.RelayFormat = types.RelayFormatGemini
+
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(nativeBody))}
+		_, apiErr := GeminiChatHandler(c, info, resp)
+		require.Nil(t, apiErr)
+		require.Equal(t, callerModel, gjson.Get(rec.Body.String(), "modelVersion").String(),
+			"gemini-format passthrough should report the caller model")
+	})
 }

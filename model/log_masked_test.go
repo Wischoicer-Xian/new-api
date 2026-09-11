@@ -33,7 +33,7 @@ func TestRecordConsumeLogMasksHiddenToken(t *testing.T) {
 	RecordConsumeLog(c, 496001, RecordConsumeLogParams{
 		ModelName: real,
 		TokenId:   496001,
-		Other:     map[string]interface{}{},
+		Other:     NewLogOther(),
 	})
 
 	var log Log
@@ -52,7 +52,7 @@ func TestRecordConsumeLogKeepsRealModelWhenNotHidden(t *testing.T) {
 	RecordConsumeLog(c, 496002, RecordConsumeLogParams{
 		ModelName: real,
 		TokenId:   496002,
-		Other:     map[string]interface{}{},
+		Other:     NewLogOther(),
 	})
 
 	var log Log
@@ -69,7 +69,7 @@ func TestRecordErrorLogMasksHiddenToken(t *testing.T) {
 	const real = "gemini-2.5-pro"
 	c := newMaskTestContext(true, "mask-test-error-hidden")
 
-	RecordErrorLog(c, 496003, 0, real, "tk", "boom", 0, 1, false, "g", map[string]interface{}{})
+	RecordErrorLog(c, 496003, 0, real, "tk", "boom", 0, 1, false, "g", NewLogOther())
 
 	var log Log
 	require.NoError(t, LOG_DB.First(&log, "request_id = ?", "mask-test-error-hidden").Error)
@@ -98,7 +98,7 @@ func TestRecordTaskBillingLogMasksHiddenToken(t *testing.T) {
 		LogType:   LogTypeRefund,
 		ModelName: real,
 		TokenId:   496010,
-		Other:     map[string]interface{}{},
+		Other:     NewLogOther(),
 	})
 
 	var log Log
@@ -123,7 +123,7 @@ func TestRecordTaskBillingLogKeepsRealModelWhenNotHidden(t *testing.T) {
 		LogType:   LogTypeRefund,
 		ModelName: real,
 		TokenId:   496020,
-		Other:     map[string]interface{}{},
+		Other:     NewLogOther(),
 	})
 
 	var log Log

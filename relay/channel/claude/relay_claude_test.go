@@ -1,14 +1,21 @@
 package claude
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func commonPointer[T any](value T) *T {
@@ -19,14 +26,14 @@ func TestResponseOpenAI2ClaudeToolUseInputIsObject(t *testing.T) {
 	tests := []struct {
 		name string
 		args string
-		want map[string]interface{}
+		want map[string]any
 	}{
-		{name: "object", args: `{"q":"x"}`, want: map[string]interface{}{"q": "x"}},
-		{name: "empty", args: "", want: map[string]interface{}{}},
-		{name: "invalid", args: "{", want: map[string]interface{}{}},
-		{name: "null", args: "null", want: map[string]interface{}{}},
-		{name: "array", args: `["x"]`, want: map[string]interface{}{}},
-		{name: "string", args: `"x"`, want: map[string]interface{}{}},
+		{name: "object", args: `{"q":"x"}`, want: map[string]any{"q": "x"}},
+		{name: "empty", args: "", want: map[string]any{}},
+		{name: "invalid", args: "{", want: map[string]any{}},
+		{name: "null", args: "null", want: map[string]any{}},
+		{name: "array", args: `["x"]`, want: map[string]any{}},
+		{name: "string", args: `"x"`, want: map[string]any{}},
 	}
 
 	for _, tt := range tests {
@@ -323,8 +330,28 @@ func TestBuildOpenAIStyleUsageFromClaudeUsageDefaultsAggregateCacheCreationTo5m(
 	require.Equal(t, 0, openAIUsage.ClaudeCacheCreation1hTokens)
 }
 
+func applyOpenAIChatReasoningThroughHandlerOrder(t *testing.T, original dto.GeneralOpenAIRequest) (*dto.GeneralOpenAIRequest, *relaycommon.RelayInfo) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	info := &relaycommon.RelayInfo{
+		OriginModelName: original.Model,
+		Request:         &original,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: original.Model,
+		},
+	}
+	outbound, err := common.DeepCopy(&original)
+	require.NoError(t, err)
+	require.NoError(t, helper.ModelMappedHelper(c, info, outbound))
+	err = helper.ApplyReasoningModelSuffix(nil, info, outbound)
+	require.NoError(t, err)
+	return outbound, info
+}
+
 func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48HighUsesAdaptiveThinking(t *testing.T) {
-	request := dto.GeneralOpenAIRequest{
+	original := dto.GeneralOpenAIRequest{
 		Model:       "claude-opus-4-8-high",
 		Temperature: commonPointer(0.7),
 		TopP:        commonPointer(0.9),
@@ -337,7 +364,8 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48HighUsesAdaptiveThinking(
 		},
 	}
 
-	claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, &relaycommon.RelayInfo{}, request)
+	outbound, info := applyOpenAIChatReasoningThroughHandlerOrder(t, original)
+	claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, info, *outbound)
 	require.NoError(t, err)
 	require.Equal(t, "claude-opus-4-8", claudeRequest.Model)
 	require.NotNil(t, claudeRequest.Thinking)
@@ -350,7 +378,7 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48HighUsesAdaptiveThinking(
 }
 
 func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighEffort(t *testing.T) {
-	request := dto.GeneralOpenAIRequest{
+	original := dto.GeneralOpenAIRequest{
 		Model:       "claude-opus-4-8-thinking",
 		Temperature: commonPointer(0.7),
 		TopP:        commonPointer(0.9),
@@ -363,7 +391,8 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighE
 		},
 	}
 
-	claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, &relaycommon.RelayInfo{}, request)
+	outbound, info := applyOpenAIChatReasoningThroughHandlerOrder(t, original)
+	claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, info, *outbound)
 	require.NoError(t, err)
 	require.Equal(t, "claude-opus-4-8", claudeRequest.Model)
 	require.NotNil(t, claudeRequest.Thinking)
@@ -373,4 +402,70 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighE
 	require.Nil(t, claudeRequest.Temperature)
 	require.Nil(t, claudeRequest.TopP)
 	require.Nil(t, claudeRequest.TopK)
+}
+
+// newNativeClaudeRelayTestContext builds a gin test context plus a RelayInfo
+// that mimics a native /v1/messages caller hitting a channel with model mapping.
+func newNativeClaudeRelayTestContext(t *testing.T) (*gin.Context, *httptest.ResponseRecorder, *relaycommon.RelayInfo) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	info := &relaycommon.RelayInfo{
+		RelayFormat:     types.RelayFormatClaude,
+		OriginModelName: "my-claude-alias",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "claude-sonnet-4-5-20250929",
+		},
+	}
+	return c, rec, info
+}
+
+// TestHandleStreamResponseData_NativeClaudeRewritesModelToCaller verifies that
+// native Claude stream events report the caller's model: message_start carries
+// the alias in message.model instead of the mapped upstream name, while other
+// events pass through without spurious model fields.
+func TestHandleStreamResponseData_NativeClaudeRewritesModelToCaller(t *testing.T) {
+	c, rec, info := newNativeClaudeRelayTestContext(t)
+	claudeInfo := &ClaudeResponseInfo{
+		ResponseId:   "msg_1",
+		Created:      1,
+		Model:        "claude-sonnet-4-5-20250929",
+		ResponseText: strings.Builder{},
+		Usage:        &dto.Usage{},
+	}
+
+	messageStart := `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}`
+	require.Nil(t, HandleStreamResponseData(c, info, claudeInfo, messageStart))
+	body := rec.Body.String()
+	require.Contains(t, body, "event: message_start")
+	require.Equal(t, "my-claude-alias", gjson.Get(body, "message.model").String(),
+		"message_start should report the caller model, not the mapped upstream model")
+
+	contentDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`
+	require.Nil(t, HandleStreamResponseData(c, info, claudeInfo, contentDelta))
+	require.NotContains(t, rec.Body.String(), "claude-sonnet-4-5-20250929",
+		"no event should leak the mapped upstream model name")
+}
+
+// TestHandleClaudeResponseData_NativeClaudeRewritesModelToCaller verifies the
+// non-stream native Claude response rewrites its top-level model field to the
+// caller's model.
+func TestHandleClaudeResponseData_NativeClaudeRewritesModelToCaller(t *testing.T) {
+	c, rec, info := newNativeClaudeRelayTestContext(t)
+	claudeInfo := &ClaudeResponseInfo{
+		ResponseId:   "msg_1",
+		Created:      1,
+		Model:        "claude-sonnet-4-5-20250929",
+		ResponseText: strings.Builder{},
+		Usage:        &dto.Usage{},
+	}
+
+	nonStreamBody := []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`)
+	httpResp := &http.Response{Header: make(http.Header)}
+
+	require.Nil(t, HandleClaudeResponseData(c, info, claudeInfo, httpResp, nonStreamBody))
+	require.Equal(t, "my-claude-alias", gjson.Get(rec.Body.String(), "model").String(),
+		"non-stream response should report the caller model, not the mapped upstream model")
 }
