@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestStreamResponseGeminiChat2OpenAIAttachesUsageMetadata(t *testing.T) {
@@ -638,4 +639,77 @@ func TestGeminiStreamHandlerEmptyUsageMetadataBuildsEstimatedBillingUsage(t *tes
 	require.Equal(t, usage.PromptTokens, usage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
 	require.Equal(t, usage.CompletionTokens, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount)
 	require.True(t, common.GetContextKeyBool(c, constant.ContextKeyLocalCountTokens))
+}
+
+// TestGeminiNativeHandlersRewriteModelVersionToCaller verifies that the native
+// Gemini text-generation exits (non-stream, stream, and the Gemini-format
+// branch of GeminiChatHandler) rewrite modelVersion to the caller's model so a
+// mapped channel never leaks the upstream model name.
+func TestGeminiNativeHandlersRewriteModelVersionToCaller(t *testing.T) {
+	callerModel := "my-gemini-alias"
+	upstreamModel := "gemini-2.5-flash"
+
+	newInfo := func() *relaycommon.RelayInfo {
+		return &relaycommon.RelayInfo{
+			OriginModelName: callerModel,
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: upstreamModel,
+			},
+		}
+	}
+
+	nativeBody := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6},"modelVersion":"` + upstreamModel + `"}`
+
+	t.Run("non-stream native handler", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/my-gemini-alias:generateContent", nil)
+
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(nativeBody))}
+		usage, apiErr := GeminiTextGenerationHandler(c, newInfo(), resp)
+		require.Nil(t, apiErr)
+		require.NotNil(t, usage)
+		require.Equal(t, callerModel, gjson.Get(rec.Body.String(), "modelVersion").String(),
+			"non-stream native response should report the caller model")
+	})
+
+	t.Run("stream native handler", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		oldStreamingTimeout := constant.StreamingTimeout
+		constant.StreamingTimeout = 300
+		t.Cleanup(func() { constant.StreamingTimeout = oldStreamingTimeout })
+
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/my-gemini-alias:streamGenerateContent", nil)
+
+		streamBody := "data: " + nativeBody + "\ndata: [DONE]\n"
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(streamBody))}
+		resp.Header = make(http.Header)
+		resp.Header.Set("Content-Type", "text/event-stream")
+
+		_, apiErr := GeminiTextGenerationStreamHandler(c, newInfo(), resp)
+		require.Nil(t, apiErr)
+		require.Equal(t, callerModel, gjson.Get(rec.Body.String(), "modelVersion").String(),
+			"stream chunks should report the caller model")
+		require.NotContains(t, rec.Body.String(), upstreamModel,
+			"no chunk should leak the mapped upstream model name")
+	})
+
+	t.Run("gemini-format exit of GeminiChatHandler", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		info := newInfo()
+		info.RelayFormat = types.RelayFormatGemini
+
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(nativeBody))}
+		_, apiErr := GeminiChatHandler(c, info, resp)
+		require.Nil(t, apiErr)
+		require.Equal(t, callerModel, gjson.Get(rec.Body.String(), "modelVersion").String(),
+			"gemini-format passthrough should report the caller model")
+	})
 }

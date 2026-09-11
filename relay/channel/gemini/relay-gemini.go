@@ -430,7 +430,9 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		}
 		responseBody = claudeRespStr
 	case types.RelayFormatGemini:
-		break
+		// Raw passthrough of the upstream Gemini body: rewrite modelVersion
+		// back to the caller's model for the same reason as above.
+		responseBody = relaycommon.RewriteCallerModelRaw(c, info, responseBody, "modelVersion")
 	}
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)

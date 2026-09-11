@@ -43,6 +43,10 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	// 计算使用量（优先上游 UsageMetadata，缺失时本地估算并保留 Gemini 计费语义）
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 
+	// Rewrite modelVersion back to the caller's model so the native Gemini
+	// client never sees the mapped upstream model name.
+	responseBody = relaycommon.RewriteCallerModelRaw(c, info, responseBody, "modelVersion")
+
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
 	return &usage, nil
@@ -83,6 +87,9 @@ func GeminiTextGenerationStreamHandler(c *gin.Context, info *relaycommon.RelayIn
 	helper.SetEventStreamHeaders(c)
 
 	return geminiStreamHandler(c, info, resp, func(data string, geminiResponse *dto.GeminiChatResponse) bool {
+		// Rewrite modelVersion back to the caller's model so the native Gemini
+		// client never sees the mapped upstream model name.
+		data = string(relaycommon.RewriteCallerModelRaw(c, info, common.StringToByteSlice(data), "modelVersion"))
 		err := helper.StringData(c, data)
 		if err != nil {
 			logger.LogError(c, "failed to write stream data: "+err.Error())

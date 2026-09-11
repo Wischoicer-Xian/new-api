@@ -124,6 +124,9 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			}
 		}
 		countClaudeStreamBillableTools(c, info, &claudeResponse)
+		// Rewrite message.model (message_start) back to the caller's model so the
+		// native Claude client never sees the mapped upstream model name.
+		data = string(relaycommon.RewriteCallerModelRaw(c, info, common.StringToByteSlice(data), "message.model"))
 		helper.ClaudeChunkData(c, claudeResponse, data)
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
 		state, err := claudeToChatStreamState(info)
@@ -375,6 +378,9 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		}
 	case types.RelayFormatClaude:
 		responseData = data
+		// Rewrite the top-level model back to the caller's model so the native
+		// Claude client never sees the mapped upstream model name.
+		responseData = relaycommon.RewriteCallerModelRaw(c, info, responseData, "model")
 	case types.RelayFormatGemini:
 		{
 			convertResult, convertErr := service.ConvertResponse(c, info, types.RelayFormatGemini, &claudeResponse)
