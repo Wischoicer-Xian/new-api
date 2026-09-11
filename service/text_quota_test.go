@@ -64,7 +64,9 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 			model.DB, model.LOG_DB = db, db
 			common.SetDatabaseTypes(dialect.name, dialect.name)
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLogDB; common.SetDatabaseTypes(oldMainType, oldLogType) })
-			require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.Log{}))
+			// RefundUserQuota -> CreditUserQuotaTx 会汇总 wischoicer_recharge_credits 的
+			// RESERVED 预留，结算差额退款路径因此依赖该表，fixture 必须一并迁移。
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.Log{}, &model.WischoicerRechargeCredit{}))
 			versionQuery := "select version()"
 			if dialect.name == common.DatabaseTypeSQLite {
 				versionQuery = "select sqlite_version()"
