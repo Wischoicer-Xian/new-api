@@ -202,7 +202,7 @@ func TestNoAvailableChannelMessageNamesClaimingTaskPlugin(t *testing.T) {
 	assert.Contains(t, generic, "gpt-4o")
 }
 
-func TestSharedEndpointRebindsToSelectedType61Plugin(t *testing.T) {
+func TestSharedEndpointRebindsToSelectedTaskPlugin(t *testing.T) {
 	registry := jsplugin.NewRegistry()
 	for _, key := range []string{"alpha", "beta"} {
 		source := strings.Replace(distributorEndpointPluginSource(key, 0), "channelTypes: [0],", "", 1)

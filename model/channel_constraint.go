@@ -10,6 +10,7 @@ import (
 var filterEvalOrder = []dto.ChannelFilterKind{
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginIdentity,
+	dto.FilterResponsesWebSocket,
 }
 
 // ChannelSatisfiesFilters reports whether ch passes every filter.
@@ -98,7 +99,7 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 		if IsSyncImagePath(filter.RequestPath) && excludeChannelForSyncImage(filter.RequestPath, ch.Type) {
 			return false
 		}
-		if ch.Type != constant.ChannelTypeAdvancedCustom {
+		if !constant.IsAdvancedCustomChannel(ch.Type) {
 			return true
 		}
 		config := ch.GetOtherSettings().AdvancedCustom
@@ -109,6 +110,8 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 			return filter.TaskPluginKey != "" && (key == filter.TaskPluginKey || slices.Contains(filter.TaskPluginKeys, key))
 		}
 		return filter.TaskPluginKey == "" || slices.Contains(filter.TaskPluginChannelTypes, ch.Type)
+	case dto.FilterResponsesWebSocket:
+		return (ch.Type == constant.ChannelTypeOpenAI || ch.Type == constant.ChannelTypeCodex) && ch.GetSetting().ResponsesWebSocketEnabled
 	default:
 		return true
 	}

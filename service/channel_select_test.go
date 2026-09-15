@@ -165,7 +165,7 @@ export function parseTaskResult() { return {status: "SUCCESS"}; }
 `, key, key, channelType, compatibleType)
 }
 
-func TestSharedType61IdentityFilterContainsAllCandidateKeys(t *testing.T) {
+func TestSharedTaskPluginIdentityFilterContainsAllCandidateKeys(t *testing.T) {
 	registry := jsplugin.NewRegistry()
 	for _, key := range []string{"alpha", "beta"} {
 		_, err := registry.Register(channelSelectEndpointPluginSource(key, 0), jsplugin.Options{})

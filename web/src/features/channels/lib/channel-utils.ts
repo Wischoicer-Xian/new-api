@@ -20,6 +20,9 @@ import { formatCurrencyFromUSD, formatQuotaWithCurrency } from '@/lib/currency'
 import { formatTimestampToDate } from '@/lib/format'
 
 import {
+  CHANNEL_TYPE_API_NEBULA,
+  CHANNEL_TYPE_SGLANG,
+  CHANNEL_TYPE_VLLM,
   CHANNEL_STATUS_CONFIG,
   CHANNEL_TYPES,
   MULTI_KEY_STATUS_CONFIG,
@@ -54,7 +57,9 @@ export function getChannelTypeIcon(type: number): string {
     58: 'NewAPI', // Advanced Custom
     59: 'Sub2API', // Sub2API
     60: 'NewAPI', // New API
-    61: 'NewAPI', // ApiNebula
+    [CHANNEL_TYPE_API_NEBULA]: 'NewAPI', // ApiNebula
+    [CHANNEL_TYPE_VLLM]: 'Vllm', // vLLM
+    [CHANNEL_TYPE_SGLANG]: 'SGLang', // SGLang
     3: 'Azure', // Azure
 
     // Anthropic

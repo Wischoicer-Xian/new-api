@@ -46,7 +46,7 @@ const plugin: MarketplacePlugin = {
   ],
   models: ['latest-model'],
   protocols: ['openai_video'],
-  channelTypes: [61],
+  channelTypes: [62],
 }
 
 test('reads the selected Incho models, protocols and both native routes without requiring runtime hooks', () => {
@@ -84,7 +84,7 @@ test('supports comments, trailing commas, quoted keys and JavaScript string esca
     parsePluginMetaPreview(String.raw`export const /* declaration */ meta /* name */ = /* value */ {
     "models": [/* model */ '\x69ncho_\u006dusic', 'line\nquote\'slash\\',],
     baseUrl: "https://example.com/\u{1F3B5}",
-    auth: {type: 'api_key'}, channelTypes: [+61, 0x18],
+    auth: {type: 'api_key'}, channelTypes: [+62, 0x18],
   };`)
   expect(preview.status).toBe('parsed')
   expect(preview.fields.models).toEqual({
@@ -105,7 +105,7 @@ test('supports comments, trailing commas, quoted keys and JavaScript string esca
   expect(preview.fields.channelTypes).toEqual({
     state: 'value',
     origin: 'source',
-    value: [61, 24],
+    value: [62, 24],
   })
 })
 
