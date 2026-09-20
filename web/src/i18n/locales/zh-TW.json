@@ -6562,6 +6562,14 @@
     "Processing": "處理中",
     "History": "充值記錄",
     "Payment time": "付款時間",
-    "Valid until": "有效期限"
+    "Valid until": "有效期限",
+    "Channel error": "通道錯誤",
+    "Unrecognized status code": "無法識別的狀態碼",
+    "Correct the invalid settings before saving.": "請修正無效設定後再儲存。",
+    "Upstream connection": "上游連線",
+    "Local check": "本地檢查",
+    "Responses WebSocket": "Responses WebSocket",
+    "Cross-group retry": "跨分組重試",
+    "Request policy decisions": "請求策略決策"
   }
 }

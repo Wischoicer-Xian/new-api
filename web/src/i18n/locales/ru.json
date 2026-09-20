@@ -6562,6 +6562,14 @@
     "Processing": "Processing",
     "History": "History",
     "Payment time": "Payment time",
-    "Valid until": "Valid until"
+    "Valid until": "Valid until",
+    "Channel error": "Ошибка канала",
+    "Unrecognized status code": "Нераспознанный код состояния",
+    "Correct the invalid settings before saving.": "Исправьте некорректные настройки перед сохранением.",
+    "Upstream connection": "Соединение с вышестоящим сервером",
+    "Local check": "Локальная проверка",
+    "Responses WebSocket": "Responses WebSocket",
+    "Cross-group retry": "Повтор между группами",
+    "Request policy decisions": "Решения политики запросов"
   }
 }

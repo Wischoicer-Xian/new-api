@@ -6562,6 +6562,14 @@
     "Processing": "Processing",
     "History": "History",
     "Payment time": "Payment time",
-    "Valid until": "Valid until"
+    "Valid until": "Valid until",
+    "Channel error": "チャネルエラー",
+    "Unrecognized status code": "認識できないステータスコード",
+    "Correct the invalid settings before saving.": "無効な設定を修正してから保存してください。",
+    "Upstream connection": "上流接続",
+    "Local check": "ローカルチェック",
+    "Responses WebSocket": "Responses WebSocket",
+    "Cross-group retry": "グループ横断リトライ",
+    "Request policy decisions": "リクエストポリシーの判断"
   }
 }

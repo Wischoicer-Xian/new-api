@@ -6562,6 +6562,14 @@
     "Processing": "Processing",
     "History": "History",
     "Payment time": "Payment time",
-    "Valid until": "Valid until"
+    "Valid until": "Valid until",
+    "Channel error": "Lỗi kênh",
+    "Unrecognized status code": "Mã trạng thái không xác định",
+    "Correct the invalid settings before saving.": "Hãy sửa các cài đặt không hợp lệ trước khi lưu.",
+    "Upstream connection": "Kết nối thượng nguồn",
+    "Local check": "Kiểm tra cục bộ",
+    "Responses WebSocket": "Responses WebSocket",
+    "Cross-group retry": "Thử lại liên nhóm",
+    "Request policy decisions": "Quyết định chính sách yêu cầu"
   }
 }

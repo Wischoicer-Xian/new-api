@@ -36,6 +36,7 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	info.ObserveResponseModel(responsesResponse.Model)
 	responseBody = rewriteSGLangResponsesCreatedAt(info, responseBody, "created_at", responsesResponse.CreatedAt)
 
 	// 写入新的 response body
@@ -89,16 +90,6 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	callerModel := relaycommon.GetCallerModelName(c, info)
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-
-		// Patch response.model in raw SSE data before sending
-		if callerModel != "" {
-			patched, changed, err := relaycommon.PatchResponsesEventModelRaw(common.StringToByteSlice(data), callerModel)
-			if err == nil && changed {
-				relaycommon.MarkResponseBodyRewritten(c)
-				data = string(patched)
-			}
-		}
-
 		// 检查当前数据是否包含 completed 状态和 usage 信息
 		var streamResponse dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
@@ -109,10 +100,24 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		if streamResponse.Response != nil {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
-		sendResponsesStreamData(c, streamResponse, data)
+		// Observe the provider declaration before rewriting the response for the
+		// caller. The rewrite is a fork-side compatibility guarantee, while the
+		// original value is needed for response-model diagnostics.
 		accumulator.Observe(&streamResponse)
+
+		// Patch response.model in raw SSE data before sending
+		if callerModel != "" {
+			patched, changed, err := relaycommon.PatchResponsesEventModelRaw(common.StringToByteSlice(data), callerModel)
+			if err == nil && changed {
+				relaycommon.MarkResponseBodyRewritten(c)
+				data = string(patched)
+			}
+		}
+		sendResponsesStreamData(c, streamResponse, data)
 	})
 
+	common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, info.StreamStatus)
+	info.StreamStatus.RequireTerminal()
 	return accumulator.Finish(), nil
 }
 
