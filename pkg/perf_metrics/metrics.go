@@ -1,6 +1,7 @@
 package perfmetrics
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -95,6 +96,41 @@ func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens i
 		OutputTokens: outputTokens,
 		GenerationMs: generationMs,
 	})
+}
+
+// RecordTaskResult samples one async task exactly once, at its terminal
+// transition, after the polling status CAS is won. Latency is the end-to-end
+// task duration (second resolution, unlike the ms-resolution relay samples);
+// throughput is only present when the provider reports tokens.
+func RecordTaskResult(task *model.Task, result *relaycommon.TaskInfo) {
+	if task == nil {
+		return
+	}
+	// Task properties are populated from RelayInfo.MaskedModelName at submit
+	// time. Keep using that user-facing snapshot here; BillingContext contains
+	// the unmasked billing identity and must not become a metrics label.
+	modelName := task.Properties.OriginModelName
+	endTs := task.FinishTime
+	if endTs <= 0 {
+		endTs = time.Now().Unix()
+	}
+	sample := Sample{
+		Model:   modelName,
+		Group:   task.Group,
+		Success: task.Status == model.TaskStatusSuccess,
+	}
+	if task.SubmitTime > 0 && endTs > task.SubmitTime {
+		sample.LatencyMs = (endTs - task.SubmitTime) * 1000
+	}
+	if sample.Success && result != nil {
+		tokens := int64(cmp.Or(result.TotalTokens, result.CompletionTokens))
+		genStart := cmp.Or(task.StartTime, task.SubmitTime)
+		if tokens > 0 && genStart > 0 && endTs > genStart {
+			sample.OutputTokens = tokens
+			sample.GenerationMs = (endTs - genStart) * 1000
+		}
+	}
+	Record(sample)
 }
 
 func Record(sample Sample) {
