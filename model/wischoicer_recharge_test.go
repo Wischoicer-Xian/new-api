@@ -614,15 +614,16 @@ func TestDeleteUserBlockedWhenReservationExists(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = DeleteUserById(50040)
+	_, err = DeleteUserById(50040)
 	assert.Error(t, err)
 
-	err = HardDeleteUserById(50040)
+	_, err = HardDeleteUserById(50040)
 	assert.Error(t, err)
 
 	// release 后可软删除。
 	require.NoError(t, ReleaseExternalRecharge(nil, "ORDER_DEL_040", "closed"))
-	require.NoError(t, DeleteUserById(50040))
+	_, err = DeleteUserById(50040)
+	require.NoError(t, err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,13 +1195,15 @@ func TestDeleteUserById_NoDeleteWhenReservationBlocks(t *testing.T) {
 	require.NoError(t, err)
 
 	// 软删除被拦，deleted_at 保持 NULL。
-	require.Error(t, DeleteUserById(50090))
+	_, err = DeleteUserById(50090)
+	require.Error(t, err)
 	var user User
 	require.NoError(t, DB.Unscoped().Where("id = ?", 50090).First(&user).Error)
 	assert.False(t, user.DeletedAt.Valid)
 
 	// 硬删除同样被拦，行仍在。
-	require.Error(t, HardDeleteUserById(50090))
+	_, err = HardDeleteUserById(50090)
+	require.Error(t, err)
 	var count int64
 	DB.Unscoped().Model(&User{}).Where("id = ?", 50090).Count(&count)
 	assert.Equal(t, int64(1), count)
@@ -1225,7 +1228,7 @@ func TestDeleteVsReserve_NoLostReservation(t *testing.T) {
 	for i := 0; i < deleters; i++ {
 		go func() {
 			defer wg.Done()
-			_ = DeleteUserById(50091)
+			_, _ = DeleteUserById(50091)
 		}()
 	}
 	for i := 0; i < reservers; i++ {
