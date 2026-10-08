@@ -64,13 +64,11 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			info.CountBillableToolCall(dto.BuildInCallFunctionCall, output.Name)
 		}
 	}
+	info.ApplyVendorToolUsage(responseBody)
 
 	imageCounter := &relaycommon.ImageGenerationCallCounter{}
-	if !relaycommon.IsNonBillableResponsesStatus(responsesResponse.Status) {
-		for i := range responsesResponse.Output {
-			idx := i
-			imageCounter.Observe(&responsesResponse.Output[i], &idx)
-		}
+	for i := range responsesResponse.Output {
+		imageCounter.Observe(&responsesResponse.Output[i], &i)
 	}
 	imageCounter.Commit(info)
 
@@ -100,10 +98,10 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		if streamResponse.Response != nil {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
-		// Observe the provider declaration before rewriting the response for the
-		// caller. The rewrite is a fork-side compatibility guarantee, while the
-		// original value is needed for response-model diagnostics.
-		accumulator.Observe(&streamResponse)
+		// Observe the provider declaration and raw event before rewriting the
+		// response for the caller. Usage billing needs the provider payload, while
+		// the fork compatibility contract rewrites only the client-facing copy.
+		accumulator.Observe(&streamResponse, common.StringToByteSlice(data))
 
 		// Patch response.model in raw SSE data before sending
 		if callerModel != "" {
