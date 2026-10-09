@@ -98,7 +98,7 @@ func GeminiTextGenerationStreamHandler(c *gin.Context, info *relaycommon.RelayIn
 		data = string(relaycommon.RewriteCallerModelRaw(c, info, common.StringToByteSlice(data), "modelVersion"))
 		err := helper.StringData(c, data)
 		if err != nil {
-			logger.LogError(c, "failed to write stream data: "+err.Error())
+			logger.LogError(c, common.LogText("failed to write stream data: %s", err.Error()))
 			return false
 		}
 		info.SendResponseCount++
