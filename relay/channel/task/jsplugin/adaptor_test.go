@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -83,9 +84,10 @@ func TestTaskAdaptorRejectsDeprecatedClientResponse(t *testing.T) {
 }
 
 func TestTaskAdaptorBuildsMultipartFromOpaqueFileReference(t *testing.T) {
+	// The plugin forwards the client's Content-Type, whose boundary is not the one of the rebuilt body.
 	source := `
 export const meta = {apiVersion:1,key:"multipart",name:"Multipart",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
-export function buildSubmitRequest(ctx) { return {url:ctx.baseUrl+"/submit",bodyType:"multipart",parts:[{name:"model",value:"m"},{name:"input_reference",fileRef:ctx.files[0].ref}]}; }
+export function buildSubmitRequest(ctx) { return {url:ctx.baseUrl+"/submit",headers:{"Content-Type":ctx.requestHeaders["Content-Type"]},bodyType:"multipart",parts:[{name:"model",value:"m"},{name:"input_reference",fileRef:ctx.files[0].ref}]}; }
 export function parseSubmitResponse(ctx,r){return {taskId:"1"}} export function buildQueryRequest(){return {url:"https://example.com"}} export function parseTaskResult(){return {status:"SUCCESS"}}
 `
 	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
@@ -108,7 +110,13 @@ export function parseSubmitResponse(ctx,r){return {taskId:"1"}} export function 
 	require.NoError(t, err)
 	requestBytes, err := io.ReadAll(body)
 	require.NoError(t, err)
-	reader := multipart.NewReader(bytes.NewReader(requestBytes), strings.TrimPrefix(c.GetHeader("Content-Type"), "multipart/form-data; boundary="))
+	upstreamRequest := httptest.NewRequest(http.MethodPost, "https://provider.example/submit", bytes.NewReader(requestBytes))
+	require.NoError(t, adaptor.BuildRequestHeader(c, upstreamRequest, info))
+	mediaType, params, err := mime.ParseMediaType(upstreamRequest.Header.Get("Content-Type"))
+	require.NoError(t, err)
+	assert.Equal(t, "multipart/form-data", mediaType)
+	require.NotEmpty(t, params["boundary"])
+	reader := multipart.NewReader(bytes.NewReader(requestBytes), params["boundary"])
 	form, err := reader.ReadForm(1024)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"m"}, form.Value["model"])
@@ -402,6 +410,69 @@ export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"}} expo
 	require.NotNil(t, taskErr)
 	assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
 	assert.Contains(t, taskErr.Message, "must not return renderer")
+}
+
+const orderedProtocolPlugin = `
+export const meta = {apiVersion:1,key:"ordered",name:"Ordered",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task",requiredCapabilities:["json-order@1"],protocols:[{name:"openai_responses",supports:["sync"]}]};
+export const protocols = {openai_responses:{decodeRequest:function(ctx){const b = ctx.body.value; return {kind:"submit",model:ctx.model,requestBody:{model:b.model,state:b.state,questions:b.questions}};},renderFinal:function(){return {};}}};
+export function buildSubmitRequest(ctx){const b = ctx.requestBody; return {url:ctx.baseUrl+"/submit",body:{model:b.model,state:b.state,questions:b.questions}}}
+export function parseSubmitResponse(){return {taskId:"one"}} export function buildQueryRequest(){return {}} export function parseTaskResult(){return {status:"SUCCESS"}}
+`
+
+// A plugin declaring json-order@1 forwards the members in the order the client
+// sent them, through the final decode, the request body hooks receive and the
+// upstream body, while billing bounds still read the decoded value; other
+// plugins keep the host codec's sorted encoding.
+func TestTaskAdaptorJSONOrderCapability(t *testing.T) {
+	client := `{"model":"m","state":{"zeta":"1","alpha":"2","mid":"&<>"},"questions":{"q2":{"type":"noul"},"q1":{"type":"noul"}}}`
+	undeclared := strings.Replace(orderedProtocolPlugin, `requiredCapabilities:["json-order@1"],`, "", 1)
+	cases := []struct {
+		name   string
+		source string
+		client string
+		want   string
+		status int
+	}{
+		{name: "declared keeps the client's order", source: orderedProtocolPlugin, client: client,
+			want: `{"model":"m","state":{"zeta":"1","alpha":"2","mid":"&<>"},"questions":{"q2":{"type":"noul"},"q1":{"type":"noul"}}}`},
+		{name: "undeclared stays sorted", source: undeclared, client: client,
+			want: `{"model":"m","questions":{"q1":{"type":"noul"},"q2":{"type":"noul"}},"state":{"alpha":"2","mid":"\u0026\u003c\u003e","zeta":"1"}}`},
+		{name: "declared still bounds billing quantities", source: orderedProtocolPlugin,
+			client: `{"model":"m","state":{"duration":3601},"questions":{}}`, status: http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plugin, err := pluginruntime.NewRegistry().Register(tc.source, pluginruntime.Options{})
+			require.NoError(t, err)
+			var value any
+			require.NoError(t, common.Unmarshal([]byte(tc.client), &value))
+			protocolContext := pluginruntime.ProtocolRequestContext{
+				RouteRequestContext: pluginruntime.RouteRequestContext{Body: map[string]any{"kind": "json", "value": value}, BodyText: json.RawMessage(tc.client)},
+				Protocol:            "openai_responses", Model: "m",
+			}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Set(pluginruntime.ContextKeyPinnedEndpoint, pluginruntime.PinnedEndpoint{Plugin: plugin, Protocol: "openai_responses", Model: "m"})
+			c.Set(pluginruntime.ContextKeyProtocolRequest, protocolContext)
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}, OriginModelName: "m"}
+			adaptor := New(plugin)
+			adaptor.Init(info)
+
+			taskErr := adaptor.ValidateRequestAndSetAction(c, info)
+			if tc.status != 0 {
+				require.NotNil(t, taskErr)
+				assert.Equal(t, tc.status, taskErr.StatusCode)
+				assert.Equal(t, "plugin_usage_invalid", taskErr.Code)
+				return
+			}
+			require.Nil(t, taskErr)
+			body, err := adaptor.BuildRequestBody(c, info)
+			require.NoError(t, err)
+			raw, err := io.ReadAll(body)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(raw))
+		})
+	}
 }
 
 func TestTaskAdaptorBuildContentRequestHookAndMissingFallback(t *testing.T) {
@@ -1160,6 +1231,26 @@ func TestSubmitContextOriginTasksNilDataOnInvalidJSON(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, originTasks, 1)
 	assert.Nil(t, originTasks[0]["data"])
+}
+
+func TestSubmitContextNormalizesRequestBodyOnEveryCall(t *testing.T) {
+	plugin, err := pluginruntime.NewRegistry().Register(mockPlugin, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	adaptor.Init(info)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+	c.Set("task_request", map[string]any{"prompt": string([]byte{0xff}), "count": int64(math.MaxInt64)})
+
+	normalized := map[string]any{"prompt": "�", "count": float64(math.MaxInt64)}
+	assert.Equal(t, normalized, adaptor.submitContext(c, info)["requestBody"])
+	assert.Equal(t, normalized, adaptor.submitContext(c, info)["requestBody"])
+	assert.Equal(t, normalized, adaptor.submitContext(nil, info)["requestBody"])
+
+	replaced := map[string]any{"prompt": "second", "count": int64(2)}
+	c.Set("task_request", replaced)
+	assert.Equal(t, replaced, adaptor.submitContext(c, info)["requestBody"])
 }
 
 func TestTaskAdaptorRejectsRequestHostOverride(t *testing.T) {
