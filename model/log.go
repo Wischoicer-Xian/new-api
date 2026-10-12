@@ -200,21 +200,23 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 	return logs, err
 }
 
-func RecordLog(userId int, logType int, content string) {
+func RecordLog(userId int, logType int, content *common.Message) {
 	if logType == LogTypeConsume && !common.LogConsumeEnabled {
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
+	other := NewLogOther()
 	log := &Log{
 		UserId:    userId,
 		Username:  username,
 		CreatedAt: common.GetTimestamp(),
 		Type:      logType,
-		Content:   content,
+		Content:   other.setContent([]*common.Message{content}),
+		Other:     other.JSONString(),
 	}
 	err := createLog(log)
 	if err != nil {
-		common.SysLog("failed to record log: " + err.Error())
+		common.SysLog(common.LogText("failed to record log: %s", err.Error()))
 	}
 }
 
@@ -302,7 +304,7 @@ func RecordOperationAuditLog(logUserId, actorRole int, content string, ip string
 	RecordAuditLog(c, AuditLog{UserId: logUserId, Username: username, ActorRole: actorRole, Category: category, Action: action, Content: content, Ip: ip, Status: status, Success: success, Other: other})
 }
 
-func RecordTopupLog(userId int, content string, callerIp string, paymentMethod string, callbackPaymentMethod string) {
+func RecordTopupLog(userId int, content *common.Message, callerIp string, paymentMethod string, callbackPaymentMethod string) {
 	username, _ := GetUsernameById(userId, false)
 	other := NewLogOther()
 	other.MergeAdmin(map[string]any{
@@ -318,7 +320,7 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 		Username:  username,
 		CreatedAt: common.GetTimestamp(),
 		Type:      LogTypeTopup,
-		Content:   content,
+		Content:   other.setContent([]*common.Message{content}),
 		Ip:        callerIp,
 		Other:     other.JSONString(),
 	}
@@ -385,18 +387,18 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 }
 
 type RecordConsumeLogParams struct {
-	ChannelId        int       `json:"channel_id"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	ModelName        string    `json:"model_name"`
-	TokenName        string    `json:"token_name"`
-	Quota            int       `json:"quota"`
-	Content          string    `json:"content"`
-	TokenId          int       `json:"token_id"`
-	UseTimeSeconds   int       `json:"use_time_seconds"`
-	IsStream         bool      `json:"is_stream"`
-	Group            string    `json:"group"`
-	Other            *LogOther `json:"other"`
+	ChannelId        int               `json:"channel_id"`
+	PromptTokens     int               `json:"prompt_tokens"`
+	CompletionTokens int               `json:"completion_tokens"`
+	ModelName        string            `json:"model_name"`
+	TokenName        string            `json:"token_name"`
+	Quota            int               `json:"quota"`
+	Content          []*common.Message `json:"content"`
+	TokenId          int               `json:"token_id"`
+	UseTimeSeconds   int               `json:"use_time_seconds"`
+	IsStream         bool              `json:"is_stream"`
+	Group            string            `json:"group"`
+	Other            *LogOther         `json:"other"`
 	// BillingStage 业务计费阶段（WIS-499）：request=同步 chat/image 消费，
 	// submit=异步视频首次提交。非空时 RecordConsumeLog 会从请求 header 解析归因
 	// 注入 other.wischoicer（若 other 未预置），并写入 billing_stage。
@@ -425,6 +427,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	other := injectWischoicerConsumeOther(params.Other, c, params.BillingStage)
+	content := other.setContent(params.Content)
 	otherStr := other.JSONString()
 	// 判断是否需要记录 IP
 	needRecordIp := false
@@ -438,7 +441,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		Username:         username,
 		CreatedAt:        createdAt,
 		Type:             LogTypeConsume,
-		Content:          params.Content,
+		Content:          content,
 		PromptTokens:     params.PromptTokens,
 		CompletionTokens: params.CompletionTokens,
 		TokenName:        params.TokenName,
@@ -482,7 +485,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 type RecordTaskBillingLogParams struct {
 	UserId            int
 	LogType           int
-	Content           string
+	Content           []*common.Message
 	ChannelId         int
 	ModelName         string
 	Quota             int
@@ -525,12 +528,13 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 	createdAt := common.GetTimestamp()
 	other := stampWischoicerBillingStage(params.Other, params.BillingStage)
+	content := other.setContent(params.Content)
 	log := &Log{
 		UserId:            params.UserId,
 		Username:          username,
 		CreatedAt:         createdAt,
 		Type:              params.LogType,
-		Content:           params.Content,
+		Content:           content,
 		TokenName:         tokenName,
 		ModelName:         params.ModelName,
 		Quota:             params.Quota,

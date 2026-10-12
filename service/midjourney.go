@@ -122,7 +122,7 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:       task.UserId,
 		LogType:      model.LogTypeRefund,
-		Content:      "",
+		Content:      nil,
 		ChannelId:    billingChannelId,
 		ModelName:    CovertMjpActionToModelName(task.Action),
 		Quota:        quota,

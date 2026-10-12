@@ -121,7 +121,7 @@ func GenerateAccessToken(c *gin.Context) {
 		return
 	}
 	if existing != 0 {
-		common.ApiErrorI18n(c, i18n.MsgUuidDuplicate)
+		common.ApiErrorT(c, "Access token already exists")
 		return
 	}
 	if err := model.UpdateLegacyAccessToken(id, key); err != nil {

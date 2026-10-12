@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -521,7 +522,7 @@ func AdminCreateToken(c *gin.Context) {
 		req.Name = "系统令牌"
 	}
 	if len(req.Name) > 50 {
-		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
+		common.ApiErrorT(c, "Token name is too long")
 		return
 	}
 	// Verify target user exists
@@ -555,7 +556,7 @@ func AdminCreateToken(c *gin.Context) {
 	}
 	key, err := common.GenerateKey()
 	if err != nil {
-		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
+		common.ApiErrorT(c, "Failed to generate token")
 		common.SysLog("failed to generate token key: " + err.Error())
 		return
 	}
@@ -627,7 +628,7 @@ func AdminUpdateToken(c *gin.Context) {
 	// Apply non-nil fields
 	if req.Name != nil {
 		if len(*req.Name) > 50 {
-			common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
+			common.ApiErrorT(c, "Token name is too long")
 			return
 		}
 		token.Name = *req.Name
@@ -640,7 +641,7 @@ func AdminUpdateToken(c *gin.Context) {
 	}
 	if req.RemainQuota != nil {
 		if *req.RemainQuota < 0 {
-			common.ApiErrorI18n(c, i18n.MsgTokenQuotaNegative)
+			common.ApiErrorT(c, "Quota value cannot be negative")
 			return
 		}
 		token.RemainQuota = *req.RemainQuota

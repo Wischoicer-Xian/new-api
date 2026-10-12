@@ -100,7 +100,7 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		ModelName:    info.OriginModelName,
 		TokenName:    tokenName,
 		Quota:        info.PriceData.Quota,
-		Content:      logContent,
+		Content:      []*common.Message{common.NewMessage(logContent)},
 		TokenId:      info.TokenId,
 		Group:        info.UsingGroup,
 		Other:        other,
@@ -334,7 +334,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:       task.UserId,
 		LogType:      model.LogTypeRefund,
-		Content:      "",
+		Content:      nil,
 		ChannelId:    task.ChannelId,
 		ModelName:    taskModelName(task),
 		Quota:        quota,
@@ -357,7 +357,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 // actualQuota 是任务完成后的实际应扣额度，与预扣额度 (task.Quota) 做差额结算。
 // reason 用于日志记录（例如 "token重算" 或 "adaptor调整"）。
 // clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
-func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason string, clamps ...*common.QuotaClamp) {
+func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason *common.Message, clamps ...*common.QuotaClamp) {
 	if actualQuota < 0 {
 		return
 	}
@@ -366,7 +366,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 
 	if quotaDelta == 0 {
 		logger.LogInfo(ctx, fmt.Sprintf("任务 %s 预扣费准确（%s，%s）",
-			task.TaskID, logger.LogQuota(actualQuota), reason))
+			task.TaskID, logger.LogQuota(actualQuota), reason.Error()))
 		return
 	}
 
@@ -375,7 +375,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		logger.LogQuota(quotaDelta),
 		logger.LogQuota(actualQuota),
 		logger.LogQuota(preConsumedQuota),
-		reason,
+		reason.Error(),
 	))
 
 	// 调整资金来源
@@ -418,7 +418,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:       task.UserId,
 		LogType:      logType,
-		Content:      reason,
+		Content:      []*common.Message{reason},
 		ChannelId:    task.ChannelId,
 		ModelName:    taskModelName(task),
 		Quota:        logQuota,
@@ -478,7 +478,7 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 	// 计算实际应扣费额度: totalTokens * modelRatio * groupRatio * otherMultiplier（饱和转换，防止溢出成负数）
 	actualQuota, clamp := common.QuotaFromFloatChecked(float64(totalTokens) * modelRatio * finalGroupRatio * otherMultiplier)
 
-	reason := fmt.Sprintf("token重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f, otherMultiplier=%.4f", totalTokens, modelRatio, finalGroupRatio, otherMultiplier)
+	reason := common.NewMessage(fmt.Sprintf("token重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f, otherMultiplier=%.4f", totalTokens, modelRatio, finalGroupRatio, otherMultiplier))
 	RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
 	return true
 }

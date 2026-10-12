@@ -161,7 +161,7 @@ func recordImageTaskReserveConsumption(outcome model.ImageTaskReserveOutcome, pr
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:       task.UserId,
 		LogType:      model.LogTypeConsume,
-		Content:      "异步图片任务预扣费",
+		Content:      []*common.Message{common.NewMessage("异步图片任务预扣费")},
 		ChannelId:    task.ChannelId,
 		ModelName:    price.OriginModel(),
 		Quota:        outcome.AppliedReserveQuota,

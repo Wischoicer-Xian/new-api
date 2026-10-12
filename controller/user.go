@@ -425,7 +425,7 @@ func AdminGenerateAccessToken(c *gin.Context) {
 	}
 	key, err := generateAndSetAccessToken(user)
 	if err != nil {
-		common.ApiErrorI18n(c, i18n.MsgGenerateFailed)
+		common.ApiErrorT(c, "Failed to generate access token")
 		common.SysLog(fmt.Sprintf("failed to generate admin key for user %d: %s", userId, err.Error()))
 		return
 	}
