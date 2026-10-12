@@ -250,6 +250,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/log/search":                       accessTokenScopeRule("log:read"),
 	"GET /api/log/self":                         accessTokenScopeRule("usage:read"),
 	"GET /api/log/self/search":                  accessTokenScopeRule("usage:read"),
+	"GET /api/log/export":                       accessTokenScopeRule("log:read"),
+	"GET /api/log/self/export":                  accessTokenScopeRule("usage:read"),
 	"GET /api/log/self/feature-usage/summary":   accessTokenScopeRule("usage:read"),
 	"GET /api/log/self/feature-usage/tasks":     accessTokenScopeRule("usage:read"),
 	"GET /api/log/self/feature-usage/details":   accessTokenScopeRule("usage:read"),
