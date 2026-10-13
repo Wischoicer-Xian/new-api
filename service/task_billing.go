@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"maps"
+	"math"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -47,6 +52,9 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 	other := model.NewLogOther()
 	other.SetPublic("is_task", true)
 	other.SetPublic("request_path", c.Request.URL.Path)
+	if taskDeliveredInline(c, task) {
+		other.SetPublic("task_sync", true)
+	}
 	other.SetPublic("model_price", info.PriceData.ModelPrice)
 	if info.PriceData.ModelRatio > 0 {
 		other.SetPublic("model_ratio", info.PriceData.ModelRatio)
@@ -81,6 +89,9 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		if len(snap.UsageFacts) > 0 {
 			other.SetPublic("usage_facts", snap.UsageFacts)
 		}
+		setTaskImageCount(other, snap.UsageFacts["image_count"])
+	} else {
+		setTaskImageCount(other, info.PriceData.OtherRatios()["image_count"])
 	}
 	appendTaskLogInfo(task, other)
 	attachQuotaSaturation(c, info, other)
@@ -89,7 +100,7 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		ModelName:    info.OriginModelName,
 		TokenName:    tokenName,
 		Quota:        info.PriceData.Quota,
-		Content:      logContent,
+		Content:      []*common.Message{common.NewMessage(logContent)},
 		TokenId:      info.TokenId,
 		Group:        info.UsingGroup,
 		Other:        other,
@@ -168,6 +179,8 @@ func taskAdjustTokenQuota(ctx context.Context, task *model.Task, delta int) {
 // taskBillingOther 从 task 的 BillingContext 构建日志 Other 字段。
 func taskBillingOther(task *model.Task) *model.LogOther {
 	other := model.NewLogOther()
+	// 前端列表按 is_task 选择任务档位渲染分支,缺失会把差额/退款日志误判成普通 relay 动态计费
+	other.SetPublic("is_task", true)
 	if bc := task.PrivateData.BillingContext; bc != nil {
 		other.SetPublic("model_price", bc.ModelPrice)
 		if bc.ModelRatio > 0 {
@@ -188,6 +201,9 @@ func taskBillingOther(task *model.Task) *model.LogOther {
 			if len(snap.UsageFacts) > 0 {
 				other.SetPublic("usage_facts", snap.UsageFacts)
 			}
+			setTaskImageCount(other, snap.UsageFacts["image_count"])
+		} else if priceData := taskBillingContextPriceData(bc); priceData != nil {
+			setTaskImageCount(other, priceData.OtherRatios()["image_count"])
 		}
 	}
 	props := task.Properties
@@ -217,12 +233,46 @@ func taskBillingOther(task *model.Task) *model.LogOther {
 	return other
 }
 
+// setTaskImageCount publishes the billed image quantity of an image task as
+// other.image_count, the same field the HTTP image relay writes, so the log
+// detail shows one "billable image count" regardless of the serving path. The
+// value is a host-validated count fact (at most dto.MaxImageN), never a quota.
+func setTaskImageCount(other *model.LogOther, value any) {
+	count, ok := value.(float64)
+	if !ok || count < 0 || count > float64(dto.MaxImageN) {
+		return
+	}
+	other.SetPublic("image_count", common.QuotaRound(count))
+}
+
+// taskDeliveredInline reports whether the submitting HTTP request itself
+// returns the task deliverable: the upstream completed immediately, or the
+// request came through the synchronous OpenAI Images protocol, where the host
+// waits for an asynchronous upstream task before answering. The usage log
+// presents such requests as synchronous instead of as asynchronous jobs.
+func taskDeliveredInline(c *gin.Context, task *model.Task) bool {
+	if task != nil && (task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure) {
+		return true
+	}
+	pinnedValue, exists := c.Get(jsplugin.ContextKeyPinnedEndpoint)
+	if !exists {
+		return false
+	}
+	pinned, ok := pinnedValue.(jsplugin.PinnedEndpoint)
+	return ok && pinned.Protocol == jsplugin.ProtocolOpenAIImage
+}
+
 func appendTaskLogInfo(task *model.Task, other *model.LogOther) {
 	if task == nil || other == nil {
 		return
 	}
 	if task.TaskID != "" {
 		other.SetPublic("task_id", task.TaskID)
+	}
+	if task.PrivateData.ResultDiscarded {
+		// The result was delivered inline and the upstream snapshot was not
+		// persisted, so no artifact can be retrieved for this task.
+		other.SetPublic("result_discarded", true)
 	}
 	if task.PrivateData.Execution != nil {
 		AppendTaskPluginAuditInfo(other, task.PrivateData.Execution.TaskPlugin)
@@ -286,7 +336,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:       task.UserId,
 		LogType:      model.LogTypeRefund,
-		Content:      "",
+		Content:      nil,
 		ChannelId:    task.ChannelId,
 		ModelName:    taskModelName(task),
 		Quota:        quota,
@@ -309,7 +359,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 // actualQuota 是任务完成后的实际应扣额度，与预扣额度 (task.Quota) 做差额结算。
 // reason 用于日志记录（例如 "token重算" 或 "adaptor调整"）。
 // clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
-func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason string, clamps ...*common.QuotaClamp) {
+func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason *common.Message, clamps ...*common.QuotaClamp) {
 	if actualQuota < 0 {
 		return
 	}
@@ -318,7 +368,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 
 	if quotaDelta == 0 {
 		logger.LogInfo(ctx, fmt.Sprintf("任务 %s 预扣费准确（%s，%s）",
-			task.TaskID, logger.LogQuota(actualQuota), reason))
+			task.TaskID, logger.LogQuota(actualQuota), reason.Error()))
 		return
 	}
 
@@ -327,7 +377,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		logger.LogQuota(quotaDelta),
 		logger.LogQuota(actualQuota),
 		logger.LogQuota(preConsumedQuota),
-		reason,
+		reason.Error(),
 	))
 
 	// 调整资金来源
@@ -370,7 +420,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:       task.UserId,
 		LogType:      logType,
-		Content:      reason,
+		Content:      []*common.Message{reason},
 		ChannelId:    task.ChannelId,
 		ModelName:    taskModelName(task),
 		Quota:        logQuota,
@@ -430,7 +480,24 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 	// 计算实际应扣费额度: totalTokens * modelRatio * groupRatio * otherMultiplier（饱和转换，防止溢出成负数）
 	actualQuota, clamp := common.QuotaFromFloatChecked(float64(totalTokens) * modelRatio * finalGroupRatio * otherMultiplier)
 
-	reason := fmt.Sprintf("token重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f, otherMultiplier=%.4f", totalTokens, modelRatio, finalGroupRatio, otherMultiplier)
+	reason := common.NewMessage(fmt.Sprintf("token重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f, otherMultiplier=%.4f", totalTokens, modelRatio, finalGroupRatio, otherMultiplier))
 	RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
 	return true
+}
+
+// EvaluateTaskCompletionUsage evaluates actual facts against the frozen task
+// expression. It neither mutates the snapshot nor moves funds: synchronous
+// submission and polling have different persistence and settlement barriers.
+func EvaluateTaskCompletionUsage(snap *billingexpr.BillingSnapshot, facts map[string]any) (billingexpr.TieredResult, map[string]any, error) {
+	if snap == nil {
+		return billingexpr.TieredResult{}, nil, fmt.Errorf("task billing snapshot is missing")
+	}
+	usage := make(map[string]any, len(snap.UsageFacts)+len(facts))
+	maps.Copy(usage, snap.UsageFacts)
+	maps.Copy(usage, facts)
+	result, err := billingexpr.ComputeTieredQuotaWithRequest(snap, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: usage})
+	if err == nil && (result.ActualQuotaBeforeGroup < 0 || math.IsNaN(result.ActualQuotaBeforeGroup)) {
+		err = fmt.Errorf("task completion expression produced an invalid cost")
+	}
+	return result, usage, err
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -392,6 +393,18 @@ func UnlockOrder(tradeNo string) {
 	createLock.Unlock()
 }
 
+// paymentError answers payment endpoints in their {"message": "error",
+// "data": text} shape. When err is or wraps a *common.Message, the response
+// also carries message_key and message_params for the web console.
+func paymentError(c *gin.Context, err error) {
+	body := gin.H{"message": "error", "data": err.Error()}
+	var message *common.Message
+	if errors.As(err, &message) {
+		maps.Copy(body, message.Fields())
+	}
+	c.JSON(http.StatusOK, body)
+}
+
 func EpayNotify(c *gin.Context) {
 	if !isEpayWebhookEnabled() {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
@@ -528,7 +541,7 @@ func EpayNotify(c *gin.Context) {
 
 	if credited {
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值成功 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d money=%.2f topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, topUp.Money, common.GetJsonString(topUp)))
-		model.RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money), c.ClientIP(), topUp.PaymentMethod, "epay")
+		model.RecordTopupLog(topUp.UserId, common.NewMessage(fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money)), c.ClientIP(), topUp.PaymentMethod, "epay")
 	} else {
 		// 幂等命中：订单已是 SUCCESS（通常为 epay 重复通知），不再增 quota 也不重复记日志。
 		logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值订单已处理，跳过重复通知 trade_no=%s user_id=%d client_ip=%s", topUp.TradeNo, topUp.UserId, c.ClientIP()))

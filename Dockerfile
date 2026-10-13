@@ -89,9 +89,10 @@ ENV GOEXPERIMENT=greenteagc
 WORKDIR /build
 
 ADD go.mod go.sum ./
-# relaykit is a local submodule referenced via replace; its go.mod must be
-# present for go mod download to resolve the main module graph.
+# relaykit and tokenkit are local submodules referenced via replace; their
+# go.mod files must be present for go mod download to resolve the main module graph.
 ADD relaykit/go.mod ./relaykit/go.mod
+ADD tokenkit/go.mod ./tokenkit/go.mod
 RUN set -eu; \
     case "$GO_BUILD_RESOURCE_MODE" in auto|low|normal) ;; *) echo "invalid GO_BUILD_RESOURCE_MODE=$GO_BUILD_RESOURCE_MODE (expected auto|low|normal)" >&2; exit 1 ;; esac; \
     case "$GO_BUILD_LOW_MEMORY_KB" in ''|*[!0-9]*) echo "GO_BUILD_LOW_MEMORY_KB must be a positive integer" >&2; exit 1 ;; esac; \
@@ -136,11 +137,11 @@ RUN set -eu; \
     fi; \
     if [ "$selected_mode" = low ]; then \
       echo "[container-build] stage=go-build mode=$selected_mode available_memory_kb=$available_memory_kb threshold_kb=$GO_BUILD_LOW_MEMORY_KB gomaxprocs=$GO_BUILD_LOW_MAX_PROCS gomemlimit=${GO_BUILD_LOW_MEMORY_LIMIT_MB}MiB gogc=$GO_BUILD_LOW_GOGC build_parallelism=$GO_BUILD_LOW_BUILD_PARALLELISM"; \
-      GOMAXPROCS="$GO_BUILD_LOW_MAX_PROCS" GOMEMLIMIT="${GO_BUILD_LOW_MEMORY_LIMIT_MB}MiB" GOGC="$GO_BUILD_LOW_GOGC" go build -p "$GO_BUILD_LOW_BUILD_PARALLELISM" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api; \
+      GOMAXPROCS="$GO_BUILD_LOW_MAX_PROCS" GOMEMLIMIT="${GO_BUILD_LOW_MEMORY_LIMIT_MB}MiB" GOGC="$GO_BUILD_LOW_GOGC" go build -p "$GO_BUILD_LOW_BUILD_PARALLELISM" -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api; \
     else \
       unset GOMAXPROCS GOMEMLIMIT GOGC; \
       echo "[container-build] stage=go-build mode=$selected_mode available_memory_kb=$available_memory_kb threshold_kb=$GO_BUILD_LOW_MEMORY_KB gomaxprocs=default gomemlimit=default gogc=default build_parallelism=default"; \
-      go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api; \
+      go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api; \
     fi
 
 FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a

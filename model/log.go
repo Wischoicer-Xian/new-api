@@ -200,21 +200,23 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 	return logs, err
 }
 
-func RecordLog(userId int, logType int, content string) {
+func RecordLog(userId int, logType int, content *common.Message) {
 	if logType == LogTypeConsume && !common.LogConsumeEnabled {
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
+	other := NewLogOther()
 	log := &Log{
 		UserId:    userId,
 		Username:  username,
 		CreatedAt: common.GetTimestamp(),
 		Type:      logType,
-		Content:   content,
+		Content:   other.setContent([]*common.Message{content}),
+		Other:     other.JSONString(),
 	}
 	err := createLog(log)
 	if err != nil {
-		common.SysLog("failed to record log: " + err.Error())
+		common.SysLog(common.LogText("failed to record log: %s", err.Error()))
 	}
 }
 
@@ -302,7 +304,7 @@ func RecordOperationAuditLog(logUserId, actorRole int, content string, ip string
 	RecordAuditLog(c, AuditLog{UserId: logUserId, Username: username, ActorRole: actorRole, Category: category, Action: action, Content: content, Ip: ip, Status: status, Success: success, Other: other})
 }
 
-func RecordTopupLog(userId int, content string, callerIp string, paymentMethod string, callbackPaymentMethod string) {
+func RecordTopupLog(userId int, content *common.Message, callerIp string, paymentMethod string, callbackPaymentMethod string) {
 	username, _ := GetUsernameById(userId, false)
 	other := NewLogOther()
 	other.MergeAdmin(map[string]any{
@@ -318,7 +320,7 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 		Username:  username,
 		CreatedAt: common.GetTimestamp(),
 		Type:      LogTypeTopup,
-		Content:   content,
+		Content:   other.setContent([]*common.Message{content}),
 		Ip:        callerIp,
 		Other:     other.JSONString(),
 	}
@@ -385,18 +387,18 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 }
 
 type RecordConsumeLogParams struct {
-	ChannelId        int       `json:"channel_id"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	ModelName        string    `json:"model_name"`
-	TokenName        string    `json:"token_name"`
-	Quota            int       `json:"quota"`
-	Content          string    `json:"content"`
-	TokenId          int       `json:"token_id"`
-	UseTimeSeconds   int       `json:"use_time_seconds"`
-	IsStream         bool      `json:"is_stream"`
-	Group            string    `json:"group"`
-	Other            *LogOther `json:"other"`
+	ChannelId        int               `json:"channel_id"`
+	PromptTokens     int               `json:"prompt_tokens"`
+	CompletionTokens int               `json:"completion_tokens"`
+	ModelName        string            `json:"model_name"`
+	TokenName        string            `json:"token_name"`
+	Quota            int               `json:"quota"`
+	Content          []*common.Message `json:"content"`
+	TokenId          int               `json:"token_id"`
+	UseTimeSeconds   int               `json:"use_time_seconds"`
+	IsStream         bool              `json:"is_stream"`
+	Group            string            `json:"group"`
+	Other            *LogOther         `json:"other"`
 	// BillingStage 业务计费阶段（WIS-499）：request=同步 chat/image 消费，
 	// submit=异步视频首次提交。非空时 RecordConsumeLog 会从请求 header 解析归因
 	// 注入 other.wischoicer（若 other 未预置），并写入 billing_stage。
@@ -425,6 +427,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	other := injectWischoicerConsumeOther(params.Other, c, params.BillingStage)
+	content := other.setContent(params.Content)
 	otherStr := other.JSONString()
 	// 判断是否需要记录 IP
 	needRecordIp := false
@@ -438,7 +441,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		Username:         username,
 		CreatedAt:        createdAt,
 		Type:             LogTypeConsume,
-		Content:          params.Content,
+		Content:          content,
 		PromptTokens:     params.PromptTokens,
 		CompletionTokens: params.CompletionTokens,
 		TokenName:        params.TokenName,
@@ -482,7 +485,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 type RecordTaskBillingLogParams struct {
 	UserId            int
 	LogType           int
-	Content           string
+	Content           []*common.Message
 	ChannelId         int
 	ModelName         string
 	Quota             int
@@ -525,12 +528,13 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 	createdAt := common.GetTimestamp()
 	other := stampWischoicerBillingStage(params.Other, params.BillingStage)
+	content := other.setContent(params.Content)
 	log := &Log{
 		UserId:            params.UserId,
 		Username:          username,
 		CreatedAt:         createdAt,
 		Type:              params.LogType,
-		Content:           params.Content,
+		Content:           content,
 		TokenName:         tokenName,
 		ModelName:         params.ModelName,
 		Quota:             params.Quota,
@@ -637,40 +641,60 @@ func stampWischoicerBillingStage(other *LogOther, billingStage string) *LogOther
 	return other
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
-	var tx *gorm.DB
-	if logType == LogTypeUnknown {
-		tx = LOG_DB
-	} else {
-		tx = LOG_DB.Where("logs.type = ?", logType)
-	}
+// LogFilter is the usage-log search shared by the log list and the log export.
+// Username and Channel are administrator filters.
+type LogFilter struct {
+	Type              int
+	StartTimestamp    int64
+	EndTimestamp      int64
+	ModelName         string
+	Username          string
+	TokenName         string
+	Channel           int
+	Group             string
+	RequestId         string
+	UpstreamRequestId string
+}
 
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
+func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
+	var err error
+	if f.Type != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", f.Type)
+	}
+	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", f.ModelName); err != nil {
+		return nil, err
+	}
+	if tx, err = applyExplicitLogTextFilter(tx, "logs.username", f.Username); err != nil {
+		return nil, err
+	}
+	if f.TokenName != "" {
+		tx = tx.Where("logs.token_name = ?", f.TokenName)
+	}
+	if f.RequestId != "" {
+		tx = tx.Where("logs.request_id = ?", f.RequestId)
+	}
+	if f.UpstreamRequestId != "" {
+		tx = tx.Where("logs.upstream_request_id = ?", f.UpstreamRequestId)
+	}
+	if f.StartTimestamp != 0 {
+		tx = tx.Where("logs.created_at >= ?", f.StartTimestamp)
+	}
+	if f.EndTimestamp != 0 {
+		tx = tx.Where("logs.created_at <= ?", f.EndTimestamp)
+	}
+	if f.Channel != 0 {
+		tx = tx.Where("logs.channel_id = ?", f.Channel)
+	}
+	if f.Group != "" {
+		tx = tx.Where("logs."+logGroupCol+" = ?", f.Group)
+	}
+	return tx, nil
+}
+
+func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
+	tx, err := filter.apply(LOG_DB)
+	if err != nil {
 		return nil, 0, err
-	}
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.username", username); err != nil {
-		return nil, 0, err
-	}
-	if tokenName != "" {
-		tx = tx.Where("logs.token_name = ?", tokenName)
-	}
-	if requestId != "" {
-		tx = tx.Where("logs.request_id = ?", requestId)
-	}
-	if upstreamRequestId != "" {
-		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
-	}
-	if startTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", endTimestamp)
-	}
-	if channel != 0 {
-		tx = tx.Where("logs.channel_id = ?", channel)
-	}
-	if group != "" {
-		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
 	err = tx.Model(&Log{}).Count(&total).Error
 	if err != nil {
@@ -733,7 +757,33 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 
 const logSearchCountLimit = 10000
 
-func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+// applyUserLogModelFilter applies the user-facing model filter with WIS-515
+// hardening: filtering by the masked system alias must surface hidden system-key
+// rows (including historical rows that still carry the real model name), while
+// filtering by a real model name must never surface hidden system rows.
+// Identification is by token_id + hidden, never by model-name string, so a normal
+// API key calling the same model is unaffected.
+func applyUserLogModelFilter(tx *gorm.DB, modelName string, hiddenIds []int) (*gorm.DB, error) {
+	if modelName == "" {
+		return tx, nil
+	}
+	if modelName == common.MaskedSystemModelAlias {
+		if len(hiddenIds) > 0 {
+			return tx.Where("(logs.model_name = ? OR logs.token_id IN ?)", modelName, hiddenIds), nil
+		}
+		return tx.Where("logs.model_name = ?", modelName), nil
+	}
+	var err error
+	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
+		return nil, err
+	}
+	if len(hiddenIds) > 0 {
+		tx = tx.Where("logs.token_id NOT IN ?", hiddenIds)
+	}
+	return tx, nil
+}
+
+func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
 	// WIS-515: load the user's hidden system token ids once. Used both to keep the
 	// model filter from leaking historical system-key rows and to mask any real
 	// model_name still stored on such rows at read time.
@@ -742,51 +792,19 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	for _, id := range hiddenIds {
 		hiddenSet[id] = true
 	}
-	var tx *gorm.DB
-	if logType == LogTypeUnknown {
-		tx = LOG_DB.Where("logs.user_id = ?", userId)
-	} else {
-		tx = LOG_DB.Where("logs.user_id = ? and logs.type = ?", userId, logType)
+	// WIS-515: the model filter needs token-id-aware hardening, so ModelName is
+	// excluded from LogFilter.apply and applied by applyUserLogModelFilter below.
+	modelName := filter.ModelName
+	filter.ModelName = ""
+	tx, err := filter.apply(LOG_DB.Where("logs.user_id = ?", userId))
+	if err != nil {
+		return nil, 0, err
 	}
 
 	// WIS-515: harden the model filter against historical system-key rows (written
 	// before WIS-505's write-time masking, so they still carry the real model name).
-	// Filtering by the alias must surface system rows; filtering by a real model
-	// must never surface hidden system rows. Identified by token_id + hidden, never
-	// by model-name string, so a normal API key calling the same model is unaffected.
-	if modelName != "" {
-		if modelName == common.MaskedSystemModelAlias {
-			if len(hiddenIds) > 0 {
-				tx = tx.Where("(logs.model_name = ? OR logs.token_id IN ?)", modelName, hiddenIds)
-			} else {
-				tx = tx.Where("logs.model_name = ?", modelName)
-			}
-		} else {
-			if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
-				return nil, 0, err
-			}
-			if len(hiddenIds) > 0 {
-				tx = tx.Where("logs.token_id NOT IN ?", hiddenIds)
-			}
-		}
-	}
-	if tokenName != "" {
-		tx = tx.Where("logs.token_name = ?", tokenName)
-	}
-	if requestId != "" {
-		tx = tx.Where("logs.request_id = ?", requestId)
-	}
-	if upstreamRequestId != "" {
-		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
-	}
-	if startTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", endTimestamp)
-	}
-	if group != "" {
-		tx = tx.Where("logs."+logGroupCol+" = ?", group)
+	if tx, err = applyUserLogModelFilter(tx, modelName, hiddenIds); err != nil {
+		return nil, 0, err
 	}
 	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
 	if err != nil {
@@ -806,6 +824,89 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	formatUserLogs(logs, startIdx)
 	maskHiddenSystemLogsForUser(logs, hiddenSet)
 	return logs, total, err
+}
+
+// StreamAllLogs calls fn with each log matching filter, newest first, as an
+// administrator with role sees it. Rows are read one at a time, so an export
+// never holds the whole result in memory.
+func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log) error) error {
+	tx, err := filter.apply(LOG_DB.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	visibility := logOtherVisibilityAdmin
+	if role >= common.RoleRootUser {
+		visibility = logOtherVisibilityRoot
+	}
+	channelNames := make(map[int]string)
+	return streamLogs(tx, "logs.created_at desc, logs.id desc", func(log *Log) error {
+		if log.ChannelId != 0 {
+			name, ok := channelNames[log.ChannelId]
+			if !ok {
+				if channel, err := CacheGetChannel(log.ChannelId); err == nil {
+					name = channel.Name
+				}
+				channelNames[log.ChannelId] = name
+			}
+			log.ChannelName = name
+		}
+		log.Other = formatLogOtherJSON(log.Other, visibility)
+		return fn(log)
+	})
+}
+
+// StreamUserLogs is StreamAllLogs for one user's own logs, shaped like the
+// user log list.
+func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*Log) error) error {
+	// WIS-515: the export path applies the same hidden-system-token masking as
+	// GetUserLogs — user-facing reads must never surface real model names of
+	// hidden system-key rows.
+	hiddenIds := getHiddenSystemTokenIdsForUser(userId)
+	hiddenSet := make(map[int]bool, len(hiddenIds))
+	for _, id := range hiddenIds {
+		hiddenSet[id] = true
+	}
+	modelName := filter.ModelName
+	filter.ModelName = ""
+	tx, err := filter.apply(LOG_DB.WithContext(ctx).Where("logs.user_id = ?", userId))
+	if err != nil {
+		return err
+	}
+	if tx, err = applyUserLogModelFilter(tx, modelName, hiddenIds); err != nil {
+		return err
+	}
+	count := 0
+	return streamLogs(tx, "logs.id desc", func(log *Log) error {
+		count++
+		log.Id = count
+		log.ChannelName = ""
+		log.Other = formatLogOtherJSON(log.Other, logOtherVisibilityUser)
+		if hiddenSet[log.TokenId] {
+			log.ModelName = common.MaskedSystemModelAlias
+		}
+		return fn(log)
+	})
+}
+
+func streamLogs(tx *gorm.DB, order string, fn func(*Log) error) error {
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		order = clickHouseLogOrder("logs.")
+	}
+	rows, err := tx.Model(&Log{}).Order(order).Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var log Log
+		if err := LOG_DB.ScanRows(rows, &log); err != nil {
+			return err
+		}
+		if err := fn(&log); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 type Stat struct {

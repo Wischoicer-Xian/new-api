@@ -351,7 +351,7 @@ func TestDeleteVsReserve_DatabaseNoLostReservation(t *testing.T) {
 	for i := 0; i < deleters; i++ {
 		go func() {
 			defer wg.Done()
-			_ = DeleteUserById(60006)
+			_, _ = DeleteUserById(60006)
 		}()
 	}
 	for i := 0; i < reservers; i++ {

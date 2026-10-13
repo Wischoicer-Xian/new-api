@@ -55,7 +55,7 @@ func callAccessTokenHandler(t *testing.T, handler gin.HandlerFunc, userID int, t
 
 func TestGenerateAccessTokenPersistsToken(t *testing.T) {
 	user, identity := setupSecurityEnrollmentTest(t)
-	proof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeAccessTokenGenerate}, "password")
+	proof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeLegacyAccessTokenGenerate}, "password")
 	response := securityEnrollmentRequest(http.MethodGet, "/api/user/token", "", proof, identity, GenerateAccessToken)
 	var body securityEnrollmentResponse
 	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body), response.Body.String())

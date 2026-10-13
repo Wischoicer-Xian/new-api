@@ -69,7 +69,7 @@ func TestGetUserLogsMasksHiddenSystemToken(t *testing.T) {
 	wis515SeedLog(t, wis515User, hidden.Id, real, "wis515-log-hidden")
 	wis515SeedLog(t, wis515User, normal.Id, real, "wis515-log-normal")
 
-	logs, _, err := GetUserLogs(wis515User, LogTypeUnknown, 0, 0, "", "", 0, 100, "", "", "")
+	logs, _, err := GetUserLogs(wis515User, LogFilter{Type: LogTypeUnknown}, 0, 100)
 	require.NoError(t, err)
 	byReq := modelNamesByRequest(logs)
 	require.Equal(t, common.MaskedSystemModelAlias, byReq["wis515-log-hidden"], "hidden system token must be masked")
@@ -85,7 +85,7 @@ func TestGetUserLogsAliasFilterSurfacesSystemRows(t *testing.T) {
 	hidden := wis515SeedToken(t, 515111, wis515User, true, "sk-wis515-hidden-f2", "hidden-sys")
 	wis515SeedLog(t, wis515User, hidden.Id, real, "wis515-f2-hidden")
 
-	logs, _, err := GetUserLogs(wis515User, LogTypeUnknown, 0, 0, common.MaskedSystemModelAlias, "", 0, 100, "", "", "")
+	logs, _, err := GetUserLogs(wis515User, LogFilter{Type: LogTypeUnknown, ModelName: common.MaskedSystemModelAlias}, 0, 100)
 	require.NoError(t, err)
 	require.Len(t, logs, 1)
 	require.Equal(t, common.MaskedSystemModelAlias, logs[0].ModelName)
@@ -99,7 +99,7 @@ func TestGetUserLogsRealModelFilterHidesSystemRows(t *testing.T) {
 	wis515SeedLog(t, wis515User, hidden.Id, real, "wis515-f3-hidden")
 	wis515SeedLog(t, wis515User, normal.Id, real, "wis515-f3-normal")
 
-	logs, _, err := GetUserLogs(wis515User, LogTypeUnknown, 0, 0, real, "", 0, 100, "", "", "")
+	logs, _, err := GetUserLogs(wis515User, LogFilter{Type: LogTypeUnknown, ModelName: real}, 0, 100)
 	require.NoError(t, err)
 	byReq := modelNamesByRequest(logs)
 	_, hasHidden := byReq["wis515-f3-hidden"]
@@ -223,7 +223,7 @@ func TestGetUserLogsMasksAfterHiddenTokenSoftDeleted(t *testing.T) {
 	// Rotate / soft-delete the system key (mirrors Token.Delete in production).
 	require.NoError(t, hidden.Delete())
 
-	logs, _, err := GetUserLogs(wis515User, LogTypeUnknown, 0, 0, "", "", 0, 100, "", "", "")
+	logs, _, err := GetUserLogs(wis515User, LogFilter{Type: LogTypeUnknown}, 0, 100)
 	require.NoError(t, err)
 	byReq := modelNamesByRequest(logs)
 	require.Equal(t, common.MaskedSystemModelAlias, byReq["wis515-sd-hidden"],

@@ -16,7 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { CHANNEL_TYPES } from '../constants'
+import {
+  CHANNEL_TYPE_API_NEBULA,
+  CHANNEL_TYPE_TASK_PLUGIN,
+  CHANNEL_TYPES,
+  CHANNEL_TYPE_VLLM,
+  CHANNEL_TYPE_SGLANG,
+} from '../constants'
 
 // ============================================================================
 // Channel Type Configuration
@@ -46,14 +52,32 @@ export interface ChannelTypeConfig {
  * Configuration for each channel type
  */
 export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
+  [CHANNEL_TYPE_SGLANG]: {
+    id: CHANNEL_TYPE_SGLANG,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_SGLANG],
+    icon: 'SGLang',
+    hints: {
+      baseUrl: 'SGLang server address, without /v1',
+      key: 'SGLang API key, or EMPTY if authentication is disabled',
+      models: 'Models fetched from upstream /v1/models',
+    },
+  },
+  [CHANNEL_TYPE_VLLM]: {
+    id: CHANNEL_TYPE_VLLM,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_VLLM],
+    icon: 'Vllm',
+    hints: {
+      baseUrl: 'vLLM server address, without /v1',
+      key: 'vLLM API key, or EMPTY if authentication is disabled',
+      models: 'Models fetched from upstream /v1/models',
+    },
+  },
   1: {
     id: 1,
     name: CHANNEL_TYPES[1],
     icon: 'openai',
-    defaultBaseUrl: 'https://api.openai.com',
     requiresOrganization: true,
     hints: {
-      baseUrl: 'Default: https://api.openai.com',
       key: 'Format: sk-...',
       models: 'gpt-4,gpt-4-turbo,gpt-3.5-turbo',
     },
@@ -77,7 +101,6 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
     id: 14,
     name: CHANNEL_TYPES[14],
     icon: 'anthropic',
-    defaultBaseUrl: 'https://api.anthropic.com',
     hints: {
       key: 'Format: sk-ant-...',
       models: 'claude-3-opus,claude-3-sonnet,claude-3-haiku',
@@ -107,7 +130,6 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
     id: 43,
     name: CHANNEL_TYPES[43],
     icon: 'deepseek',
-    defaultBaseUrl: 'https://api.deepseek.com',
     hints: {
       key: 'DeepSeek API Key',
       models: 'deepseek-chat,deepseek-coder',
@@ -117,7 +139,6 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
     id: 20,
     name: CHANNEL_TYPES[20],
     icon: 'openrouter',
-    defaultBaseUrl: 'https://openrouter.ai/api',
     hints: {
       key: 'OpenRouter API Key',
       models: 'Use model IDs from OpenRouter',
@@ -127,11 +148,9 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
     id: 56,
     name: CHANNEL_TYPES[56],
     icon: 'replicate',
-    defaultBaseUrl: 'https://api.replicate.com',
     hints: {
       key: 'Replicate API Token',
       models: 'Replicate model IDs',
-      baseUrl: 'Default: https://api.replicate.com',
     },
   },
   58: {
@@ -164,9 +183,9 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Models',
     },
   },
-  61: {
-    id: 61,
-    name: CHANNEL_TYPES[61],
+  [CHANNEL_TYPE_API_NEBULA]: {
+    id: CHANNEL_TYPE_API_NEBULA,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_API_NEBULA],
     icon: 'NewAPI',
     defaultBaseUrl: 'https://apinebula.com',
     hints: {
@@ -175,9 +194,9 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Async image task models',
     },
   },
-  62: {
-    id: 62,
-    name: CHANNEL_TYPES[62],
+  [CHANNEL_TYPE_TASK_PLUGIN]: {
+    id: CHANNEL_TYPE_TASK_PLUGIN,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_TASK_PLUGIN],
     icon: 'newapi',
     hints: {
       baseUrl: 'Task plugin endpoint base URL',
@@ -212,13 +231,6 @@ export function requiresOrganization(type: number): boolean {
  */
 export function requiresRegion(type: number): boolean {
   return CHANNEL_TYPE_CONFIGS[type]?.requiresRegion || false
-}
-
-/**
- * Get default base URL for channel type
- */
-export function getDefaultBaseUrl(type: number): string {
-  return CHANNEL_TYPE_CONFIGS[type]?.defaultBaseUrl || ''
 }
 
 /**
