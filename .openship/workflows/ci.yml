@@ -23,7 +23,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH="${GITHUB_REF#refs/heads/}"
-          git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" .
+          for i in 1 2 3; do
+            git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" . && break
+            [ "$i" = 3 ] && exit 1
+            rm -rf .git * .[!.]* 2>/dev/null; sleep 3
+          done
       - name: frontend embed placeholder
         run: |
           mkdir -p web/dist
@@ -54,7 +58,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH="${GITHUB_REF#refs/heads/}"
-          git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" .
+          for i in 1 2 3; do
+            git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" . && break
+            [ "$i" = 3 ] && exit 1
+            rm -rf .git * .[!.]* 2>/dev/null; sleep 3
+          done
       - name: Use China npm mirror
         run: printf '[install]\nregistry = "https://registry.npmmirror.com"\n' > bunfig.toml
       - name: Install dependencies
