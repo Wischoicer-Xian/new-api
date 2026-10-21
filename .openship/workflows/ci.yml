@@ -11,7 +11,7 @@ jobs:
   backend:
     name: Backend vet, build, test
     runs-on: [self-hosted, openship, linux]
-    container: golang:1.26
+    container: cimg/go:1.26
     timeout-minutes: 25
     env:
       GOWORK: "off"
@@ -36,13 +36,15 @@ jobs:
   frontend:
     name: Frontend typecheck and test
     runs-on: [self-hosted, openship, linux]
-    container: oven/bun:1.4.0
+    container: cimg/node:22.16
     timeout-minutes: 15
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+      - name: Install bun
+        run: npm install -g bun --registry=https://registry.npmmirror.com
       - name: Use China npm mirror
         run: printf '[install]\nregistry = "https://registry.npmmirror.com"\n' > bunfig.toml
       - name: Install dependencies
