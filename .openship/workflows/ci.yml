@@ -16,6 +16,9 @@ jobs:
     env:
       GOWORK: "off"
       GOPROXY: https://goproxy.cn,direct
+      HTTPS_PROXY: http://172.17.0.1:7890
+      HTTP_PROXY: http://172.17.0.1:7890
+      NO_PROXY: localhost,127.0.0.1,goproxy.cn,.npmmirror.com
     steps:
       - uses: actions/checkout@v4
       - name: frontend embed placeholder
@@ -38,6 +41,10 @@ jobs:
     runs-on: [self-hosted, openship, linux]
     container: cimg/node:22.16
     timeout-minutes: 15
+    env:
+      HTTPS_PROXY: http://172.17.0.1:7890
+      HTTP_PROXY: http://172.17.0.1:7890
+      NO_PROXY: localhost,127.0.0.1,goproxy.cn,.npmmirror.com
     defaults:
       run:
         working-directory: web
