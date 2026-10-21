@@ -17,7 +17,12 @@ jobs:
       GOWORK: "off"
       GOPROXY: https://goproxy.cn,direct
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (manual, bypass action clone)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" .
       - name: frontend embed placeholder
         run: |
           mkdir -p web/dist
@@ -42,7 +47,12 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (manual, bypass action clone)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" .
       - name: Use China npm mirror
         run: printf '[install]\nregistry = "https://registry.npmmirror.com"\n' > bunfig.toml
       - name: Install dependencies
