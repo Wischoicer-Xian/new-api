@@ -1,0 +1,53 @@
+name: CI
+# OpenShip 独立模式 workflow：develop push → 构建+测试 → 过了才部署（项目门禁）
+# 与上游 .github/workflows/ 完全隔离，GitHub 不调度此目录
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend:
+    name: Backend vet, build, test
+    runs-on: [self-hosted, openship, linux]
+    container: golang:1.26
+    timeout-minutes: 25
+    env:
+      GOWORK: "off"
+      GOPROXY: https://goproxy.cn,direct
+    steps:
+      - uses: actions/checkout@v4
+      - name: frontend embed placeholder
+        run: |
+          mkdir -p web/dist
+          touch web/dist/index.html
+      - name: Vet and build root module
+        run: go vet ./... && go build ./...
+      - name: Vet and build relaykit
+        working-directory: relaykit
+        run: go vet ./... && go build ./...
+      - name: Vet and build tokenkit
+        working-directory: tokenkit
+        run: go vet ./... && go build ./...
+      - name: Test
+        run: make test
+
+  frontend:
+    name: Frontend typecheck and test
+    runs-on: [self-hosted, openship, linux]
+    container: oven/bun:1.4.0
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use China npm mirror
+        run: printf '[install]\nregistry = "https://registry.npmmirror.com"\n' > bunfig.toml
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Test
+        run: bun run test
