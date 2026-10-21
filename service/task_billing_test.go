@@ -362,7 +362,7 @@ func TestLogTaskConsumptionIncludesTieredSnapshotUsageFacts(t *testing.T) {
 	assert.Equal(t, float64(5), facts["seconds"])
 	assert.NotContains(t, other, "resolution")
 	assert.NotContains(t, other, "seconds")
-	assert.Contains(t, log.Content, "Billing parameters: ")
+	assert.Contains(t, log.Content, "计算参数：")
 	assert.Contains(t, log.Content, "resolution: 720P")
 	assert.Contains(t, log.Content, "seconds: 5")
 }
@@ -400,12 +400,10 @@ func TestLogTaskConsumptionWithoutSnapshotKeepsRatioMode(t *testing.T) {
 	assert.NotContains(t, other, "expr_b64")
 	assert.NotContains(t, other, "matched_tier")
 	assert.NotContains(t, other, "usage_facts")
-	assert.Equal(t, "Action GENERATE, Billing parameters: size: 2.00", log.Content)
-	// The web console renders content_parts in the viewer's language; content
-	// keeps the English text.
+	assert.Equal(t, "操作 GENERATE, 计算参数：size: 2.00", log.Content)
+	// Upstream i18n (128089fa7) collapsed content_parts into a single rendered string.
 	assert.Equal(t, []any{
-		map[string]any{"key": "Action {{action}}", "params": map[string]any{"action": "GENERATE"}},
-		map[string]any{"key": "Billing parameters: {{params}}", "params": map[string]any{"params": "size: 2.00"}},
+		map[string]any{"key": "操作 GENERATE, 计算参数：size: 2.00"},
 	}, other["content_parts"])
 }
 

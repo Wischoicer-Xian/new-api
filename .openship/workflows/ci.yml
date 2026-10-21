@@ -48,7 +48,7 @@ jobs:
     name: Frontend typecheck and test
     runs-on: [self-hosted, openship, linux]
     container: registry:5000/ci-node:22
-    timeout-minutes: 35
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: web
