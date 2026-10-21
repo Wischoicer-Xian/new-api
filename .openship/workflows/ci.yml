@@ -18,6 +18,7 @@ jobs:
       GOPROXY: https://goproxy.cn,direct
     steps:
       - name: Checkout (manual, bypass action clone)
+        working-directory: .
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -48,6 +49,7 @@ jobs:
         working-directory: web
     steps:
       - name: Checkout (manual, bypass action clone)
+        working-directory: .
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
