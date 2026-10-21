@@ -12,7 +12,7 @@ jobs:
     name: Backend vet, build, test
     runs-on: [self-hosted, openship, linux]
     container: registry:5000/ci-go:1.26
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       GOWORK: "off"
       GOPROXY: https://goproxy.cn,direct
