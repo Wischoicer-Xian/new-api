@@ -29,7 +29,10 @@ const html = readFileSync(
   resolve(import.meta.dirname, '../../../index.html'),
   'utf8'
 )
-const bootScript = html.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? ''
+// index.html has two inline scripts: a basepath bootloader (first, WIS-518)
+// and the theme boot script (second). Match the one that reads the theme key.
+const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1])
+const bootScript = scripts.find((s) => s.includes('theme:v1:mode')) ?? ''
 
 function runBootScript() {
   new Function(bootScript)()
