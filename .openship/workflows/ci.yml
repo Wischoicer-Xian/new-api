@@ -43,8 +43,6 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
-      - name: Install bun
-        run: npm install -g bun --registry=https://registry.npmmirror.com
       - name: Use China npm mirror
         run: printf '[install]\nregistry = "https://registry.npmmirror.com"\n' > bunfig.toml
       - name: Install dependencies
