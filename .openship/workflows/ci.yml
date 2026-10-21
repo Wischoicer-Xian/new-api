@@ -38,7 +38,6 @@ jobs:
     runs-on: [self-hosted, openship, linux]
     container: registry:5000/ci-node:22
     timeout-minutes: 15
-    env:
     defaults:
       run:
         working-directory: web
