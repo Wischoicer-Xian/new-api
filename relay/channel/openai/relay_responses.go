@@ -111,7 +111,14 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				data = string(patched)
 			}
 		}
-		sendResponsesStreamData(c, streamResponse, data)
+		if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
+			sr.Stop(err)
+			return
+		}
+		if (streamResponse.Type == "response.completed" || streamResponse.Type == "response.done") &&
+			streamResponse.Response != nil && info.StreamStatus.ResponseOutcome() == string(relaycommon.ResponseOutcomeCompleted) {
+			sr.Done()
+		}
 	})
 
 	common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, info.StreamStatus)
