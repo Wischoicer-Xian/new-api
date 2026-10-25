@@ -786,11 +786,13 @@ func TestSweepTimedOutTasksAtTheDefaultDeadline(t *testing.T) {
 	seedUser(t, userID, initialQuota)
 	running := makeTask(userID, 0, taskQuota, 0, BillingSourceWallet, 0)
 	running.TaskID = "running_for_60_hours"
+	running.Platform = constant.TaskPlatformSuno
 	running.Progress = "50%"
 	running.SubmitTime = time.Now().Add(-60 * time.Hour).Unix()
 	require.NoError(t, model.DB.Create(running).Error)
 	stuck := makeTask(userID, 0, taskQuota, 0, BillingSourceWallet, 0)
 	stuck.TaskID = "running_for_73_hours"
+	stuck.Platform = constant.TaskPlatformSuno
 	stuck.Progress = "50%"
 	stuck.SubmitTime = time.Now().Add(-73 * time.Hour).Unix()
 	require.NoError(t, model.DB.Create(stuck).Error)
