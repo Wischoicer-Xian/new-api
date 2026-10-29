@@ -14,7 +14,7 @@ ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ARG APT_RETRIES=5
 ARG APT_TIMEOUT_SECONDS=30
 
-FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS builder
+FROM docker.m.daocloud.io/oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS builder
 ARG NODE_BUILD_RESOURCE_MODE
 ARG NODE_BUILD_LOW_MEMORY_KB
 ARG NODE_BUILD_LOW_BUN_CONCURRENT_SCRIPTS
@@ -69,7 +69,7 @@ RUN set -eu; \
       DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION="$(cat /build/VERSION)" bun run build; \
     fi
 
-FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder2
+FROM docker.m.daocloud.io/library/golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder2
 ARG GO_BUILD_RESOURCE_MODE
 ARG GO_BUILD_LOW_MEMORY_KB
 ARG GO_BUILD_LOW_MEMORY_LIMIT_MB
@@ -144,7 +144,7 @@ RUN set -eu; \
       go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api; \
     fi
 
-FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
+FROM docker.m.daocloud.io/library/debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
 ARG DEBIAN_MIRROR
 ARG DEBIAN_SECURITY_MIRROR
 ARG APT_RETRIES
