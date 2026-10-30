@@ -1752,11 +1752,6 @@ func SetUserQuota(id int, newQuota int) error {
 //	return email
 //}
 
-func GetRootUser() (user *User) {
-	DB.Where("role = ?", common.RoleRootUser).First(&user)
-	return user
-}
-
 func UpdateUserLastLoginAt(id int) {
 	if err := DB.Model(&User{}).Where("id = ?", id).Update("last_login_at", common.GetTimestamp()).Error; err != nil {
 		common.SysLog("failed to update user last_login_at: " + err.Error())

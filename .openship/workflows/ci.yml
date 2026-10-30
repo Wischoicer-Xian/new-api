@@ -1,0 +1,74 @@
+name: CI
+# OpenShip 独立模式 workflow：develop push → 构建+测试 → 过了才部署（项目门禁）
+# 与上游 .github/workflows/ 完全隔离，GitHub 不调度此目录
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+  repository_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend:
+    name: Backend vet, build, test
+    runs-on: [self-hosted, openship, linux]
+    container: registry:5000/ci-go:1.26
+    timeout-minutes: 40
+    env:
+      GOWORK: "off"
+      GOPROXY: https://goproxy.cn,direct
+    steps:
+      - name: Checkout (manual, bypass action clone)
+        working-directory: .
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          for i in 1 2 3; do
+            git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" . && break
+            [ "$i" = 3 ] && exit 1
+            rm -rf .git * .[!.]* 2>/dev/null; sleep 3
+          done
+      - name: frontend embed placeholder
+        run: |
+          mkdir -p web/dist
+          touch web/dist/index.html
+      - name: Vet and build root module
+        run: go vet ./... && go build ./...
+      - name: Vet and build relaykit
+        working-directory: relaykit
+        run: go vet ./... && go build ./...
+      - name: Vet and build tokenkit
+        working-directory: tokenkit
+        run: go vet ./... && go build ./...
+      - name: Test
+        run: make test
+
+  frontend:
+    name: Frontend typecheck and test
+    runs-on: [self-hosted, openship, linux]
+    container: registry:5000/ci-node:22
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout (manual, bypass action clone)
+        working-directory: .
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          for i in 1 2 3; do
+            git clone --depth 1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" . && break
+            [ "$i" = 3 ] && exit 1
+            rm -rf .git * .[!.]* 2>/dev/null; sleep 3
+          done
+      - name: Use China npm mirror
+        run: printf '[install]\nregistry = "https://registry.npmmirror.com"\n' > bunfig.toml
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Test
+        run: bun run test
