@@ -18,6 +18,11 @@ on:
     branches: [develop, main]
   push:
     branches: [develop, main]
+  # Manual trigger: this repo's push/pull_request events have produced no
+  # workflow runs since 2026-10-13, and GitHub currently reports "Actions has
+  # been disabled for this repository" (see WIS-856); once Actions is
+  # re-enabled, workflow_dispatch provides a manual gate channel.
+  workflow_dispatch:
 
 jobs:
   database-integration:
@@ -32,7 +37,7 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
 
       - name: Go module download
@@ -71,7 +76,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
 
       - name: Go module download
@@ -90,7 +95,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
       - run: go mod download
       - name: Image billing SQLite tests
@@ -105,7 +110,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
       - run: go mod download
       - name: Compile integration
@@ -122,7 +127,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
       - run: go mod download
       - name: Compile integration
