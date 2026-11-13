@@ -73,13 +73,7 @@ func (channel *Channel) recalcMultiKeySize() {
 	if !channel.ChannelInfo.IsMultiKey {
 		return
 	}
-	var keyStr string
-	if channel.Key != "" {
-		keyStr = channel.Key
-	} else if existing, err := GetChannelById(channel.Id, true); err == nil {
-		// If key is not provided, read the existing key from the database.
-		keyStr = existing.Key
-	}
+	keyStr := channel.Key
 	keys := []string{}
 	if keyStr != "" {
 		trimmed := strings.TrimSpace(keyStr)
@@ -243,9 +237,43 @@ func InsertChannelWithImageRevision(channel *Channel, buildRevision ChannelRevis
 // column is written to SQL NULL in the SAME transaction, keeping the
 // channel + ability + revision write atomic across SQLite/MySQL/PostgreSQL.
 func UpdateChannelWithImageRevision(channel *Channel, nullColumns []string, buildRevision ChannelRevisionBuilder) error {
-	return DB.Transaction(func(tx *gorm.DB) error {
+	return UpdateChannelWithImageRevisionLocked(channel, nullColumns, buildRevision, nil)
+}
+
+func UpdateChannelWithImageRevisionLocked(channel *Channel, nullColumns []string, buildRevision ChannelRevisionBuilder, updateStored func(*Channel) error) error {
+	pollingLock := GetChannelPollingLock(channel.Id)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		keyLock := sqliteChannelKeyLock(channel.Id)
+		keyLock.Lock()
+		defer keyLock.Unlock()
+	}
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var stored Channel
+		if err := lockForUpdate(tx).First(&stored, channel.Id).Error; err != nil {
+			return err
+		}
+		if updateStored != nil {
+			if err := updateStored(&stored); err != nil {
+				return err
+			}
+		}
+		channel.Key = stored.Key
+		channel.Keys = nil
+		channel.ChannelInfo = stored.ChannelInfo
+		channel.Status = stored.Status
+		channel.OtherInfo = stored.OtherInfo
 		channel.recalcMultiKeySize()
-		if err := tx.Model(channel).Updates(channel).Error; err != nil {
+		if err := tx.Model(channel).Omit("key", "channel_info", "status", "other_info").Updates(channel).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(channel).Updates(map[string]any{
+			"key":          channel.Key,
+			"channel_info": channel.ChannelInfo,
+			"status":       channel.Status,
+			"other_info":   channel.OtherInfo,
+		}).Error; err != nil {
 			return err
 		}
 		// Explicit NULL writes for fields the request cleared. Struct Updates
@@ -278,6 +306,11 @@ func UpdateChannelWithImageRevision(channel *Channel, nullColumns []string, buil
 		_, err = createChannelRevisionInTx(tx, *revision)
 		return err
 	})
+	if err != nil {
+		return err
+	}
+	BumpSyncTopic(SyncTopicChannels)
+	return nil
 }
 
 // BatchInsertChannelsWithImageRevision inserts every channel in the batch, its

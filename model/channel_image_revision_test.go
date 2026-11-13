@@ -188,6 +188,84 @@ func TestImageRevision_FreezesRuntimeProviderFields(t *testing.T) {
 	assert.Equal(t, paramAfter, snapNew.ParamOverride)
 }
 
+func TestUpdateChannelWithImageRevision_StaleEditKeepsRefreshedCredential(t *testing.T) {
+	truncateChannelRevisions(t)
+	channel := newImageChannelForTest(t, "stale-credential-edit")
+	require.NoError(t, InsertChannelWithImageRevision(&channel, imageRevisionBuilderForTest("v1")))
+	_, err := UpdateChannelLocked(channel.Id, func(stored *Channel) error {
+		stored.Key = "refreshed-credential"
+		stored.OtherInfo = `{"refresh_state":"current"}`
+		return nil
+	})
+	require.NoError(t, err)
+
+	channel.Name = "edited-name"
+	require.NoError(t, UpdateChannelWithImageRevision(&channel, nil, imageRevisionBuilderForTest("v1")))
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, "edited-name", stored.Name)
+	assert.Equal(t, "refreshed-credential", stored.Key)
+	assert.Equal(t, `{"refresh_state":"current"}`, stored.OtherInfo)
+	assert.Equal(t, int64(2), countRevisions(t, channel.Id))
+}
+
+func TestUpdateChannelWithImageRevisionLocked_RevisionFailureRollsBackKeyAndAbilities(t *testing.T) {
+	useScheduledChannelDatabase(t)
+	require.NoError(t, DB.AutoMigrate(&ChannelRevision{}))
+	t.Cleanup(func() { require.NoError(t, DB.Migrator().DropTable(&ChannelRevision{})) })
+	channel := newImageChannelForTest(t, "atomic-key-edit")
+	require.NoError(t, InsertChannelWithImageRevision(&channel, imageRevisionBuilderForTest("v1")))
+	before := channel
+	channel.Models = "replacement-model"
+
+	err := UpdateChannelWithImageRevisionLocked(&channel, nil, func(*Channel) (*ChannelRevisionCreate, error) {
+		return nil, errors.New("revision rejected")
+	}, func(stored *Channel) error {
+		stored.Key = "replacement-key"
+		return nil
+	})
+
+	require.EqualError(t, err, "revision rejected")
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, before.Key, stored.Key)
+	assert.Equal(t, before.Models, stored.Models)
+	var abilities []Ability
+	require.NoError(t, DB.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+	require.Len(t, abilities, 1)
+	assert.Equal(t, before.Models, abilities[0].Model)
+	assert.Equal(t, int64(1), countRevisions(t, channel.Id))
+}
+
+func TestUpdateChannelWithImageRevisionLocked_AppendUsesCurrentKeyAndKeepsStatus(t *testing.T) {
+	useScheduledChannelDatabase(t)
+	require.NoError(t, DB.AutoMigrate(&ChannelRevision{}))
+	t.Cleanup(func() { require.NoError(t, DB.Migrator().DropTable(&ChannelRevision{})) })
+	channel := newImageChannelForTest(t, "append-refreshed-key")
+	channel.ChannelInfo.IsMultiKey = true
+	channel.ChannelInfo.MultiKeySize = 1
+	require.NoError(t, InsertChannelWithImageRevision(&channel, imageRevisionBuilderForTest("v1")))
+	_, err := UpdateChannelLocked(channel.Id, func(stored *Channel) error {
+		stored.Key = "refreshed-key"
+		stored.ChannelInfo.MultiKeyStatusList = map[int]int{0: common.ChannelStatusManuallyDisabled}
+		return nil
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, UpdateChannelWithImageRevisionLocked(&channel, nil, imageRevisionBuilderForTest("v1"), func(stored *Channel) error {
+		stored.Key += "\nappended-key"
+		return nil
+	}))
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, "refreshed-key\nappended-key", stored.Key)
+	assert.Equal(t, 2, stored.ChannelInfo.MultiKeySize)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
+	assert.Equal(t, int64(2), countRevisions(t, channel.Id))
+}
+
 func TestBatchInsertChannelsWithImageRevision_AllSucceed(t *testing.T) {
 	truncateChannelRevisions(t)
 	cfg := `{"defaults":{"generation":"sync"}}`

@@ -64,5 +64,16 @@
       "suggestion": 0
     },
     "scope": "new-api 所有已发现钱包入口、直接路由及 Dashboard 引导入口"
+  },
+  {
+    "date": "2026-11-14",
+    "mode": "Health Dashboard",
+    "score": 94,
+    "findings": {
+      "critical": 0,
+      "warning": 5,
+      "suggestion": 0
+    },
+    "scope": "WIS-943 上游融合涉及模块的静态自审；基线迁移失败及未覆盖项见 Issue 验证报告"
   }
 ]

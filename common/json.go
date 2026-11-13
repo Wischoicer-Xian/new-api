@@ -2,11 +2,12 @@ package common
 
 import (
 	"bytes"
-	"encoding/json"
+	stdjson "encoding/json"
 	"errors"
 	"fmt"
 	"io"
 
+	"github.com/MoeForge/moego/json"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/gin-gonic/gin/binding"
 )
@@ -29,6 +30,10 @@ func (hostJSONCodec) Unmarshal(data []byte, v any) error {
 	return json.Unmarshal(data, v)
 }
 
+func (hostJSONCodec) UnmarshalNoCopy(data []byte, v any) error {
+	return json.UnmarshalNoCopy(data, v)
+}
+
 func (hostJSONCodec) Decode(r io.Reader, v any) error {
 	return json.NewDecoder(r).Decode(v)
 }
@@ -49,7 +54,7 @@ func Unmarshal(data []byte, v any) error {
 // It is intended for canonicalization and other paths where distinct large
 // integer values must remain distinguishable.
 func UnmarshalUseNumber(data []byte, v any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := stdjson.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	if err := decoder.Decode(v); err != nil {
 		return err
@@ -66,7 +71,7 @@ func UnmarshalUseNumber(data []byte, v any) error {
 // UnmarshalStrict rejects unknown object fields in addition to malformed JSON.
 // Map keys remain caller-defined and must be validated by the owning domain.
 func UnmarshalStrict(data []byte, v any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := stdjson.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(v); err != nil {
 		return err
@@ -80,12 +85,35 @@ func UnmarshalStrict(data []byte, v any) error {
 	return nil
 }
 
+// UnmarshalNoCopy borrows strings and raw JSON from data. Keep data and borrowed
+// raw JSON immutable while decoded values are in use.
+func UnmarshalNoCopy(data []byte, v any) error {
+	return kitutil.UnmarshalNoCopy(data, v)
+}
+
 func UnmarshalJsonStr(data string, v any) error {
 	return kitutil.UnmarshalJsonStr(data, v)
 }
 
 func DecodeJson(reader io.Reader, v any) error {
 	return kitutil.DecodeJson(reader, v)
+}
+
+// DecodeJsonBody reads one JSON value and requires EOF after trailing whitespace.
+// Seekable readers let the decoder process large values through a bounded window.
+func DecodeJsonBody(reader io.Reader, v any) error {
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return errors.New("multiple JSON values in request body")
+	}
+	return nil
 }
 
 // DecodeJsonWithValidation decodes JSON and applies Gin's configured binding-tag
@@ -151,12 +179,12 @@ func (e *DuplicateJSONKeyError) Error() string {
 // fails. The function does not validate field names or values against any
 // schema; it only guarantees structural uniqueness.
 func AssertJSONObjectNoDuplicateKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := stdjson.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
 	if err != nil {
 		return ErrJSONMalformed
 	}
-	open, ok := tok.(json.Delim)
+	open, ok := tok.(stdjson.Delim)
 	if !ok || open != '{' {
 		return ErrJSONObjectExpected
 	}
@@ -177,7 +205,7 @@ func AssertJSONObjectNoDuplicateKeys(data []byte) error {
 			return ErrJSONMalformed
 		}
 		top := stack[len(stack)-1]
-		if delim, isDelim := tok.(json.Delim); isDelim {
+		if delim, isDelim := tok.(stdjson.Delim); isDelim {
 			switch delim {
 			case '{', '[':
 				scope := &keyScope{isObject: delim == '{'}

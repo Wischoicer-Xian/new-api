@@ -49,6 +49,7 @@ func LegacyPollingPlatformValues() []string {
 		strconv.Itoa(ChannelTypeOpenAI),
 		strconv.Itoa(ChannelTypeGemini),
 		strconv.Itoa(ChannelTypeMiniMax),
+		strconv.Itoa(ChannelTypeTaskPlugin),
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/pricing"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/gin-gonic/gin"
@@ -104,7 +104,7 @@ func ComputePreflightQuote(c *gin.Context, userId int, in QuoteInput) *QuoteResu
 	info.BillingRequestInput = &reqInput
 
 	// ModelPriceHelper 只读（仅改内存 info.PriceData；channel-test.go:300 同样无副作用调用）。
-	priceData, err := helper.ModelPriceHelper(c, info, 0, imageReq.GetTokenCountMeta())
+	priceData, err := pricing.ModelPriceHelper(c, info, 0, imageReq.GetTokenCountMeta())
 	if err != nil {
 		// 模型未配价格/比例 → fail-closed on pricing（配置缺失，非余额不足）。
 		res.Reason = "model_price_not_configured"

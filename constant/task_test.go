@@ -45,7 +45,7 @@ func TestLegacyPollingPlatformAllowlist(t *testing.T) {
 	}
 
 	mustInclude := []TaskPlatform{TaskPlatformSuno}
-	for _, ct := range []int{ChannelTypeAli, ChannelTypeKling, ChannelTypeMiniMax} {
+	for _, ct := range []int{ChannelTypeAli, ChannelTypeKling, ChannelTypeMiniMax, ChannelTypeTaskPlugin} {
 		mustInclude = append(mustInclude, TaskPlatform(strconv.Itoa(ct)))
 	}
 	for _, p := range mustInclude {
