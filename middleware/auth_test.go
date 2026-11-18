@@ -390,7 +390,7 @@ func TestTokenAuthRejectsKeysOfDeletedUser(t *testing.T) {
 			if redisEnabled {
 				useRateLimitMiniRedis(t)
 			}
-			require.NoError(t, model.DB.AutoMigrate(&model.Token{}))
+			require.NoError(t, model.DB.AutoMigrate(&model.Token{}, &model.WischoicerRechargeCredit{}))
 			t.Setenv("LOG_SQL_DSN", "")
 			// Shares the main database and initializes its quoted column names,
 			// which the API key lookup needs.
