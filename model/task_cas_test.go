@@ -174,7 +174,13 @@ func TestUnfinishedTaskQueriesDatabaseMatrix(t *testing.T) {
 			for _, status := range []TaskStatus{TaskStatusNotStart, TaskStatusSubmitted, TaskStatusQueued, TaskStatusInProgress, TaskStatusSuccess, TaskStatusFailure} {
 				for _, progress := range []string{"99%", "100%"} {
 					t.Run(string(status)+"/"+progress, func(t *testing.T) {
-						task := &Task{TaskID: "query_candidate", Status: status, Progress: progress, SubmitTime: cutoff - 1}
+						task := &Task{
+							TaskID:     "query_candidate",
+							Platform:   constant.TaskPlatformSuno,
+							Status:     status,
+							Progress:   progress,
+							SubmitTime: cutoff - 1,
+						}
 						insertTask(t, task)
 						t.Cleanup(func() { assert.NoError(t, db.Delete(task).Error) })
 						unfinished := status != TaskStatusSuccess && status != TaskStatusFailure
