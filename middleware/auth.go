@@ -529,6 +529,10 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 }
 
 func TokenAuth() func(c *gin.Context) {
+	return tokenAuthWithSystemGroupGrant(configuredSystemTokenGroupGrant())
+}
+
+func tokenAuthWithSystemGroupGrant(grant systemTokenGroupGrant) func(c *gin.Context) {
 	return func(c *gin.Context) {
 		// 先检测是否为ws
 		applyWebSocketSubprotocolAuthorization(c.Request.Header)
@@ -625,8 +629,7 @@ func TokenAuth() func(c *gin.Context) {
 		userGroup := userCache.Group
 		tokenGroup := token.Group
 		if tokenGroup != "" {
-			// check common.UserUsableGroups[userGroup]
-			if _, ok := service.GetUserUsableGroups(userGroup)[tokenGroup]; !ok {
+			if !service.GroupInUserUsableGroups(userGroup, tokenGroup) && !grant.matches(token, userGroup) {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenGroupForbidden, map[string]any{"Group": tokenGroup}))
 				return
 			}
