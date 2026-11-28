@@ -21,6 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { FormProvider, useForm } from 'react-hook-form'
 import { afterEach, expect, test } from 'vitest'
 
+import { CHANNEL_TYPE_TASK_PLUGIN } from '../../../constants'
 import type { PluginRelayRoute } from '../../api'
 import {
   CHANNEL_FORM_DEFAULT_VALUES,
@@ -54,7 +55,7 @@ function Harness(props: {
   form = useForm<ChannelFormValues>({
     defaultValues: {
       ...CHANNEL_FORM_DEFAULT_VALUES,
-      type: 61,
+      type: CHANNEL_TYPE_TASK_PLUGIN,
       task_plugin_key: 'vendor-x',
       plugin_routes: props.toggles ?? {},
     },
