@@ -4597,6 +4597,7 @@
     "OpenAI only": "Chỉ OpenAI",
     "OpenAI Organization": "Tổ chức OpenAI",
     "OpenAI Organization ID (optional)": "ID Tổ chức OpenAI (tùy chọn)",
+    "OpenAI Responses to Anthropic Messages": "OpenAI Responses sang Anthropic Messages",
     "OpenAI Responses to Gemini Generate Content": "OpenAI Responses sang Gemini Generate Content",
     "OpenAI Responses to OpenAI Chat": "OpenAI Responses sang OpenAI Chat",
     "OpenAI, Anthropic, etc.": "OpenAI, Anthropic, v.v.",
@@ -7857,6 +7858,8 @@
     "Payment time": "Payment time",
     "Valid until": "Valid until",
     "By clicking sign in, you agree to our": "Bằng cách nhấp đăng nhập, bạn đồng ý với",
-    "By creating an account, you agree to our": "Bằng cách tạo tài khoản, bạn đồng ý với"
+    "By creating an account, you agree to our": "Bằng cách tạo tài khoản, bạn đồng ý với",
+    "Plugin routes": "Tuyến của plugin",
+    "{{on}} of {{total}} on": "Đã bật {{on}}/{{total}}"
   }
 }

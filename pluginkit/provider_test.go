@@ -1,4 +1,4 @@
-package jsplugin
+package pluginkit
 
 import (
 	"context"
@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/QuantumNous/new-api/common"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -205,8 +203,10 @@ func TestRelayConfigAcceptsAdvancedCustomConverters(t *testing.T) {
 	plugin := compileProviderPlugin(t, `[
 		{incoming_path: "/v1/chat/completions", upstream_path: "/{model}/generate", converter: "openai_chat_completions_to_openai_responses", models: ["re:^a-"], auth: {type: "header", name: "X-Key", value: "{api_key}"}},
 		{incoming_path: "/v1/chat/completions", upstream_path: "/other"},
+		{incoming_path: "/v1/responses", upstream_path: "/v1/messages", converter: "openai_responses_to_claude_messages"},
 		{incoming_path: "/v1/models", upstream_path: "/v1/models"}
 	]`, "")
+	require.NoError(t, plugin.Meta.RelayConfig().Validate())
 
 	route, ok := plugin.Meta.RelayRoute("/v1/chat/completions", "a-1")
 	require.True(t, ok)
@@ -214,6 +214,9 @@ func TestRelayConfigAcceptsAdvancedCustomConverters(t *testing.T) {
 	route, ok = plugin.Meta.RelayRoute("/v1/chat/completions", "b-1")
 	require.True(t, ok)
 	assert.Equal(t, "/other", route.UpstreamPath)
+	route, ok = plugin.Meta.RelayRoute("/v1/responses", "claude-1")
+	require.True(t, ok)
+	assert.Equal(t, "openai_responses_to_claude_messages", route.Converter)
 	_, ok = plugin.Meta.RelayRoute("/v1/embeddings", "a-1")
 	assert.False(t, ok)
 }
@@ -1161,7 +1164,7 @@ func TestSamplesLoadAsWritten(t *testing.T) {
 		{name: {en: "Any", zh: "任意"}, format: "gemini", body: {contents: [{parts: [{text: "hi"}]}]}}
 	]`), Options{})
 	require.NoError(t, err)
-	encoded, err := common.Marshal(plugin.Meta.Samples)
+	encoded, err := marshalJSON(plugin.Meta.Samples)
 	require.NoError(t, err)
 	assert.JSONEq(t, `[
 		{"name":{"en":"Plain chat"},"lang":"en","format":"openai","body":{"model":"gpt","messages":[{"role":"user","content":[{"type":"text","text":"What is this?"},"[sample-image]"]}]},"reply":"A cat"},

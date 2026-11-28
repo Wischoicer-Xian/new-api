@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/QuantumNous/new-api/docs/plugin-api/v1.schema.json",
+  "$id": "https://github.com/QuantumNous/new-api/pluginkit/v1.schema.json",
   "title": "new-api Task Plugin v1 manifest",
   "type": "object",
   "additionalProperties": false,
@@ -172,7 +172,7 @@
       "properties": {
         "incoming_path": {"type": "string", "pattern": "^/"},
         "upstream_path": {"type": "string", "minLength": 1},
-        "converter": {"enum": ["none", "openai_chat_completions_to_anthropic_messages", "openai_chat_completions_to_openai_responses", "openai_chat_completions_to_gemini_generate_content", "openai_responses_to_openai_chat_completions", "openai_responses_to_gemini_generate_content", "anthropic_messages_to_openai_chat_completions", "claude_messages_to_openai_responses", "gemini_generate_content_to_openai_chat_completions", "gemini_generate_content_to_openai_responses", "jina_rerank_to_sglang", "plugin", "openai_chat_completions_to_anthropic_messages+plugin", "openai_chat_completions_to_openai_responses+plugin", "openai_chat_completions_to_gemini_generate_content+plugin", "openai_responses_to_openai_chat_completions+plugin", "openai_responses_to_gemini_generate_content+plugin", "anthropic_messages_to_openai_chat_completions+plugin", "claude_messages_to_openai_responses+plugin", "gemini_generate_content_to_openai_chat_completions+plugin", "gemini_generate_content_to_openai_responses+plugin", "jina_rerank_to_sglang+plugin"], "description": "none (default), a relaykit converter ID, plugin for the plugin's convert hooks, or <converter>+plugin for that converter's upstream protocol converted by the hooks. See Relay routes in v1.md for the incoming_path each converter accepts."},
+        "converter": {"enum": ["none", "openai_chat_completions_to_anthropic_messages", "openai_chat_completions_to_openai_responses", "openai_chat_completions_to_gemini_generate_content", "openai_responses_to_openai_chat_completions", "openai_responses_to_gemini_generate_content", "openai_responses_to_claude_messages", "anthropic_messages_to_openai_chat_completions", "claude_messages_to_openai_responses", "gemini_generate_content_to_openai_chat_completions", "gemini_generate_content_to_openai_responses", "jina_rerank_to_sglang", "plugin", "openai_chat_completions_to_anthropic_messages+plugin", "openai_chat_completions_to_openai_responses+plugin", "openai_chat_completions_to_gemini_generate_content+plugin", "openai_responses_to_openai_chat_completions+plugin", "openai_responses_to_gemini_generate_content+plugin", "openai_responses_to_claude_messages+plugin", "anthropic_messages_to_openai_chat_completions+plugin", "claude_messages_to_openai_responses+plugin", "gemini_generate_content_to_openai_chat_completions+plugin", "gemini_generate_content_to_openai_responses+plugin", "jina_rerank_to_sglang+plugin"], "description": "none (default), a relaykit converter ID, plugin for the plugin's convert hooks, or <converter>+plugin for that converter's upstream protocol converted by the hooks. See Relay routes in v1.md for the incoming_path each converter accepts."},
         "models": {"type": "array", "items": {"type": "string"}},
         "auth": {
           "type": "object",
@@ -180,9 +180,10 @@
           "required": ["type"],
           "properties": {"type": {"enum": ["none", "header", "query"]}, "name": {"type": "string"}, "value": {"type": "string"}}
         },
-        "pass_through_body_enabled": {"type": "boolean"}
+        "pass_through_body_enabled": {"type": "boolean"},
+        "default_enabled": {"type": "boolean", "default": true, "description": "Whether a channel serves the route before an administrator switches it on the channel. Not false on /v1/models or /v1/dashboard/billing/credit_grants."}
       },
-      "description": "The keys of an Advanced Custom channel route; the host applies the same validation rules."
+      "description": "The keys of an Advanced Custom channel route, plus default_enabled; the host applies the same validation rules."
     },
     "upstreamKind": {"enum": ["vendor", "new_api"]},
     "upstreamContext": {

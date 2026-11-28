@@ -4597,6 +4597,7 @@
     "OpenAI only": "僅 OpenAI",
     "OpenAI Organization": "OpenAI 組織",
     "OpenAI Organization ID (optional)": "OpenAI 組織 ID（可選）",
+    "OpenAI Responses to Anthropic Messages": "OpenAI Responses 轉 Anthropic Messages",
     "OpenAI Responses to Gemini Generate Content": "OpenAI Responses 轉 Gemini Generate Content",
     "OpenAI Responses to OpenAI Chat": "OpenAI Responses 到 OpenAI Chat",
     "OpenAI, Anthropic, etc.": "OpenAI、Anthropic 等",
@@ -7857,6 +7858,8 @@
     "Payment time": "付款時間",
     "Valid until": "有效期限",
     "By clicking sign in, you agree to our": "點擊登入即表示您同意我們的",
-    "By creating an account, you agree to our": "建立帳戶即表示您同意我們的"
+    "By creating an account, you agree to our": "建立帳戶即表示您同意我們的",
+    "Plugin routes": "外掛路由",
+    "{{on}} of {{total}} on": "已開啟 {{on}}/{{total}}"
   }
 }

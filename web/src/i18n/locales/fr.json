@@ -4597,6 +4597,7 @@
     "OpenAI only": "OpenAI uniquement",
     "OpenAI Organization": "Organisation OpenAI",
     "OpenAI Organization ID (optional)": "Identifiant d'organisation OpenAI (optionnel)",
+    "OpenAI Responses to Anthropic Messages": "OpenAI Responses vers Anthropic Messages",
     "OpenAI Responses to Gemini Generate Content": "OpenAI Responses vers Gemini Generate Content",
     "OpenAI Responses to OpenAI Chat": "OpenAI Responses vers OpenAI Chat",
     "OpenAI, Anthropic, etc.": "OpenAI, Anthropic, etc.",
@@ -7857,6 +7858,8 @@
     "Payment time": "Payment time",
     "Valid until": "Valid until",
     "By clicking sign in, you agree to our": "En cliquant sur se connecter, vous acceptez nos",
-    "By creating an account, you agree to our": "En créant un compte, vous acceptez nos"
+    "By creating an account, you agree to our": "En créant un compte, vous acceptez nos",
+    "Plugin routes": "Routes du plugin",
+    "{{on}} of {{total}} on": "{{on}} sur {{total}} activées"
   }
 }
