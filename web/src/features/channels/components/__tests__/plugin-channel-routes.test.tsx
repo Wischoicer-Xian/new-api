@@ -21,7 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { FormProvider, useForm } from 'react-hook-form'
 import { afterEach, expect, test } from 'vitest'
 
-import { CHANNEL_TYPE_TASK_PLUGIN } from '../../../constants'
+import { CHANNEL_TYPE_TASK_PLUGIN } from '../../constants'
 import type { PluginRelayRoute } from '../../api'
 import {
   CHANNEL_FORM_DEFAULT_VALUES,
