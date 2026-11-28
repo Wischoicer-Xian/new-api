@@ -21,11 +21,14 @@ var SchemaV1 []byte
 var TypesV1 []byte
 
 // New API channel types a plugin may not declare in meta.channelTypes: a
-// type-61 channel binds a plugin by key, and a type-60 New API channel
-// extends with plugins through its own setting.
+// task-plugin channel binds a plugin by key, and a type-60 New API channel
+// extends with plugins through its own setting. The fork keeps the
+// ApiNebula async image provider on 61 and moved the task-plugin channel to
+// 62, so this copy follows constant.ChannelTypeTaskPlugin instead of the
+// upstream number.
 const (
 	ChannelTypeNewAPI     = 60
-	ChannelTypeTaskPlugin = 61
+	ChannelTypeTaskPlugin = 62
 )
 
 // MaxPluginKeyLength is the longest plugin key, in bytes.
